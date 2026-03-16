@@ -17,6 +17,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Create virtualenv
+        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
       - name: Install tools
         run: pip install black ruff isort
 

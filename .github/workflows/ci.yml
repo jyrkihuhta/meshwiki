@@ -19,6 +19,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Create virtualenv
+        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
       - name: Build graph_core
         run: |
           pip install maturin
@@ -44,6 +47,9 @@ jobs:
           python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Create virtualenv
+        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
 
       - name: Build graph_core
         run: |
