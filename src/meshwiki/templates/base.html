@@ -31,6 +31,11 @@
                 <a href="/graph">Graph</a>
                 <a href="/page/Home/edit">New Page</a>
                 <button type="button" id="theme-toggle" class="btn btn-theme" aria-label="Toggle dark mode">Dark</button>
+                {% if request.session.get("authenticated") %}
+                <form method="post" action="/logout" style="display:inline">
+                    <button type="submit" class="btn btn-theme">Logout</button>
+                </form>
+                {% endif %}
             </nav>
         </header>
 
@@ -122,6 +127,7 @@
         });
     })();
     </script>
+    <script src="/static/js/metatable.js"></script>
     {% block extra_scripts %}{% endblock %}
 </body>
 </html>

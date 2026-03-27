@@ -48,10 +48,11 @@ src/meshwiki/          # Python application
   static/css/           # CSS
   static/js/graph.js    # D3.js graph visualization
   static/js/editor.js   # Editor toolbar, shortcuts, autocomplete, preview toggle
-  tests/                # Tests (204 tests)
+  tests/                # Unit tests (200 tests)
+  e2e/                  # Playwright E2E browser tests (49 tests)
 
 Dockerfile              # Multi-stage build (Rust + Python)
-.github/workflows/      # CI (ci.yml), lint (lint.yml), stale issues (stale.yml)
+.github/workflows/      # CI (ci.yml), lint (lint.yml), stale (stale.yml), dependabot auto-merge
 .github/ISSUE_TEMPLATE/ # Bug report + feature request templates
 .github/pull_request_template.md
 .github/dependabot.yml  # Dependency update config (pip, cargo, actions)
@@ -255,13 +256,16 @@ Before committing:
 17. **Toast two-path approach** - Redirect flows use `?toast=saved`/`?toast=deleted` query params (JS reads and removes). HTMX flows use `HX-Trigger` response header with `showToast` event.
 18. **highlight.js re-highlight on HTMX swap** - After HTMX content swaps (editor preview), code blocks must be re-highlighted via `htmx:afterSwap` event listener calling `hljs.highlightElement()`.
 19. **Page list uses all_pages not pages** - The index route passes `all_pages` (list of `Page` objects from `list_pages_with_metadata()`) to the template for the metadata table. The old `pages` (list of names) is no longer used.
-20. **timeago filter** - Custom Jinja2 filter registered on `templates.env.filters["timeago"]` for relative date display.
+20. **timeago filter** - Custom Jinja2 filter registered on `templates.env.filters["timeago"]` for relative date display. Handles both naive and timezone-aware datetimes.
+21. **E2E fixture scoping** - `base_url` and `data_dir` fixtures in `e2e/conftest.py` must be `scope="session"` to work with pytest-playwright's session-scoped browser fixtures. Function-scoped `clean_wiki` must access `e2e_server` dict directly (not the session-scoped `data_dir` fixture).
+22. **Playwright fill() doesn't trigger keyup** - HTMX triggers like `hx-trigger="keyup changed delay:300ms"` won't fire from Playwright `fill()`. Use `dispatch_event("keyup")` or `type()` after filling to trigger HTMX requests in E2E tests.
+23. **Dependabot auto-merge** - `.github/workflows/dependabot-auto-merge.yml` auto-merges non-major Dependabot PRs via `gh pr merge --auto --squash`.
 
 ## Completed Milestones (1–9)
 
 Milestones 1–9 cover infrastructure, wiki MVP, Rust graph engine, editor experience, navigation/discovery, and visual polish. All complete.
 
-**274 total tests passing** (70 graph-core + 204 Python), CI pipeline active.
+**319 total tests passing** (70 graph-core + 200 Python unit + 49 Playwright E2E), CI pipeline active.
 
 **See:** `docs/domains/graph-engine.md` for Rust engine design.
 

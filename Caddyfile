@@ -1,0 +1,3 @@
+wiki.penni.fi {
+    reverse_proxy meshwiki:8000
+}

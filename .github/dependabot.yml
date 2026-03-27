@@ -8,6 +8,11 @@ updates:
     labels:
       - dependencies
       - python
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: cargo
     directory: /graph-core
@@ -17,6 +22,11 @@ updates:
     labels:
       - dependencies
       - rust
+    groups:
+      rust-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -26,3 +36,7 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      actions:
+        patterns:
+          - "*"

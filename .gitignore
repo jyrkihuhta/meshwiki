@@ -40,3 +40,6 @@ tmp/
 
 # Wiki data (keep structure, ignore content)
 data/pages/*.md
+
+# Local plans (not for version control)
+docs/prd/003-agent-factory.md

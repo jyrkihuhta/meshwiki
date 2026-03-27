@@ -1,6 +1,7 @@
 """Markdown parser with wiki link support."""
 
 import re
+from html import escape as html_escape
 from typing import Callable
 from xml.etree.ElementTree import Element
 
@@ -173,18 +174,27 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
         # Skip completely empty rows
         if all(not row.get(col) for col in result.columns):
             continue
+        escaped_page = html_escape(row.page_name, quote=True)
         lines.append("<tr>")
         for col in result.columns:
+            escaped_col = html_escape(col, quote=True)
             values = row.get(col)
             if col == "name" and values:
                 page_name = values[0]
                 url_name = page_name.replace(" ", "_")
                 cell = f'<a href="/page/{url_name}" class="wiki-link">{page_name}</a>'
+                lines.append(
+                    f'<td data-page="{escaped_page}" data-field="{escaped_col}">{cell}</td>'
+                )
             elif values:
                 cell = ", ".join(values)
+                lines.append(
+                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true">{cell}</td>'
+                )
             else:
-                cell = ""
-            lines.append(f"<td>{cell}</td>")
+                lines.append(
+                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true"></td>'
+                )
         lines.append("</tr>")
 
     lines.append("</tbody></table>")

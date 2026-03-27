@@ -115,12 +115,23 @@ Visit `/graph` for an interactive force-directed graph of all pages and their li
 ## Running Tests
 
 ```bash
-# Python tests (204 tests)
+# Install dev dependencies
 cd src
 pip install -e ".[dev]"
+
+# Unit tests (200 tests)
 pytest tests/ -v
 pytest tests/ --cov=meshwiki    # With coverage
 
+# E2E browser tests (49 tests, requires Playwright)
+playwright install chromium      # First time only
+pytest e2e/ -v --browser chromium
+
+# All Python tests together
+pytest tests/ e2e/ -v --browser chromium
+```
+
+```bash
 # Rust graph engine tests (70 tests)
 cd graph-core
 source .venv/bin/activate
@@ -128,7 +139,7 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
 python -m pytest tests/ -v
 ```
 
-**274 total tests** across both test suites. CI runs automatically via GitHub Actions.
+**319 total tests** across all suites. CI runs automatically via GitHub Actions.
 
 ## Project Structure
 
@@ -236,7 +247,7 @@ Access at **http://wiki.localhost:8080** (requires `/etc/hosts` entry).
 | 10–11 | Graph Enhancements, Macros | Planned |
 | 12–13 | Authentication, Observability | Planned |
 
-**274 tests**, CI active. See [TODO.md](TODO.md) for the full roadmap.
+**319 tests** (200 unit + 49 E2E + 70 Rust), CI active. See [TODO.md](TODO.md) for the full roadmap.
 
 ## License
 

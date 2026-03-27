@@ -62,6 +62,22 @@ class Storage(ABC):
         """Filter pages by tag."""
         ...
 
+    @abstractmethod
+    async def update_frontmatter_field(
+        self, name: str, field: str, value: str
+    ) -> Page | None:
+        """Update a single frontmatter field on a page.
+
+        Args:
+            name: Page name.
+            field: Frontmatter field name to update.
+            value: New value. For tags, pass comma-separated values.
+
+        Returns:
+            Updated Page, or None if page not found.
+        """
+        ...
+
 
 class FileStorage(Storage):
     """File-based storage implementation.
@@ -258,3 +274,41 @@ class FileStorage(Storage):
                     Page(name=name, content=body, metadata=metadata, exists=True)
                 )
         return sorted(results, key=lambda p: p.name.lower())
+
+    async def update_frontmatter_field(
+        self, name: str, field: str, value: str
+    ) -> Page | None:
+        """Update a single frontmatter field on a page."""
+        path = self._get_path(name)
+        if not path.exists():
+            return None
+
+        raw = path.read_text(encoding="utf-8")
+        metadata, body = self._parse_frontmatter(raw)
+
+        # Update the specific field
+        if field == "tags":
+            metadata.tags = [t.strip() for t in value.split(",") if t.strip()]
+        elif field == "title":
+            metadata.title = value if value else None
+        elif value:
+            setattr(metadata, field, value)
+        else:
+            # Empty value: remove extra field if it exists
+            extras = getattr(metadata, "__pydantic_extra__", None)
+            if extras and field in extras:
+                del extras[field]
+
+        # Update modification time
+        metadata.modified = datetime.now()
+
+        # Write back
+        frontmatter = self._create_frontmatter(metadata)
+        path.write_text(frontmatter + body, encoding="utf-8")
+
+        return Page(
+            name=name,
+            content=body,
+            metadata=metadata,
+            exists=True,
+        )

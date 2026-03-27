@@ -1,0 +1,37 @@
+services:
+  meshwiki:
+    image: ghcr.io/jyrkihuhta/meshwiki:${MESHWIKI_VERSION:-latest}
+    restart: unless-stopped
+    volumes:
+      - /opt/meshwiki/data/pages:/data/pages
+    env_file: /opt/meshwiki/.env
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /opt/meshwiki/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - meshwiki
+
+volumes:
+  caddy_data:
+  caddy_config:

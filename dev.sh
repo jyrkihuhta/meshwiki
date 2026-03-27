@@ -52,14 +52,14 @@ if [ "$SKIP_BUILD" = false ]; then
     fi
 
     # Ensure maturin is available
-    if ! command -v maturin &>/dev/null; then
+    if ! python3 -m maturin --version &>/dev/null 2>&1; then
         echo "==> Installing maturin..."
         pip install maturin
     fi
 
     # Build graph_core with maturin
     cd "$GRAPH_CORE_DIR"
-    PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop 2>&1
+    PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 python3 -m maturin develop 2>&1
     echo "==> Rust graph engine built successfully"
     cd "$ROOT_DIR"
 fi

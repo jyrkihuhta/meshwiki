@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in — {{ app_title }}</title>
+    <script>(function(){var t=localStorage.getItem('meshwiki-theme');if(t)document.documentElement.setAttribute('data-theme',t);})()</script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="login-box">
+            <h1 class="login-title">{{ app_title }}</h1>
+            {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
+            <form method="post" action="/login" class="login-form">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" autofocus required>
+                <button type="submit" class="btn">Sign in</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

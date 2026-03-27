@@ -21,7 +21,7 @@ jobs:
         run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
 
       - name: Install tools
-        run: pip install black ruff isort
+        run: pip install black==26.3.1 ruff==0.15.8 isort==8.0.1
 
       - name: Check formatting (black)
         run: black --check src/

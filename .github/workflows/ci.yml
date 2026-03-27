@@ -62,11 +62,130 @@ jobs:
           cd graph-core
           pytest tests/ -v
 
-  docker-build:
-    name: Docker build
+  publish:
+    name: Build & publish Docker image
     runs-on: ubuntu-latest
+    needs: [test-python, test-rust]
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build Docker image
-        run: docker build -t meshwiki:ci .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: >
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          (success() || failure())
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: [publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy config files to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          scp docker-compose.prod.yml "${VPS_USER}@${VPS_HOST}:/opt/meshwiki/docker-compose.yml"
+          scp Caddyfile "${VPS_USER}@${VPS_HOST}:/opt/meshwiki/Caddyfile"
+
+      - name: Deploy and health check
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          NEW_VERSION="sha-${DEPLOY_SHA:0:7}"
+          ssh "${VPS_USER}@${VPS_HOST}" << ENDDEPLOY
+          set -euo pipefail
+          cd /opt/meshwiki
+          PREV_VERSION=\$(cat .current_version 2>/dev/null || echo latest)
+          echo "Deploying ${NEW_VERSION} (was: \${PREV_VERSION})"
+
+          MESHWIKI_VERSION="${NEW_VERSION}" docker compose pull
+          MESHWIKI_VERSION="${NEW_VERSION}" docker compose up -d
+
+          CONTAINER=\$(docker compose ps -q meshwiki 2>/dev/null | head -1)
+          for i in \$(seq 1 30); do
+            STATUS=\$(docker inspect --format='{{.State.Health.Status}}' "\${CONTAINER}" 2>/dev/null || echo unknown)
+            echo "  Attempt \${i}/30: \${STATUS}"
+            if [ "\${STATUS}" = "healthy" ]; then
+              echo "${NEW_VERSION}" > .current_version
+              echo "Deploy successful: ${NEW_VERSION}"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "ERROR: Container did not become healthy. Rolling back to \${PREV_VERSION}"
+          MESHWIKI_VERSION="\${PREV_VERSION}" docker compose up -d
+          exit 1
+          ENDDEPLOY
+
+      - name: Smoke tests
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          curl -sf "http://${VPS_HOST}/health/live" > /dev/null
+          echo "Smoke tests passed"

@@ -21,20 +21,20 @@
 }
 
 [data-theme="dark"] {
-    --color-bg: #1a1a2e;
-    --color-bg-secondary: #16213e;
-    --color-text: #e0e0e0;
-    --color-text-muted: #a0a0a0;
-    --color-primary: #4c8bf5;
-    --color-primary-hover: #6ba1ff;
-    --color-link: #4c8bf5;
-    --color-link-missing: #ef4444;
-    --color-border: #2a2a4a;
+    --color-bg: #1e1e1e;
+    --color-bg-secondary: #2d2d2d;
+    --color-text: #e4e4e7;
+    --color-text-muted: #a1a1aa;
+    --color-primary: #2dd4bf;
+    --color-primary-hover: #5eead4;
+    --color-link: #2dd4bf;
+    --color-link-missing: #f87171;
+    --color-border: #3f3f46;
     --color-danger: #ef4444;
     --color-danger-hover: #dc2626;
     --color-success-bg: #064e3b;
     --color-success-text: #6ee7b7;
-    --color-shadow: rgba(0, 0, 0, 0.3);
+    --color-shadow: rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -281,10 +281,15 @@ body {
     float: right;
     width: 240px;
     margin: 0 0 1rem 1.5rem;
-    border: 1px solid var(--color-border);
+    border: 1px solid #c7d2d0;
     border-radius: 8px;
     font-size: 0.8125rem;
-    background: var(--color-bg);
+    background: #f0f7f6;
+}
+
+[data-theme="dark"] .frontmatter-card {
+    background: #1a2e2b;
+    border-color: #2a4a45;
 }
 
 .frontmatter-card-header {
@@ -294,10 +299,15 @@ body {
     letter-spacing: 0.05em;
     color: var(--color-text-muted);
     padding: 0.5rem 0.75rem;
-    background: var(--color-bg-secondary);
-    border-bottom: 1px solid var(--color-border);
+    background: #e2edeb;
+    border-bottom: 1px solid #c7d2d0;
     border-radius: 8px 8px 0 0;
     margin: 0;
+}
+
+[data-theme="dark"] .frontmatter-card-header {
+    background: #1f3733;
+    border-bottom-color: #2a4a45;
 }
 
 .frontmatter-dl {
@@ -556,6 +566,35 @@ body {
     color: var(--color-text-muted);
     font-style: italic;
     padding: 0.5rem 0;
+}
+
+/* MetaTable Inline Editing */
+.metatable tbody td[data-editable]:hover {
+    outline: 2px dashed var(--color-primary);
+    outline-offset: -2px;
+    cursor: pointer;
+}
+
+.metatable-editing {
+    padding: 0 !important;
+}
+
+.metatable-edit-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 2px solid var(--color-primary);
+    border-radius: 0;
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    background: var(--color-bg);
+    color: var(--color-text);
+    box-sizing: border-box;
+    outline: none;
+}
+
+.metatable-edit-input:focus {
+    border-color: var(--color-primary-hover);
+    box-shadow: 0 0 0 1px var(--color-primary-hover);
 }
 
 /* Graph Visualization */
@@ -1436,4 +1475,74 @@ body {
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+}
+
+/* Login page */
+.login-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-bg);
+}
+
+.login-box {
+    width: 100%;
+    max-width: 360px;
+    padding: 2rem;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px var(--color-shadow);
+}
+
+.login-title {
+    font-size: 1.5rem;
+    margin-bottom: 1.5rem;
+    text-align: center;
+    color: var(--color-text);
+}
+
+.login-error {
+    background: #fef2f2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+}
+
+[data-theme="dark"] .login-error {
+    background: #450a0a;
+    color: #fca5a5;
+    border-color: #7f1d1d;
+}
+
+.login-form label {
+    display: block;
+    margin-bottom: 0.375rem;
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+}
+
+.login-form input[type="password"] {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 1rem;
+}
+
+.login-form input[type="password"]:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.login-form .btn {
+    width: 100%;
 }

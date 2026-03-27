@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     debug: bool = False
     app_title: str = "MeshWiki"
     graph_watch: bool = True
+    auth_enabled: bool = False
+    auth_password: str = ""
+    session_secret: str = "dev-secret-change-in-production"
 
     model_config = SettingsConfigDict(
         env_prefix="MESHWIKI_",

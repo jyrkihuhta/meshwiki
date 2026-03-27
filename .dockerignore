@@ -1,11 +1,51 @@
-.git
+# Version control
+.git/
+.gitignore
+
+# CI/CD, docs, and repo metadata
+.github/
+docs/
+CLAUDE.md
+README.md
+CONTRIBUTING.md
+TODO.md
+*.md
+
+# Infrastructure & deployment
 infra/
 deploy/
-docs/
-*.md
-__pycache__
-.pytest_cache
-graph-core/target
+scripts/
+
+# Rust build artifacts
+graph-core/target/
+
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.coverage
+**/*.egg-info/
+**/dist/
+**/build/
+**/.venv/
+**/venv/
+
+# Test files (not needed in image)
 src/tests/
+src/e2e/
+
+# Wiki data (mounted at runtime)
 src/data/
+
+# IDE, OS, and local dev
+.idea/
+.vscode/
 .claude/
+**/*.swp
+**/*.swo
+.DS_Store
+Thumbs.db
+.local/
+tmp/
