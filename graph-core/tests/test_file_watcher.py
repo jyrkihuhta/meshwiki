@@ -83,7 +83,7 @@ class TestFileCreation:
         """Test that creating a file generates PageCreated event."""
         engine = GraphEngine(temp_wiki_dir)
         engine.rebuild()
-        engine.start_watching()
+        start_watching_and_wait(engine)
 
         try:
             # Create a new file
@@ -91,10 +91,7 @@ class TestFileCreation:
             with open(new_file, "w") as f:
                 f.write("# New Page\n\nContent here.\n")
 
-            # Wait for debounce + processing
-            time.sleep(1.0)
-
-            events = engine.poll_events()
+            events = wait_for_events(engine)
 
             # Should have a PageCreated event
             created_events = [e for e in events if e.event_type() == "page_created"]
@@ -136,7 +133,7 @@ class TestFileModification:
         """Test that modifying a file generates PageUpdated event."""
         engine = GraphEngine(temp_wiki_dir)
         engine.rebuild()
-        engine.start_watching()
+        start_watching_and_wait(engine)
 
         try:
             # Modify HomePage.md
@@ -144,9 +141,7 @@ class TestFileModification:
             with open(home_file, "w") as f:
                 f.write("# Home Modified\n\nNew content [[Contact]].\n")
 
-            time.sleep(1.0)
-
-            events = engine.poll_events()
+            events = wait_for_events(engine)
 
             # Should have PageUpdated
             update_events = [e for e in events if e.event_type() == "page_updated"]
@@ -159,7 +154,7 @@ class TestFileModification:
         """Test that changing links generates link events."""
         engine = GraphEngine(temp_wiki_dir)
         engine.rebuild()
-        engine.start_watching()
+        start_watching_and_wait(engine)
 
         try:
             # Original links to About, change to link to Contact
@@ -167,9 +162,7 @@ class TestFileModification:
             with open(home_file, "w") as f:
                 f.write("# Home\n\nNow links to [[Contact]] only.\n")
 
-            time.sleep(1.0)
-
-            events = engine.poll_events()
+            events = wait_for_events(engine)
 
             # Should have link_removed (About) and link_created (Contact)
             removed = [e for e in events if e.event_type() == "link_removed"]
@@ -188,16 +181,14 @@ class TestFileDeletion:
         """Test that deleting a file generates PageDeleted event."""
         engine = GraphEngine(temp_wiki_dir)
         engine.rebuild()
-        engine.start_watching()
+        start_watching_and_wait(engine)
 
         try:
             # Delete HomePage.md
             home_file = os.path.join(temp_wiki_dir, "HomePage.md")
             os.remove(home_file)
 
-            time.sleep(1.0)
-
-            events = engine.poll_events()
+            events = wait_for_events(engine)
 
             # Should have PageDeleted
             delete_events = [e for e in events if e.event_type() == "page_deleted"]
