@@ -33,7 +33,9 @@ def record_failed_attempt(ip: str) -> None:
     """Record a failed login; lock out after _MAX_ATTEMPTS."""
     count, _ = _login_attempts[ip]
     count += 1
-    lockout_until = time.monotonic() + _LOCKOUT_SECONDS if count >= _MAX_ATTEMPTS else 0.0
+    lockout_until = (
+        time.monotonic() + _LOCKOUT_SECONDS if count >= _MAX_ATTEMPTS else 0.0
+    )
     _login_attempts[ip] = (count, lockout_until)
 
 

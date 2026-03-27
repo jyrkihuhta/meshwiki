@@ -7,30 +7,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import (
-    FastAPI,
-    Form,
-    HTTPException,
-    Request,
-    WebSocket,
-    WebSocketDisconnect,
-)
+from fastapi import (FastAPI, Form, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from meshwiki.auth import (
-    AuthMiddleware,
-    is_rate_limited,
-    record_failed_attempt,
-    reset_attempts,
-    verify_password,
-)
+from meshwiki.auth import (AuthMiddleware, is_rate_limited,
+                           record_failed_attempt, reset_attempts,
+                           verify_password)
 from meshwiki.config import settings
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
 from meshwiki.core.models import Page
-from meshwiki.core.parser import parse_wiki_content, parse_wiki_content_with_toc
+from meshwiki.core.parser import (parse_wiki_content,
+                                  parse_wiki_content_with_toc)
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.ws_manager import manager
 
@@ -62,7 +53,9 @@ app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 # SessionMiddleware must be added last so it runs first (outermost)
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
-app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, https_only=False)
+app.add_middleware(
+    SessionMiddleware, secret_key=settings.session_secret, https_only=False
+)
 
 
 def timeago_filter(dt: datetime | None) -> str:
