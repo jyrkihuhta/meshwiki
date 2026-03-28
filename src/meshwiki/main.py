@@ -163,6 +163,40 @@ def get_context(**kwargs) -> dict:
     }
 
 
+# ── Page name validation ──────────────────────────────────────────────────────
+
+_MAX_DEPTH = 3  # maximum number of slashes allowed in a page name
+
+
+def _validate_page_name(name: str) -> None:
+    """Raise HTTPException 400 for invalid or potentially dangerous page names.
+
+    Allows forward slashes for subpages (up to _MAX_DEPTH levels deep), but
+    blocks any pattern that could escape the data directory.
+    """
+    if not name:
+        raise HTTPException(status_code=400, detail="Invalid page name")
+    # Block null bytes and backslashes (Windows path separator)
+    if "\x00" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid page name")
+    # Block absolute paths and trailing slashes
+    if name.startswith("/") or name.endswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid page name")
+    # Block consecutive slashes
+    if "//" in name:
+        raise HTTPException(status_code=400, detail="Invalid page name")
+    segments = name.split("/")
+    # Enforce depth limit
+    if len(segments) > _MAX_DEPTH + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Page nesting limited to {_MAX_DEPTH} levels",
+        )
+    # Block empty segments and directory traversal
+    if any(seg in (".", "..") or seg == "" for seg in segments):
+        raise HTTPException(status_code=400, detail="Invalid page name")
+
+
 # Page existence checker for parser
 def page_exists_sync(name: str) -> bool:
     """Synchronous check if page exists (for parser callback).
@@ -194,9 +228,40 @@ async def index(request: Request):
     )
 
 
-@app.get("/page/{name}", response_class=HTMLResponse)
+@app.get("/page/{name:path}/edit", response_class=HTMLResponse)
+async def edit_page(request: Request, name: str):
+    """Edit page form."""
+    _validate_page_name(name)
+    page = await storage.get_page(name)
+
+    if page is None:
+        # New page
+        page = Page(name=name, content="", exists=False)
+        raw_content = ""
+    else:
+        raw_content = await storage.get_raw_content(name) or ""
+
+    return templates.TemplateResponse(
+        request,
+        "page/edit.html",
+        get_context(page=page, raw_content=raw_content),
+    )
+
+
+@app.get("/page/{name:path}/raw")
+async def raw_page(name: str):
+    """Get raw markdown content."""
+    _validate_page_name(name)
+    page = await storage.get_page(name)
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+    return {"content": page.content}
+
+
+@app.get("/page/{name:path}", response_class=HTMLResponse)
 async def view_page(request: Request, name: str):
     """View a wiki page."""
+    _validate_page_name(name)
     page = await storage.get_page(name)
 
     if page is None:
@@ -238,28 +303,22 @@ async def view_page(request: Request, name: str):
     )
 
 
-@app.get("/page/{name}/edit", response_class=HTMLResponse)
-async def edit_page(request: Request, name: str):
-    """Edit page form."""
-    page = await storage.get_page(name)
-
-    if page is None:
-        # New page
-        page = Page(name=name, content="", exists=False)
-        raw_content = ""
-    else:
-        raw_content = await storage.get_raw_content(name) or ""
-
-    return templates.TemplateResponse(
-        request,
-        "page/edit.html",
-        get_context(page=page, raw_content=raw_content),
-    )
+@app.post("/page/{name:path}/delete")
+async def delete_page(name: str):
+    """Delete a page."""
+    _validate_page_name(name)
+    deleted = await storage.delete_page(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Page not found")
+    log.info("page_deleted", page=name)
+    page_writes_total.labels(operation="delete").inc()
+    return RedirectResponse(url="/?toast=deleted", status_code=302)
 
 
-@app.post("/page/{name}", response_class=HTMLResponse)
+@app.post("/page/{name:path}", response_class=HTMLResponse)
 async def save_page(request: Request, name: str, content: str = Form("")):
     """Save page content."""
+    _validate_page_name(name)
     page = await storage.save_page(name, content)
     log.info("page_saved", page=name)
     page_writes_total.labels(operation="save").inc()
@@ -299,26 +358,6 @@ async def save_page(request: Request, name: str, content: str = Form("")):
     return RedirectResponse(url=f"/page/{name}?toast=saved", status_code=302)
 
 
-@app.get("/page/{name}/raw")
-async def raw_page(name: str):
-    """Get raw markdown content."""
-    page = await storage.get_page(name)
-    if page is None:
-        raise HTTPException(status_code=404, detail="Page not found")
-    return {"content": page.content}
-
-
-@app.post("/page/{name}/delete")
-async def delete_page(name: str):
-    """Delete a page."""
-    deleted = await storage.delete_page(name)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Page not found")
-    log.info("page_deleted", page=name)
-    page_writes_total.labels(operation="delete").inc()
-    return RedirectResponse(url="/?toast=deleted", status_code=302)
-
-
 # ========== Editor API ==========
 
 
@@ -334,15 +373,14 @@ _PROTECTED_FIELDS = {"created", "modified", "name"}
 _VALID_FIELD_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
 
 
-@app.patch("/api/page/{name}/metadata")
+@app.patch("/api/page/{name:path}/metadata")
 async def api_update_metadata(
     name: str,
     field: str = Form(...),
     value: str = Form(""),
 ):
     """Update a single frontmatter field on a page."""
-    if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="Invalid page name")
+    _validate_page_name(name)
     if not _VALID_FIELD_RE.match(field):
         raise HTTPException(status_code=400, detail="Invalid field name")
     if field in _PROTECTED_FIELDS:

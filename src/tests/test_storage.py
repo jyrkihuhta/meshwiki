@@ -17,24 +17,29 @@ def storage(tmp_path):
 
 
 class TestNameConversion:
-    def test_name_to_filename(self, storage):
-        assert storage._name_to_filename("My Page") == "My_Page.md"
+    def test_get_path_simple(self, storage, tmp_path):
+        assert storage._get_path("My Page") == tmp_path / "My_Page.md"
 
-    def test_name_to_filename_no_spaces(self, storage):
-        assert storage._name_to_filename("HomePage") == "HomePage.md"
+    def test_get_path_no_spaces(self, storage, tmp_path):
+        assert storage._get_path("HomePage") == tmp_path / "HomePage.md"
 
-    def test_name_to_filename_already_underscored(self, storage):
-        assert storage._name_to_filename("My_Page") == "My_Page.md"
+    def test_get_path_subpage(self, storage, tmp_path):
+        assert storage._get_path("Projects/MeshWiki") == tmp_path / "Projects" / "MeshWiki.md"
 
-    def test_filename_to_name(self, storage):
-        assert storage._filename_to_name("My_Page.md") == "My Page"
+    def test_get_path_subpage_with_spaces(self, storage, tmp_path):
+        assert storage._get_path("My Project/My Page") == tmp_path / "My_Project" / "My_Page.md"
 
-    def test_filename_to_name_no_underscores(self, storage):
-        assert storage._filename_to_name("HomePage.md") == "HomePage"
+    def test_get_path_traversal_blocked(self, storage):
+        with pytest.raises(ValueError, match="traversal"):
+            storage._get_path("../etc/passwd")
 
-    def test_get_path(self, storage, tmp_path):
-        path = storage._get_path("Test Page")
-        assert path == tmp_path / "Test_Page.md"
+    def test_path_to_name_simple(self, storage, tmp_path):
+        p = tmp_path / "My_Page.md"
+        assert storage._path_to_name(p) == "My Page"
+
+    def test_path_to_name_subpage(self, storage, tmp_path):
+        p = tmp_path / "Projects" / "MeshWiki.md"
+        assert storage._path_to_name(p) == "Projects/MeshWiki"
 
 
 # ============================================================

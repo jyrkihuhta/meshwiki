@@ -95,17 +95,31 @@ class FileStorage(Storage):
         self.base_path = base_path
         self.base_path.mkdir(parents=True, exist_ok=True)
 
-    def _name_to_filename(self, name: str) -> str:
-        """Convert page name to filename."""
-        return name.replace(" ", "_") + ".md"
-
-    def _filename_to_name(self, filename: str) -> str:
-        """Convert filename to page name."""
-        return filename.removesuffix(".md").replace("_", " ")
-
     def _get_path(self, name: str) -> Path:
-        """Get full path for a page."""
-        return self.base_path / self._name_to_filename(name)
+        """Get full path for a page.
+
+        Converts spaces to underscores in each path segment and resolves the
+        final path.  Raises ``ValueError`` if the resolved path escapes the
+        data directory (defense-in-depth against path traversal).
+        """
+        parts = [seg.replace(" ", "_") for seg in name.split("/")]
+        path = self.base_path.joinpath(*parts).with_suffix(".md")
+        # Defense-in-depth: ensure the resolved path stays inside base_path.
+        try:
+            path.resolve().relative_to(self.base_path.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Path traversal detected: {name!r}") from exc
+        return path
+
+    def _path_to_name(self, path: Path) -> str:
+        """Convert an absolute .md file path to a page name.
+
+        Strips the base path prefix, drops the ``.md`` suffix, and converts
+        underscores back to spaces in each segment.
+        """
+        rel = path.relative_to(self.base_path)
+        parts = rel.with_suffix("").parts
+        return "/".join(p.replace("_", " ") for p in parts)
 
     def _parse_frontmatter(self, content: str) -> tuple[PageMetadata, str]:
         """Parse YAML frontmatter from content.
@@ -154,6 +168,7 @@ class FileStorage(Storage):
     async def save_page(self, name: str, content: str) -> Page:
         """Save a page."""
         path = self._get_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         # Parse any frontmatter from the content
         metadata, body = self._parse_frontmatter(content)
@@ -176,18 +191,24 @@ class FileStorage(Storage):
         )
 
     async def delete_page(self, name: str) -> bool:
-        """Delete a page."""
+        """Delete a page and remove any resulting empty parent directories."""
         path = self._get_path(name)
         if path.exists():
             path.unlink()
+            # Clean up empty parent directories up to (but not including) base_path
+            parent = path.parent
+            while parent != self.base_path:
+                if not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+                else:
+                    break
             return True
         return False
 
     async def list_pages(self) -> list[str]:
         """List all page names."""
-        pages = []
-        for path in self.base_path.glob("*.md"):
-            pages.append(self._filename_to_name(path.name))
+        pages = [self._path_to_name(p) for p in self.base_path.glob("**/*.md")]
         return sorted(pages)
 
     async def page_exists(self, name: str) -> bool:
@@ -210,8 +231,8 @@ class FileStorage(Storage):
         name_matches = []
         content_matches = []
 
-        for path in self.base_path.glob("*.md"):
-            name = self._filename_to_name(path.name)
+        for path in self.base_path.glob("**/*.md"):
+            name = self._path_to_name(path)
             raw = path.read_text(encoding="utf-8")
             metadata, body = self._parse_frontmatter(raw)
             title = metadata.title or name.replace("_", " ")
@@ -254,8 +275,8 @@ class FileStorage(Storage):
     async def list_pages_with_metadata(self) -> list[Page]:
         """List all pages with full metadata."""
         pages = []
-        for path in self.base_path.glob("*.md"):
-            name = self._filename_to_name(path.name)
+        for path in self.base_path.glob("**/*.md"):
+            name = self._path_to_name(path)
             raw = path.read_text(encoding="utf-8")
             metadata, body = self._parse_frontmatter(raw)
             pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
@@ -265,8 +286,8 @@ class FileStorage(Storage):
         """Filter pages by tag."""
         tag_lower = tag.lower()
         results = []
-        for path in self.base_path.glob("*.md"):
-            name = self._filename_to_name(path.name)
+        for path in self.base_path.glob("**/*.md"):
+            name = self._path_to_name(path)
             raw = path.read_text(encoding="utf-8")
             metadata, body = self._parse_frontmatter(raw)
             if any(t.lower() == tag_lower for t in metadata.tags):

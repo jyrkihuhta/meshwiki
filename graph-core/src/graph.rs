@@ -446,12 +446,14 @@ impl WikiGraph {
                 // Get the relative path from base_dir
                 let relative_path = path.strip_prefix(base_dir).unwrap_or(&path).to_path_buf();
 
-                // Derive page name from filename (without .md extension)
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
+                // Derive page name from relative path (without .md extension).
+                // Using the full relative path preserves subpage structure,
+                // e.g. "Projects/MeshWiki.md" → "Projects/MeshWiki".
+                let name = relative_path
+                    .with_extension("")
+                    .to_str()
                     .unwrap_or("unknown")
-                    .to_string();
+                    .replace('\\', "/");
 
                 // Get file modification time
                 let last_modified = entry

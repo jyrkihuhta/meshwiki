@@ -55,16 +55,16 @@ graph_links_total = Gauge(
 # Patterns whose first capture group is replaced with a placeholder.
 # Order matters: more specific patterns should appear first.
 _NORM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # /page/<name>/edit  →  /page/{name}/edit
-    (re.compile(r"^/page/[^/]+/edit$"), "/page/{name}/edit"),
+    # /page/<name>/edit  →  /page/{name}/edit  (name may contain slashes)
+    (re.compile(r"^/page/.+/edit$"), "/page/{name}/edit"),
     # /page/<name>/raw   →  /page/{name}/raw
-    (re.compile(r"^/page/[^/]+/raw$"), "/page/{name}/raw"),
+    (re.compile(r"^/page/.+/raw$"), "/page/{name}/raw"),
     # /page/<name>/delete → /page/{name}/delete
-    (re.compile(r"^/page/[^/]+/delete$"), "/page/{name}/delete"),
+    (re.compile(r"^/page/.+/delete$"), "/page/{name}/delete"),
     # /api/page/<name>/metadata → /api/page/{name}/metadata
-    (re.compile(r"^/api/page/[^/]+/metadata$"), "/api/page/{name}/metadata"),
+    (re.compile(r"^/api/page/.+/metadata$"), "/api/page/{name}/metadata"),
     # /page/<name>  →  /page/{name}
-    (re.compile(r"^/page/[^/]+$"), "/page/{name}"),
+    (re.compile(r"^/page/.+$"), "/page/{name}"),
 ]
 
 

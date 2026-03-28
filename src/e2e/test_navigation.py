@@ -7,13 +7,13 @@ from playwright.sync_api import Page, expect
 
 class TestHeaderSearch:
     def test_search_shows_results(self, page: Page, base_url: str, create_page):
-        create_page("SearchTarget", "# Unique searchable content here")
+        name = create_page("SearchTarget", "# Unique searchable content here")
         page.goto(base_url)
         search_input = page.locator("#header-search-input")
-        search_input.fill("SearchTarget")
+        search_input.fill(name)
         # Wait for HTMX search results to render
         expect(page.locator("#header-search-results")).to_contain_text(
-            "SearchTarget", timeout=10000
+            name, timeout=10000
         )
 
     def test_search_no_results(self, page: Page, base_url: str):
@@ -27,35 +27,28 @@ class TestHeaderSearch:
 
 class TestSearchPage:
     def test_full_search_page(self, page: Page, base_url: str, create_page):
-        create_page("Findable", "# Findable page with unique content")
-        page.goto(f"{base_url}/search?q=Findable")
-        expect(page.locator("body")).to_contain_text("Findable")
+        name = create_page("Findable", "# Findable page with unique content")
+        page.goto(f"{base_url}/search?q={name}")
+        expect(page.locator("body")).to_contain_text(name)
 
-    def test_search_by_tag(self, page: Page, base_url: str, data_dir):
-        (data_dir / "TaggedPage.md").write_text(
-            "---\ntags:\n  - specialtag\n---\n\n# Tagged content",
-            encoding="utf-8",
+    def test_search_by_tag(self, page: Page, base_url: str, create_page):
+        name = create_page(
+            "TaggedPage", "---\ntags:\n  - specialtag\n---\n\n# Tagged content"
         )
         page.goto(f"{base_url}/search?tag=specialtag")
-        expect(page.locator("body")).to_contain_text("TaggedPage")
+        expect(page.locator("body")).to_contain_text(name)
 
 
 class TestTagsPage:
-    def test_tags_page_shows_tags(self, page: Page, base_url: str, data_dir):
-        (data_dir / "T1.md").write_text(
-            "---\ntags:\n  - alpha\n  - beta\n---\n\ncontent", encoding="utf-8"
-        )
-        (data_dir / "T2.md").write_text(
-            "---\ntags:\n  - alpha\n---\n\ncontent", encoding="utf-8"
-        )
+    def test_tags_page_shows_tags(self, page: Page, base_url: str, create_page):
+        create_page("T1", "---\ntags:\n  - alpha\n  - beta\n---\n\ncontent")
+        create_page("T2", "---\ntags:\n  - alpha\n---\n\ncontent")
         page.goto(f"{base_url}/tags")
         expect(page.locator("body")).to_contain_text("alpha")
         expect(page.locator("body")).to_contain_text("beta")
 
-    def test_tag_links_to_search(self, page: Page, base_url: str, data_dir):
-        (data_dir / "T3.md").write_text(
-            "---\ntags:\n  - clicktag\n---\n\ncontent", encoding="utf-8"
-        )
+    def test_tag_links_to_search(self, page: Page, base_url: str, create_page):
+        create_page("T3", "---\ntags:\n  - clicktag\n---\n\ncontent")
         page.goto(f"{base_url}/tags")
         page.locator("a:has-text('clicktag')").click()
         expect(page).to_have_url(re.compile(r"search.*tag=clicktag"))
@@ -63,29 +56,30 @@ class TestTagsPage:
 
 class TestTocSidebar:
     def test_toc_visible_for_headings(self, page: Page, base_url: str, create_page):
-        create_page("TocPage", "## Second\n\n## Third")
-        page.goto(f"{base_url}/page/TocPage")
+        name = create_page("TocPage", "## Second\n\n## Third")
+        page.goto(f"{base_url}/page/{name}")
         toc = page.locator(".toc-sidebar")
         expect(toc).to_be_visible(timeout=5000)
         expect(toc).to_contain_text("Second")
         expect(toc).to_contain_text("Third")
 
     def test_no_toc_without_headings(self, page: Page, base_url: str, create_page):
-        create_page("NoTocPage", "Just plain text, no headings.")
-        page.goto(f"{base_url}/page/NoTocPage")
+        name = create_page("NoTocPage", "Just plain text, no headings.")
+        page.goto(f"{base_url}/page/{name}")
         expect(page.locator(".toc-sidebar")).not_to_be_visible()
 
 
 class TestBreadcrumbs:
     def test_breadcrumb_shows_path(self, page: Page, base_url: str, create_page):
-        create_page("BreadPage", "# Bread content")
-        page.goto(f"{base_url}/page/BreadPage")
+        name = create_page("BreadPage", "# Bread content")
+        page.goto(f"{base_url}/page/{name}")
         breadcrumb = page.locator(".breadcrumb")
         expect(breadcrumb).to_contain_text("Home")
-        expect(breadcrumb).to_contain_text("BreadPage")
+        # Assert the leaf page name appears in the breadcrumb
+        expect(breadcrumb).to_contain_text(name.split("/")[-1])
 
     def test_breadcrumb_home_link(self, page: Page, base_url: str, create_page):
-        create_page("NavPage", "# Nav")
-        page.goto(f"{base_url}/page/NavPage")
+        name = create_page("NavPage", "# Nav")
+        page.goto(f"{base_url}/page/{name}")
         page.locator(".breadcrumb a:has-text('Home')").click()
         expect(page).to_have_url(base_url + "/")

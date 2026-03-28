@@ -172,14 +172,16 @@ impl FileWatcher {
                 continue;
             }
 
-            // Derive page name from file
-            let page_name = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(name) => name.to_string(),
+            // Derive page name from the path relative to data_dir so that
+            // subpages are correctly identified, e.g. "Projects/MeshWiki".
+            let relative_path = match path.strip_prefix(data_dir) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => continue,
+            };
+            let page_name = match relative_path.with_extension("").to_str() {
+                Some(name) => name.replace('\\', "/"),
                 None => continue,
             };
-
-            // Get relative path
-            let relative_path = path.strip_prefix(data_dir).unwrap_or(path).to_path_buf();
 
             // Handle based on event kind and file existence
             match event.kind {

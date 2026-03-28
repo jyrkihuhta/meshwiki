@@ -79,12 +79,13 @@ class TestKeyboardShortcuts:
         textarea.press("Control+k")
         assert "[hello](url)" in textarea.input_value()
 
-    def test_ctrl_s_saves(self, page: Page, base_url: str):
-        page.goto(f"{base_url}/page/SaveShortcut/edit")
+    def test_ctrl_s_saves(self, page: Page, base_url: str, live_prefix: str):
+        name = f"{live_prefix}SaveShortcut"
+        page.goto(f"{base_url}/page/{name}/edit")
         textarea = page.locator("#content")
         textarea.fill("# Saved via shortcut")
         textarea.press("Control+s")
-        page.wait_for_url(f"{base_url}/page/SaveShortcut*")
+        page.wait_for_url(f"{base_url}/page/{name}*")
         expect(page.locator(".page-content")).to_contain_text("Saved via shortcut")
 
 
@@ -132,7 +133,7 @@ class TestLivePreview:
 
 class TestWikiLinkAutocomplete:
     def test_autocomplete_shows_on_bracket(
-        self, page: Page, base_url: str, create_page
+        self, page: Page, base_url: str, create_page, live_prefix: str
     ):
         create_page("Python", "# Python")
         create_page("PythonGuide", "# Python Guide")
@@ -140,31 +141,35 @@ class TestWikiLinkAutocomplete:
         page.goto(f"{base_url}/page/ACTest/edit")
         textarea = page.locator("#content")
         textarea.fill("")
-        textarea.type("[[Py")
+        textarea.type(f"[[{live_prefix}Py")
         dropdown = page.locator("#autocomplete-dropdown")
         expect(dropdown.locator(".autocomplete-item").first).to_be_visible(
             timeout=10000
         )
 
-    def test_click_inserts_page_name(self, page: Page, base_url: str, create_page):
-        create_page("ClickTarget", "# Click Target")
+    def test_click_inserts_page_name(
+        self, page: Page, base_url: str, create_page, live_prefix: str
+    ):
+        name = create_page("ClickTarget", "# Click Target")
         page.goto(f"{base_url}/page/ACClick/edit")
         textarea = page.locator("#content")
         textarea.fill("")
-        textarea.type("[[Click")
+        textarea.type(f"[[{live_prefix}Click")
         # Wait for autocomplete dropdown to appear
         item = page.locator(".autocomplete-item").first
         expect(item).to_be_visible(timeout=10000)
         item.click()
         value = textarea.input_value()
-        assert "[[ClickTarget]]" in value
+        assert f"[[{name}]]" in value
 
-    def test_escape_closes_autocomplete(self, page: Page, base_url: str, create_page):
+    def test_escape_closes_autocomplete(
+        self, page: Page, base_url: str, create_page, live_prefix: str
+    ):
         create_page("EscPage", "# Esc")
         page.goto(f"{base_url}/page/ACEsc/edit")
         textarea = page.locator("#content")
         textarea.fill("")
-        textarea.type("[[Esc")
+        textarea.type(f"[[{live_prefix}Esc")
         # Wait for dropdown to appear first
         expect(
             page.locator("#autocomplete-dropdown .autocomplete-item").first
