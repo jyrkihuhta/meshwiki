@@ -25,7 +25,7 @@ def wiki_dir(tmp_path):
             "---\nstatus: published\ntags:\n  - main\n---\n"
             "# Home\n\nWelcome to [[About]] and [[Contact]].\n"
         ),
-        "About.md": ("---\nstatus: draft\n---\n" "# About\n\nSee [[HomePage]].\n"),
+        "About.md": ("---\nstatus: draft\n---\n# About\n\nSee [[HomePage]].\n"),
         "Contact.md": "# Contact\n\nReturn to [[HomePage]].\n",
     }
     for name, content in pages.items():
