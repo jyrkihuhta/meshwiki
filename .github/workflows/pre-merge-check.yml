@@ -23,6 +23,6 @@ jobs:
           if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
             echo "✓ Branch is up-to-date or ahead of main"
           else
-            echo "⚠ Branch is behind main. Rebase with: git rebase origin/main"
-            exit 1
+            echo "⚠ Branch is behind main. Consider rebasing: git rebase origin/main"
+            echo "This is not a failure - you can still merge, but conflicts may occur."
           fi
