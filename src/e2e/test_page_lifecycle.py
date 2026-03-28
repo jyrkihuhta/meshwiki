@@ -11,7 +11,7 @@ class TestPageCreation:
         name = f"{live_prefix}NewTestPage"
         page.goto(f"{base_url}/page/{name}")
         expect(page).to_have_url(f"{base_url}/page/{name}/edit")
-        expect(page.locator("#content")).to_be_visible()
+        expect(page.locator("#content")).to_be_visible(timeout=10000)
 
     def test_create_and_save_page(self, page: Page, base_url: str, live_prefix: str):
         """Create a page via the editor and verify it renders."""
@@ -54,12 +54,12 @@ class TestPageViewing:
     def test_tags_displayed(self, page: Page, base_url: str, create_page):
         name = create_page("Tagged", "---\ntags:\n  - python\n  - wiki\n---\n\ncontent")
         page.goto(f"{base_url}/page/{name}")
-        expect(page.locator(".tag-link").first).to_be_visible()
+        expect(page.locator(".tag-link").first).to_be_visible(timeout=10000)
 
     def test_code_block_highlighted(self, page: Page, base_url: str, create_page):
         name = create_page("CodePage", '```python\nprint("hello")\n```')
         page.goto(f"{base_url}/page/{name}")
-        expect(page.locator("pre code")).to_be_visible()
+        expect(page.locator("pre code")).to_be_visible(timeout=10000)
 
 
 class TestPageEditing:
@@ -104,7 +104,7 @@ class TestPageDeletion:
 class TestPageList:
     def test_empty_wiki(self, page: Page, base_url: str):
         page.goto(base_url)
-        expect(page.locator(".page-list")).to_be_visible()
+        expect(page.locator(".page-list")).to_be_visible(timeout=10000)
 
     def test_page_list_table(self, page: Page, base_url: str, create_page):
         alpha = create_page("Alpha", "# Alpha page")

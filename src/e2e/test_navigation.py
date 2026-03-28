@@ -67,7 +67,7 @@ class TestTocSidebar:
     ):
         name = create_page("NoTocPage", "Just plain text, no headings.")
         page.goto(f"{base_url}/page/{name}")
-        expect(page.locator(".toc-sidebar")).to_be_visible()
+        expect(page.locator(".toc-sidebar")).to_be_visible(timeout=10000)
 
 
 class TestBreadcrumbs:

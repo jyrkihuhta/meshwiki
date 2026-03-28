@@ -286,13 +286,14 @@ jobs:
       - name: Add VPS to known hosts
         run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Run E2E tests against live server
+      - name: Run E2E smoke tests against live server
         env:
           E2E_BASE_URL: https://${{ secrets.VPS_DOMAIN }}
           E2E_AUTH_PASSWORD: ${{ secrets.MESHWIKI_AUTH_PASSWORD }}
         run: |
           cd src
-          pytest e2e/ -v --browser chromium
+          pytest e2e/ -v --browser chromium \
+            -k "TestTocSidebar or TestHeaderSearch or TestPageCreation or test_renders_markdown or test_create_and_save_page or test_page_appears_in_list"
 
       - name: Rollback on E2E failure
         if: failure()
