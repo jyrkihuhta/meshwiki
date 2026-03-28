@@ -130,10 +130,9 @@ body {
 .page-tree-sidebar {
     width: 260px;
     min-width: 260px;
-    height: 100vh;
-    position: fixed;
-    top: 0;
-    left: 0;
+    height: calc(100vh - 60px);
+    position: sticky;
+    top: 60px;
     overflow-y: auto;
     border-right: 1px solid var(--color-border);
     background: var(--color-bg);
