@@ -155,6 +155,29 @@ Task(subagent_type="general-purpose", prompt="Read docs/domains/<domain>.md and 
 
 ---
 
+## Future: Kubernetes Deployment
+
+The current production setup is Docker Compose + Caddy on a single VPS — simple, cheap, and sufficient for one service. The K8s scaffolding (`deploy/apps/`, `deploy/flux/`, `infra/local/`) is kept for when it becomes worth the complexity.
+
+**When to revisit:** The natural trigger is the agent factory. Once a second service exists (the LangGraph orchestrator), K8s starts paying for itself.
+
+**Benefits K8s brings that VPS lacks:**
+
+| Benefit | Why it matters |
+|---------|----------------|
+| Multi-service orchestration | K8s manages MeshWiki + orchestrator + workers + DB as a single system with shared networking and secrets |
+| Horizontal scaling | Multiple replicas behind a load balancer; auto-scale on traffic |
+| Zero-downtime deploys | Rolling updates are native; current VPS has a brief restart gap even with health checks |
+| Self-healing | Automatic restart and rescheduling on node failure |
+| Service mesh (Istio) | mTLS between services, traffic management, observability — all without application changes |
+| GitOps (Flux) | Declarative state in git, drift detection, automatic reconciliation — already scaffolded |
+| Observability stack | Prometheus + Grafana + Loki deploy as Helm charts; integrates with the `/metrics` endpoint |
+
+**Current VPS advantages to keep in mind:**
+- ~5 minute deploy vs K8s cluster setup overhead
+- No control plane cost
+- Caddy handles HTTPS with zero config
+
 ## Notes
 
 - Start with in-memory graph, add persistence later
