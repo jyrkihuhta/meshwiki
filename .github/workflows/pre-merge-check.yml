@@ -27,6 +27,33 @@ jobs:
             echo "This is not a failure - you can still merge, but conflicts may occur."
           fi
 
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Create virtualenv
+        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
+      - name: Install tools
+        run: pip install black==26.3.1 ruff==0.15.8 isort==8.0.1
+
+      - name: Check formatting (black)
+        run: black --check src/
+
+      - name: Check import order (isort)
+        run: isort --check-only --profile black src/
+
+      - name: Lint (ruff)
+        run: ruff check src/
+
   e2e-smoke:
     name: E2E smoke tests
     runs-on: ubuntu-latest

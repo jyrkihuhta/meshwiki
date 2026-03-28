@@ -33,4 +33,20 @@ $VENV/bin/ruff check . || { echo "Fix issues above"; exit 1; }
 cd ..
 
 echo ""
+echo "=== Running E2E smoke tests (requires Rust) ==="
+if command -v maturin &> /dev/null; then
+    cd src
+    MESHWIKI_DATA_DIR=/tmp/meshwiki-smoke MESHWIKI_GRAPH_WATCH=false \
+        python -m uvicorn meshwiki.main:app --host 127.0.0.1 --port 8080 &
+    SERVER_PID=$!
+    sleep 5
+    pytest e2e/test_navigation.py -v -k "TestTocSidebar or TestHeaderSearch" --browser chromium
+    kill $SERVER_PID 2>/dev/null || true
+    cd ..
+else
+    echo "⚠ maturin not found, skipping E2E tests. Run manually:"
+    echo "   cd src && pytest e2e/ -v --browser chromium"
+fi
+
+echo ""
 echo "✓ Validation complete"
