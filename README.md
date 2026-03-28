@@ -234,6 +234,7 @@ Deploy your own MeshWiki instance on any Linux VPS in a few minutes:
    git clone https://github.com/jyrkihuhta/meshwiki.git
    cd meshwiki
    sudo mkdir -p /opt/meshwiki/data/pages
+   sudo chown -R 1001:1001 /opt/meshwiki/data  # app user UID inside container
    cp deploy/vps/.env.example /opt/meshwiki/.env
    # Edit /opt/meshwiki/.env — set MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET
    ```
