@@ -1,0 +1,25 @@
+name: Pre-Merge Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-up-to-date:
+    name: Branch up-to-date with main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check merge base
+        run: |
+          git fetch origin main
+          HEAD=$(git rev-parse HEAD)
+          MAIN=$(git rev-parse origin/main)
+
+          if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+            echo "✓ Branch is up-to-date or ahead of main"
+          else
+            echo "⚠ Branch is behind main. Rebase with: git rebase origin/main"
+            exit 1
+          fi

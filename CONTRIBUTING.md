@@ -95,6 +95,28 @@ All tests must pass before submitting a PR. CI enforces 80% minimum coverage on 
 
 7. **Push and open a pull request** against `main`.
 
+### Workflow Guidelines
+
+**Keep features on a single branch:**
+- Create a feature branch and keep working on it until the feature is complete
+- Only open a PR when the feature is fully implemented, tested, and formatted
+- Use `git rebase origin/main` to stay up-to-date during development
+
+**Before opening a PR:**
+```bash
+# Stay up-to-date with main
+git fetch origin main
+git rebase origin/main
+
+# Validate before pushing
+./scripts/validate-branch.sh
+```
+
+**PR Merge Strategy:**
+- We use **squash and merge** — your PR becomes one commit on main
+- This means you can commit freely without worrying about "perfect history"
+- Keep commits focused within a feature branch, but don't worry about rebasing to clean up commits before PR
+
 ## Coding Standards
 
 ### Python
