@@ -12,8 +12,31 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 </head>
 <body>
-    <div class="layout{% if page_tree %} layout--with-sidebar{% endif %}">
-        {% if page_tree %}
+    {% macro render_tree(nodes, level=0) %}
+    <ul class="page-tree-list" role="list">
+        {% for node in nodes %}
+        <li class="page-tree-item" data-name="{{ node.name }}">
+            {% if node.children %}
+            <details class="page-tree-details" {{ 'open' if level < 1 else '' }}>
+                <summary class="page-tree-summary">
+                    <span class="page-tree-expand-icon">▸</span>
+                    <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
+                </summary>
+                {{ render_tree(node.children, level + 1) }}
+            </details>
+            {% else %}
+            <div class="page-tree-leaf">
+                <span class="page-tree-leaf-icon">•</span>
+                <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
+            </div>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% endmacro %}
+
+    <div class="layout{% if page_tree and not page_has_sidebar %} layout--with-sidebar{% endif %}">
+        {% if page_tree and not page_has_sidebar %}
         <div class="sidebar-overlay" id="sidebar-overlay"></div>
         <aside class="page-tree-sidebar" id="page-tree-sidebar">
             <div class="page-tree-header">
@@ -25,28 +48,6 @@
                 </button>
             </div>
             <nav class="page-tree" id="page-tree">
-                {% macro render_tree(nodes, level=0) %}
-                <ul class="page-tree-list" role="list">
-                    {% for node in nodes %}
-                    <li class="page-tree-item" data-name="{{ node.name }}">
-                        {% if node.children %}
-                        <details class="page-tree-details" {{ 'open' if level < 1 else '' }}>
-                            <summary class="page-tree-summary">
-                                <span class="page-tree-expand-icon">▸</span>
-                                <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
-                            </summary>
-                            {{ render_tree(node.children, level + 1) }}
-                        </details>
-                        {% else %}
-                        <div class="page-tree-leaf">
-                            <span class="page-tree-leaf-icon">•</span>
-                            <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
-                        </div>
-                        {% endif %}
-                    </li>
-                    {% endfor %}
-                </ul>
-                {% endmacro %}
                 {{ render_tree(page_tree) }}
             </nav>
         </aside>

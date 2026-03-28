@@ -60,7 +60,6 @@ body {
 
 .layout--with-sidebar {
     flex-direction: row;
-    align-items: flex-start;
 }
 
 .layout--with-sidebar .main-column {
@@ -297,15 +296,9 @@ body {
     border-bottom: 2px solid var(--color-border);
 }
 
-.page-list-table th.page-list-tags-header {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-}
-
 .page-list-table td {
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 2px solid var(--color-border);
     vertical-align: middle;
 }
 
@@ -326,18 +319,6 @@ body {
     font-size: 0.8125rem;
     color: var(--color-text-muted);
     white-space: nowrap;
-}
-
-.page-list-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-}
-
-.page-list-table th.page-list-tags-header {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
 }
 
 .tag--small {
