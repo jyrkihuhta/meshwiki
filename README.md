@@ -238,7 +238,7 @@ Deploy your own MeshWiki instance on any Linux VPS in a few minutes:
    # Edit /opt/meshwiki/.env — set MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET
    ```
 
-2. **Edit `deploy/vps/Caddyfile`** — replace `wiki.penni.fi` with your domain.
+2. **Edit `deploy/vps/Caddyfile`** — replace `${VPS_DOMAIN}` with your domain, or set it as a `VPS_DOMAIN` GitHub secret if using the CI/CD pipeline.
 
 3. **Copy files and start:**
 
