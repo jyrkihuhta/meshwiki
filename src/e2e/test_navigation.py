@@ -55,18 +55,17 @@ class TestTagsPage:
 
 
 class TestTocSidebar:
-    def test_toc_visible_for_headings(self, page: Page, base_url: str, create_page):
+    def test_page_tree_visible(self, page: Page, base_url: str, create_page):
         name = create_page("TocPage", "## Second\n\n## Third")
         page.goto(f"{base_url}/page/{name}")
-        toc = page.locator(".toc-sidebar")
-        expect(toc).to_be_visible(timeout=5000)
-        expect(toc).to_contain_text("Second")
-        expect(toc).to_contain_text("Third")
+        sidebar = page.locator(".toc-sidebar")
+        expect(sidebar).to_be_visible(timeout=5000)
+        expect(sidebar).to_contain_text("Pages")
 
-    def test_no_toc_without_headings(self, page: Page, base_url: str, create_page):
+    def test_page_tree_always_visible_when_tree_exists(self, page: Page, base_url: str, create_page):
         name = create_page("NoTocPage", "Just plain text, no headings.")
         page.goto(f"{base_url}/page/{name}")
-        expect(page.locator(".toc-sidebar")).not_to_be_visible()
+        expect(page.locator(".toc-sidebar")).to_be_visible()
 
 
 class TestBreadcrumbs:

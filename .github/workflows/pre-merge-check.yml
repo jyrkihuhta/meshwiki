@@ -26,3 +26,48 @@ jobs:
             echo "⚠ Branch is behind main. Consider rebasing: git rebase origin/main"
             echo "This is not a failure - you can still merge, but conflicts may occur."
           fi
+
+  e2e-smoke:
+    name: E2E smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Create virtualenv
+        run: python -m venv .venv && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
+      - name: Build graph_core
+        run: |
+          pip install maturin
+          cd graph-core
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
+
+      - name: Install dependencies
+        run: pip install -e "src[dev]"
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Start server
+        run: |
+          cd src
+          MESHWIKI_DATA_DIR=/tmp/meshwiki-smoke MESHWIKI_GRAPH_WATCH=false \
+            python -m uvicorn meshwiki.main:app --host 127.0.0.1 --port 8080 &
+          echo "Waiting for server..."
+          sleep 5
+          curl -sf http://127.0.0.1:8080/ || exit 1
+
+      - name: Run E2E smoke tests
+        run: |
+          cd src
+          pytest e2e/test_navigation.py -v \
+            -k "TestTocSidebar or TestHeaderSearch" \
+            --browser chromium
