@@ -24,10 +24,16 @@ class TestNameConversion:
         assert storage._get_path("HomePage") == tmp_path / "HomePage.md"
 
     def test_get_path_subpage(self, storage, tmp_path):
-        assert storage._get_path("Projects/MeshWiki") == tmp_path / "Projects" / "MeshWiki.md"
+        assert (
+            storage._get_path("Projects/MeshWiki")
+            == tmp_path / "Projects" / "MeshWiki.md"
+        )
 
     def test_get_path_subpage_with_spaces(self, storage, tmp_path):
-        assert storage._get_path("My Project/My Page") == tmp_path / "My_Project" / "My_Page.md"
+        assert (
+            storage._get_path("My Project/My Page")
+            == tmp_path / "My_Project" / "My_Page.md"
+        )
 
     def test_get_path_traversal_blocked(self, storage):
         with pytest.raises(ValueError, match="traversal"):

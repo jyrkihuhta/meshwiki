@@ -110,9 +110,9 @@ def live_http_client(e2e_server):
     with httpx.Client(base_url=base_url, follow_redirects=True) as client:
         if password:
             resp = client.post("/login", data={"password": password})
-            assert resp.status_code == 200, (
-                f"Login failed: {resp.status_code} at {resp.url}"
-            )
+            assert (
+                resp.status_code == 200
+            ), f"Login failed: {resp.status_code} at {resp.url}"
         yield client
 
 
@@ -210,12 +210,10 @@ def create_page(e2e_server, live_http_client):
                 full = f"---\ncreated: {now}\nmodified: {now}\n---\n\n{content}"
             else:
                 full = content
-            resp = live_http_client.post(
-                f"/page/{actual_name}", data={"content": full}
-            )
-            assert resp.status_code == 200, (
-                f"Failed to create page {actual_name!r}: {resp.status_code}"
-            )
+            resp = live_http_client.post(f"/page/{actual_name}", data={"content": full})
+            assert (
+                resp.status_code == 200
+            ), f"Failed to create page {actual_name!r}: {resp.status_code}"
             _live_cleanup_pages.append(actual_name)
             return actual_name
 

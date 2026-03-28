@@ -18,7 +18,7 @@ class TestPageCreation:
         name = f"{live_prefix}HelloWorld"
         page.goto(f"{base_url}/page/{name}/edit")
         page.locator("#content").fill("# Hello World\n\nThis is a test page.")
-        page.locator("button[type='submit']").click()
+        page.locator("button[form='edit-form']").click()
         page.wait_for_url(f"{base_url}/page/{name}*")
         expect(page.locator(".page-content")).to_contain_text("Hello World")
         expect(page.locator(".page-content")).to_contain_text("This is a test page.")
@@ -52,9 +52,7 @@ class TestPageViewing:
         expect(page.locator("a.wiki-link-missing")).to_be_visible()
 
     def test_tags_displayed(self, page: Page, base_url: str, create_page):
-        name = create_page(
-            "Tagged", "---\ntags:\n  - python\n  - wiki\n---\n\ncontent"
-        )
+        name = create_page("Tagged", "---\ntags:\n  - python\n  - wiki\n---\n\ncontent")
         page.goto(f"{base_url}/page/{name}")
         expect(page.locator(".tag-link").first).to_be_visible()
 
@@ -71,7 +69,7 @@ class TestPageEditing:
         page.locator("a.btn:has-text('Edit')").click()
         expect(page.locator("#content")).to_contain_text("Original content")
         page.locator("#content").fill("# Updated content")
-        page.locator("button[type='submit']").click()
+        page.locator("button[form='edit-form']").click()
         page.wait_for_url(f"{base_url}/page/{name}*")
         expect(page.locator(".page-content")).to_contain_text("Updated content")
 
