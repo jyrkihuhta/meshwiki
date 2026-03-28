@@ -19,9 +19,18 @@ echo "=== Running tests ==="
 cd src && pytest tests/ -q --tb=short && cd ..
 
 echo ""
-echo "=== Checking formatting ==="
-black --check src/ 2>/dev/null || echo "Run: black src/"
-ruff check src/ 2>/dev/null || echo "Fix issues above"
+echo "=== Checking formatting (matching CI versions) ==="
+cd src
+python3 -m venv /tmp/lint-check-venv 2>/dev/null || true
+VENV=/tmp/lint-check-venv
+if [ ! -f "$VENV/bin/black" ]; then
+    python3 -m venv $VENV
+fi
+$VENV/bin/pip install -q black==26.3.1 ruff==0.15.8 isort==8.0.1
+$VENV/bin/black --check . || { echo "Run: $VENV/bin/black ."; exit 1; }
+$VENV/bin/isort --check-only --profile black . || { echo "Run: $VENV/bin/isort ."; exit 1; }
+$VENV/bin/ruff check . || { echo "Fix issues above"; exit 1; }
+cd ..
 
 echo ""
 echo "✓ Validation complete"
