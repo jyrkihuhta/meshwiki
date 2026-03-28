@@ -35,9 +35,9 @@ cd src && pip install -e . -q 2>/dev/null || true
 echo ""
 echo "Running E2E tests against localhost..."
 cd ..
-pip install playwright pytest-playwright -q --break-system-packages 2>/dev/null || true
-python -m playwright install chromium 2>/dev/null || true
-python -m pytest src/e2e/ -v
+pip3 install playwright pytest-playwright -q --break-system-packages 2>/dev/null || true
+python3 -m playwright install chromium 2>/dev/null || true
+python3 -m pytest src/e2e/ -v
 
 # Return to original branch
 echo ""
