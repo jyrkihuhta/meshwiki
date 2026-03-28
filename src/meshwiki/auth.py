@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 # Paths that never require authentication
-_PUBLIC_PATHS = frozenset({"/login", "/health/live", "/health/ready"})
+_PUBLIC_PATHS = frozenset({"/login", "/health/live", "/health/ready", "/metrics"})
 _PUBLIC_PREFIXES = ("/static/",)
 
 # In-memory rate limiter: ip -> (fail_count, lockout_until)

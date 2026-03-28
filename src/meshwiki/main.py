@@ -3,9 +3,11 @@
 import json
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from fastapi import (
     FastAPI,
@@ -15,9 +17,11 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from meshwiki.auth import (
@@ -29,10 +33,22 @@ from meshwiki.auth import (
 )
 from meshwiki.config import settings
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
+from meshwiki.core.logging import configure_logging, get_logger
+from meshwiki.core.metrics import (
+    http_request_duration_seconds,
+    http_requests_total,
+    normalize_path,
+    page_views_total,
+    page_writes_total,
+)
 from meshwiki.core.models import Page
 from meshwiki.core.parser import parse_wiki_content, parse_wiki_content_with_toc
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.ws_manager import manager
+
+# Configure structured logging before anything else
+configure_logging()
+log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -59,12 +75,52 @@ static_path = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(templates_path))
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    """ASGI middleware that logs every request as a structured JSON line.
+
+    Captures: method, path, status_code, duration_ms, request_id (UUID4).
+    Also increments Prometheus HTTP counters/histograms.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        request_id = str(uuid.uuid4())
+        start = time.monotonic()
+        response = await call_next(request)
+        duration_ms = round((time.monotonic() - start) * 1000, 2)
+
+        norm_path = normalize_path(request.url.path)
+        method = request.method
+        status_code = str(response.status_code)
+
+        log.info(
+            "http_request",
+            request_id=request_id,
+            method=method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+        )
+
+        # Prometheus HTTP metrics
+        http_requests_total.labels(
+            method=method, path=norm_path, status_code=status_code
+        ).inc()
+        http_request_duration_seconds.labels(method=method, path=norm_path).observe(
+            (time.monotonic() - start)
+        )
+
+        return response
+
+
 # SessionMiddleware must be added last so it runs first (outermost)
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
 app.add_middleware(
     SessionMiddleware, secret_key=settings.session_secret, https_only=False
 )
+# LoggingMiddleware added after SessionMiddleware → runs outermost of all
+app.add_middleware(LoggingMiddleware)
 
 
 def timeago_filter(dt: datetime | None) -> str:
@@ -147,6 +203,9 @@ async def view_page(request: Request, name: str):
         # Page doesn't exist - redirect to edit to create it
         return RedirectResponse(url=f"/page/{name}/edit", status_code=302)
 
+    log.info("page_viewed", page=name)
+    page_views_total.labels(page=name).inc()
+
     # Parse content with wiki links and TOC
     html_content, toc_html = parse_wiki_content_with_toc(
         page.content, page_exists=page_exists_sync
@@ -202,6 +261,8 @@ async def edit_page(request: Request, name: str):
 async def save_page(request: Request, name: str, content: str = Form("")):
     """Save page content."""
     page = await storage.save_page(name, content)
+    log.info("page_saved", page=name)
+    page_writes_total.labels(operation="save").inc()
 
     # Check if this is an HTMX request
     if request.headers.get("HX-Request"):
@@ -253,6 +314,8 @@ async def delete_page(name: str):
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail="Page not found")
+    log.info("page_deleted", page=name)
+    page_writes_total.labels(operation="delete").inc()
     return RedirectResponse(url="/?toast=deleted", status_code=302)
 
 
@@ -316,6 +379,8 @@ async def api_autocomplete(request: Request, q: str = ""):
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request, q: str = "", tag: str = ""):
     """Search pages by query or tag."""
+    if q or tag:
+        log.info("search_queried", query=q, tag=tag)
     results = []
     if tag:
         pages = await storage.search_by_tag(tag)
@@ -433,9 +498,11 @@ async def login(request: Request, password: str = Form("")):
     if settings.auth_enabled and verify_password(password, settings.auth_password):
         reset_attempts(ip)
         request.session["authenticated"] = True
+        log.info("login_success", ip=ip)
         return RedirectResponse(url="/", status_code=302)
 
     record_failed_attempt(ip)
+    log.warning("login_failed", ip=ip)
     return templates.TemplateResponse(
         request,
         "login.html",
@@ -460,3 +527,23 @@ _start_time = time.monotonic()
 async def health_live():
     """Liveness probe — process is running."""
     return {"status": "ok", "uptime_seconds": round(time.monotonic() - _start_time, 1)}
+
+
+# ========== Observability ==========
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus metrics endpoint — exempt from auth."""
+    engine = get_engine()
+    if engine is not None:
+        try:
+            from meshwiki.core.metrics import graph_links_total, graph_pages_total
+
+            graph_pages_total.set(engine.page_count())
+            graph_links_total.set(engine.link_count())
+        except Exception:
+            pass
+
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
