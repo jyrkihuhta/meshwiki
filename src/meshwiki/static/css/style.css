@@ -130,21 +130,21 @@ body {
 .page-tree-sidebar {
     width: 260px;
     min-width: 260px;
-    height: 100vh;
-    position: fixed;
-    top: 0;
-    left: 0;
+    height: calc(100vh - 60px);
+    position: sticky;
+    top: 60px;
     overflow-y: auto;
     border-right: 1px solid var(--color-border);
     background: var(--color-bg);
     display: flex;
     flex-direction: column;
-    transition: transform 0.2s ease;
-    z-index: 100;
+    flex-shrink: 0;
 }
 
 .page-tree-sidebar.collapsed {
-    transform: translateX(-100%);
+    width: 0;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .page-tree-header {
@@ -1481,8 +1481,15 @@ body {
     }
 
     .page-tree-sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 260px;
+        height: 100vh;
+        z-index: 100;
         transform: translateX(-100%);
         box-shadow: none;
+        transition: transform 0.2s ease;
     }
 
     .page-tree-sidebar.sidebar--open {
@@ -1503,10 +1510,6 @@ body {
 
     .sidebar-overlay.sidebar-overlay--visible {
         display: block;
-    }
-
-    .page-tree-sidebar.collapsed {
-        transform: translateX(-100%);
     }
 
     .header {
