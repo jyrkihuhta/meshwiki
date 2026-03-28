@@ -155,6 +155,48 @@ storage = FileStorage(settings.data_dir)
 
 
 # Template context helper
+async def get_page_tree() -> list[dict]:
+    """Get hierarchical page tree for sidebar navigation."""
+    pages = await storage.list_pages_with_metadata()
+    return build_page_tree_sync(pages)
+
+
+def build_page_tree_sync(pages: list[Page]) -> list[dict]:
+    """Build a hierarchical tree from flat page list.
+
+    Each node: {"name": str, "title": str, "children": list[dict], "level": int}
+    Supports up to 3 levels of nesting.
+    """
+    tree: list[dict] = []
+    nodes: dict[str, dict] = {}
+
+    for page in sorted(pages, key=lambda p: p.name.lower()):
+        parts = page.name.split("/")
+        level = len(parts) - 1
+
+        if level > 2:
+            level = 2
+
+        node = {
+            "name": page.name,
+            "title": page.title,
+            "children": [],
+            "level": level,
+        }
+        nodes[page.name] = node
+
+        if level == 0:
+            tree.append(node)
+        else:
+            parent_name = "/".join(parts[:-1])
+            if parent_name in nodes:
+                nodes[parent_name]["children"].append(node)
+            else:
+                tree.append(node)
+
+    return tree
+
+
 def get_context(**kwargs) -> dict:
     """Create base context for templates."""
     return {
@@ -221,10 +263,13 @@ async def index(request: Request):
         key=lambda p: p.metadata.modified,
         reverse=True,
     )[:10]
+    page_tree = await get_page_tree()
     return templates.TemplateResponse(
         request,
         "page/list.html",
-        get_context(all_pages=all_pages, recent_pages=recent_pages),
+        get_context(
+            all_pages=all_pages, recent_pages=recent_pages, page_tree=page_tree
+        ),
     )
 
 
@@ -244,7 +289,9 @@ async def edit_page(request: Request, name: str):
     return templates.TemplateResponse(
         request,
         "page/edit.html",
-        get_context(page=page, raw_content=raw_content),
+        get_context(
+            page=page, raw_content=raw_content, page_tree=await get_page_tree()
+        ),
     )
 
 
@@ -299,6 +346,7 @@ async def view_page(request: Request, name: str):
             toc_html=toc_html,
             backlinks=backlinks,
             frontmatter=frontmatter,
+            page_tree=await get_page_tree(),
         ),
     )
 
@@ -443,7 +491,7 @@ async def search_page(request: Request, q: str = "", tag: str = ""):
     return templates.TemplateResponse(
         request,
         "search.html",
-        get_context(results=results, query=q, tag=tag),
+        get_context(results=results, query=q, tag=tag, page_tree=await get_page_tree()),
     )
 
 
@@ -459,7 +507,7 @@ async def tags_page(request: Request):
     return templates.TemplateResponse(
         request,
         "tags.html",
-        get_context(tags=tags_sorted),
+        get_context(tags=tags_sorted, page_tree=await get_page_tree()),
     )
 
 
@@ -472,7 +520,7 @@ async def graph_view(request: Request):
     return templates.TemplateResponse(
         request,
         "graph.html",
-        get_context(),
+        get_context(page_tree=await get_page_tree()),
     )
 
 
@@ -517,7 +565,9 @@ async def login_page(request: Request):
     """Login page."""
     if request.session.get("authenticated"):
         return RedirectResponse(url="/", status_code=302)
-    return templates.TemplateResponse(request, "login.html", get_context())
+    return templates.TemplateResponse(
+        request, "login.html", get_context(page_tree=await get_page_tree())
+    )
 
 
 @app.post("/login")

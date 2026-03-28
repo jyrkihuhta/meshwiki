@@ -12,40 +12,80 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 </head>
 <body>
-    <div class="layout">
-        <header class="header">
-            <a href="/" class="logo">{{ app_title }}</a>
-            <button type="button" class="nav-toggle" aria-label="Toggle navigation">&#8801;</button>
-            <div class="header-search">
-                <input type="text" id="header-search-input" placeholder="Search..."
-                    hx-get="/search"
-                    hx-trigger="input changed delay:300ms"
-                    hx-target="#header-search-results"
-                    name="q"
-                    autocomplete="off">
-                <div id="header-search-results" class="search-dropdown"></div>
+    <div class="layout{% if page_tree %} layout--with-sidebar{% endif %}">
+        {% if page_tree %}
+        <aside class="page-tree-sidebar" id="page-tree-sidebar">
+            <div class="page-tree-header">
+                <span class="page-tree-title">Pages</span>
+                <button type="button" class="page-tree-toggle" id="page-tree-toggle" aria-label="Toggle sidebar">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M11.5 3L6 8l5.5 5V3z"/>
+                    </svg>
+                </button>
             </div>
-            <nav class="nav">
-                <a href="/">All Pages</a>
-                <a href="/tags">Tags</a>
-                <a href="/graph">Graph</a>
-                <a href="/page/Home/edit">New Page</a>
-                <button type="button" id="theme-toggle" class="btn btn-theme" aria-label="Toggle dark mode">Dark</button>
-                {% if request.session.get("authenticated") %}
-                <form method="post" action="/logout" style="display:inline">
-                    <button type="submit" class="btn btn-theme">Logout</button>
-                </form>
-                {% endif %}
+            <nav class="page-tree" id="page-tree">
+                {% macro render_tree(nodes, level=0) %}
+                <ul class="page-tree-list" role="list">
+                    {% for node in nodes %}
+                    <li class="page-tree-item" data-name="{{ node.name }}">
+                        {% if node.children %}
+                        <details class="page-tree-details" {{ 'open' if level < 1 else '' }}>
+                            <summary class="page-tree-summary">
+                                <span class="page-tree-expand-icon">▸</span>
+                                <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
+                            </summary>
+                            {{ render_tree(node.children, level + 1) }}
+                        </details>
+                        {% else %}
+                        <div class="page-tree-leaf">
+                            <span class="page-tree-leaf-icon">•</span>
+                            <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
+                        </div>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endmacro %}
+                {{ render_tree(page_tree) }}
             </nav>
-        </header>
+        </aside>
+        {% endif %}
 
-        <main class="main {% block main_class %}{% endblock %}">
-            {% block content %}{% endblock %}
-        </main>
+        <div class="main-column">
+            <header class="header">
+                <a href="/" class="logo">{{ app_title }}</a>
+                <button type="button" class="nav-toggle" aria-label="Toggle navigation">&#8801;</button>
+                <div class="header-search">
+                    <input type="text" id="header-search-input" placeholder="Search..."
+                        hx-get="/search"
+                        hx-trigger="input changed delay:300ms"
+                        hx-target="#header-search-results"
+                        name="q"
+                        autocomplete="off">
+                    <div id="header-search-results" class="search-dropdown"></div>
+                </div>
+                <nav class="nav">
+                    <a href="/">All Pages</a>
+                    <a href="/tags">Tags</a>
+                    <a href="/graph">Graph</a>
+                    <a href="/page/Home/edit">New Page</a>
+                    <button type="button" id="theme-toggle" class="btn btn-theme" aria-label="Toggle dark mode">Dark</button>
+                    {% if request.session.get("authenticated") %}
+                    <form method="post" action="/logout" style="display:inline">
+                        <button type="submit" class="btn btn-theme">Logout</button>
+                    </form>
+                    {% endif %}
+                </nav>
+            </header>
 
-        <footer class="footer">
-            <p>MeshWiki - A modern wiki platform</p>
-        </footer>
+            <main class="main {% block main_class %}{% endblock %}">
+                {% block content %}{% endblock %}
+            </main>
+
+            <footer class="footer">
+                <p>MeshWiki - A modern wiki platform</p>
+            </footer>
+        </div>
     </div>
     <div id="loading-bar" class="loading-bar"></div>
     <div id="toast-container" class="toast-container" aria-live="polite"></div>
@@ -124,6 +164,29 @@
         document.body.addEventListener('htmx:afterRequest', function() {
             bar.className = 'loading-bar done';
             setTimeout(function() { bar.className = 'loading-bar'; }, 500);
+        });
+    })();
+    // Page tree sidebar toggle
+    (function(){
+        var sidebar = document.getElementById('page-tree-sidebar');
+        var toggle = document.getElementById('page-tree-toggle');
+        if (!sidebar || !toggle) return;
+        var collapsed = localStorage.getItem('page-tree-collapsed') === 'true';
+        if (collapsed) sidebar.classList.add('collapsed');
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('collapsed');
+            localStorage.setItem('page-tree-collapsed', sidebar.classList.contains('collapsed'));
+        });
+        // Highlight current page
+        var currentPath = window.location.pathname.replace('/page/', '/');
+        var links = sidebar.querySelectorAll('.page-tree-link');
+        links.forEach(function(link) {
+            var href = link.getAttribute('href');
+            if (href === currentPath || href.replace('/page/', '/') === currentPath) {
+                link.classList.add('current');
+                var details = link.closest('.page-tree-details');
+                if (details) details.setAttribute('open', '');
+            }
         });
     })();
     </script>

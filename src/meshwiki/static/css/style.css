@@ -58,12 +58,24 @@ body {
     flex-direction: column;
 }
 
+.layout--with-sidebar {
+    flex-direction: row;
+}
+
+.main-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
 .header {
     border-bottom: 1px solid var(--color-border);
     padding: 1rem 2rem;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    width: 100%;
 }
 
 .logo {
@@ -106,6 +118,135 @@ body {
     text-align: center;
     color: var(--color-text-muted);
     font-size: 0.875rem;
+}
+
+/* ========== Page Tree Sidebar ========== */
+.page-tree-sidebar {
+    width: 260px;
+    min-width: 260px;
+    height: calc(100vh - 60px);
+    position: sticky;
+    top: 60px;
+    overflow-y: auto;
+    border-right: 1px solid var(--color-border);
+    background: var(--color-bg);
+    display: flex;
+    flex-direction: column;
+    transition: width 0.2s ease, min-width 0.2s ease, margin-left 0.2s ease;
+}
+
+.page-tree-sidebar.collapsed {
+    width: 0;
+    min-width: 0;
+    overflow: hidden;
+    margin-left: -1px;
+}
+
+.page-tree-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    border-bottom: 1px solid var(--color-border);
+    position: sticky;
+    top: 0;
+    background: var(--color-bg);
+    z-index: 1;
+}
+
+.page-tree-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+}
+
+.page-tree-toggle {
+    background: none;
+    border: none;
+    padding: 0.25rem;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.page-tree-toggle:hover {
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+}
+
+.page-tree {
+    padding: 0.5rem 0;
+    flex: 1;
+}
+
+.page-tree-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.page-tree-list .page-tree-list {
+    padding-left: 1rem;
+}
+
+.page-tree-item {
+    margin: 0;
+}
+
+.page-tree-leaf,
+.page-tree-details > .page-tree-summary {
+    display: flex;
+    align-items: center;
+    padding: 0.25rem 1rem;
+    font-size: 0.875rem;
+    color: var(--color-text);
+    cursor: pointer;
+}
+
+.page-tree-leaf:hover,
+.page-tree-details > .page-tree-summary:hover {
+    background: var(--color-bg-secondary);
+}
+
+.page-tree-leaf-icon {
+    width: 1rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+.page-tree-expand-icon {
+    width: 1rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    font-size: 0.625rem;
+    transition: transform 0.15s;
+}
+
+.page-tree-details[open] > .page-tree-summary .page-tree-expand-icon {
+    transform: rotate(90deg);
+}
+
+.page-tree-link {
+    color: var(--color-text);
+    text-decoration: none;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.page-tree-link:hover {
+    color: var(--color-primary);
+}
+
+.page-tree-link.current {
+    color: var(--color-primary);
+    font-weight: 500;
 }
 
 /* Page List */
