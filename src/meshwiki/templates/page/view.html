@@ -7,21 +7,23 @@
 {% block content %}
 <article class="page">
 
-    <div class="page-body">
-        <nav class="breadcrumb" aria-label="breadcrumb">
-            <a href="/">Home</a>
-            {% set parts = page.name.split('/') %}
-            {% for i in range(parts | length) %}
-                /
-                {% if i < parts | length - 1 %}
-                    <a href="/page/{{ parts[:i+1] | join('/') | replace(' ', '_') }}">{{ parts[i] }}</a>
-                {% else %}
-                    <span>{{ parts[i] }}</span>
-                {% endif %}
-            {% endfor %}
-        </nav>
+    <div class="page-header-wrapper">
         <header class="page-header">
-            <h1>{{ page.title }}</h1>
+            <div class="page-header-left">
+                <nav class="breadcrumb" aria-label="breadcrumb">
+                    <a href="/">Home</a>
+                    {% set parts = page.name.split('/') %}
+                    {% for i in range(parts | length) %}
+                        /
+                        {% if i < parts | length - 1 %}
+                            <a href="/page/{{ parts[:i+1] | join('/') | replace(' ', '_') }}">{{ parts[i] }}</a>
+                        {% else %}
+                            <span>{{ parts[i] }}</span>
+                        {% endif %}
+                    {% endfor %}
+                </nav>
+                <h1>{{ page.title }}</h1>
+            </div>
             <div class="page-actions">
                 <a href="/page/{{ page.name.replace(' ', '_') }}/edit" class="btn">Edit</a>
                 <form method="post" action="/page/{{ page.name.replace(' ', '_') }}/delete"
@@ -31,7 +33,9 @@
                 </form>
             </div>
         </header>
+    </div>
 
+    <div class="page-body">
         <div class="page-content" id="page-content">
             {% if frontmatter %}
             <aside class="frontmatter-card">
