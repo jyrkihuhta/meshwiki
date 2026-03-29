@@ -5,7 +5,12 @@
 {% block main_class %}main--page-view{% endblock %}
 
 {% block content %}
-<article class="page">
+<article class="page {% if page_tree %}page--with-toc{% endif %}">
+    {% if page_tree %}
+    <aside class="toc-sidebar" id="toc-sidebar">
+        <nav class="toc">{{ render_tree(page_tree) }}</nav>
+    </aside>
+    {% endif %}
 
     <div class="page-body">
         <nav class="breadcrumb" aria-label="breadcrumb">

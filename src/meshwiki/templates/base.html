@@ -17,7 +17,7 @@
         {% for node in nodes %}
         <li class="page-tree-item" data-name="{{ node.name }}">
             {% if node.children %}
-            <details class="page-tree-details" {{ 'open' if level < 1 else '' }}>
+            <details class="page-tree-details" data-page-name="/page/{{ node.name.replace(' ', '_') }}" {{ 'open' if level < 1 else '' }}>
                 <summary class="page-tree-summary">
                     <span class="page-tree-expand-icon">▸</span>
                     <a href="/page/{{ node.name.replace(' ', '_') }}" class="page-tree-link">{{ node.title }}</a>
@@ -159,19 +159,47 @@
             setTimeout(function() { bar.className = 'loading-bar'; }, 500);
         });
     })();
-    // Page tree current page highlighting
+    // Page tree current page highlighting and expansion state persistence
     (function(){
-        var sidebar = document.getElementById('page-tree-sidebar');
+        var sidebar = document.getElementById('page-tree-sidebar') || document.getElementById('toc-sidebar');
         if (!sidebar) return;
-        var currentPath = window.location.pathname.replace('/page/', '/');
+        var currentPath = window.location.pathname;
+        var storageKey = 'page-tree-expanded:' + currentPath;
+        
+        // Restore expanded state from sessionStorage
+        try {
+            var savedState = JSON.parse(sessionStorage.getItem(storageKey) || '[]');
+            savedState.forEach(function(pageName) {
+                var details = sidebar.querySelector('[data-page-name="' + pageName + '"]');
+                if (details) details.setAttribute('open', '');
+            });
+        } catch(e) {}
+        
+        // Highlight current page and expand its ancestors
         var links = sidebar.querySelectorAll('.page-tree-link');
         links.forEach(function(link) {
             var href = link.getAttribute('href');
-            if (href === currentPath || href.replace('/page/', '/') === currentPath) {
+            if (href === currentPath || href.replace('/page/', '/') === currentPath.replace('/page/', '/')) {
                 link.classList.add('current');
                 var details = link.closest('.page-tree-details');
                 if (details) details.setAttribute('open', '');
             }
+        });
+        
+        // Save expansion state when details are toggled
+        sidebar.addEventListener('toggle', function(e) {
+            if (e.target.tagName !== 'DETAILS') return;
+            var openPages = [];
+            sidebar.querySelectorAll('.page-tree-details[open]').forEach(function(d) {
+                var link = d.querySelector('.page-tree-link');
+                if (link) {
+                    var href = link.getAttribute('href');
+                    openPages.push(href);
+                }
+            });
+            try {
+                sessionStorage.setItem(storageKey, JSON.stringify(openPages));
+            } catch(e) {}
         });
     })();
     </script>
