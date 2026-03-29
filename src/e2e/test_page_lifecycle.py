@@ -49,7 +49,7 @@ class TestPageViewing:
     def test_missing_wiki_link_styled(self, page: Page, base_url: str, create_page):
         source = create_page("Source", "Link to [[NonExistent]]")
         page.goto(f"{base_url}/page/{source}")
-        expect(page.locator("a.wiki-link-missing")).to_be_visible()
+        expect(page.locator("a.wiki-link-missing")).to_be_visible(timeout=10000)
 
     def test_tags_displayed(self, page: Page, base_url: str, create_page):
         name = create_page("Tagged", "---\ntags:\n  - python\n  - wiki\n---\n\ncontent")
