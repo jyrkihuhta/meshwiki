@@ -37,16 +37,7 @@
 
     <div class="layout{% if page_tree and not page_has_sidebar %} layout--with-sidebar{% endif %}">
         {% if page_tree and not page_has_sidebar %}
-        <div class="sidebar-overlay" id="sidebar-overlay"></div>
         <aside class="page-tree-sidebar" id="page-tree-sidebar">
-            <div class="page-tree-header">
-                <span class="page-tree-title">Pages</span>
-                <button type="button" class="page-tree-toggle" id="page-tree-toggle" aria-label="Toggle sidebar">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M11.5 3L6 8l5.5 5V3z"/>
-                    </svg>
-                </button>
-            </div>
             <nav class="page-tree" id="page-tree">
                 {{ render_tree(page_tree) }}
             </nav>
@@ -168,37 +159,10 @@
             setTimeout(function() { bar.className = 'loading-bar'; }, 500);
         });
     })();
-    // Page tree sidebar toggle
+    // Page tree current page highlighting
     (function(){
         var sidebar = document.getElementById('page-tree-sidebar');
-        var toggle = document.getElementById('page-tree-toggle');
-        var overlay = document.getElementById('sidebar-overlay');
         if (!sidebar) return;
-        var collapsed = localStorage.getItem('page-tree-collapsed') === 'true';
-        if (collapsed) sidebar.classList.add('collapsed');
-        function closeSidebar() {
-            sidebar.classList.remove('sidebar--open');
-            if (overlay) overlay.classList.remove('sidebar-overlay--visible');
-        }
-        function openSidebar() {
-            sidebar.classList.add('sidebar--open');
-            if (overlay) overlay.classList.add('sidebar-overlay--visible');
-        }
-        if (toggle) {
-            toggle.addEventListener('click', function() {
-                if (sidebar.classList.contains('sidebar--open')) {
-                    closeSidebar();
-                } else {
-                    openSidebar();
-                }
-                sidebar.classList.toggle('collapsed');
-                localStorage.setItem('page-tree-collapsed', sidebar.classList.contains('collapsed'));
-            });
-        }
-        if (overlay) {
-            overlay.addEventListener('click', closeSidebar);
-        }
-        // Highlight current page
         var currentPath = window.location.pathname.replace('/page/', '/');
         var links = sidebar.querySelectorAll('.page-tree-link');
         links.forEach(function(link) {
