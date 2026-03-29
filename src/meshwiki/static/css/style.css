@@ -127,9 +127,11 @@ body {
 
 /* ========== Page Tree Sidebar ========== */
 .page-tree-sidebar {
+    position: sticky;
+    top: 60px;
     width: 260px;
     min-width: 260px;
-    height: 100vh;
+    max-height: calc(100vh - 60px);
     overflow-y: auto;
     border-right: 1px solid var(--color-border);
     background: var(--color-bg);
