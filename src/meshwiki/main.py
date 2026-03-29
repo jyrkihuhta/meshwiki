@@ -347,7 +347,7 @@ async def view_page(request: Request, name: str):
             backlinks=backlinks,
             frontmatter=frontmatter,
             page_tree=await get_page_tree(),
-            page_has_sidebar=True,
+            page_has_sidebar=False,
         ),
     )
 

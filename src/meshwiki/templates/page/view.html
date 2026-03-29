@@ -5,15 +5,7 @@
 {% block main_class %}main--page-view{% endblock %}
 
 {% block content %}
-<article class="page {% if page_tree %}page--with-toc{% endif %}">
-    {% if page_tree %}
-    <aside class="toc-sidebar" id="toc-sidebar">
-        <details class="toc-details" open>
-            <summary>Pages</summary>
-            <nav class="toc">{{ render_tree(page_tree) }}</nav>
-        </details>
-    </aside>
-    {% endif %}
+<article class="page">
 
     <div class="page-body">
         <nav class="breadcrumb" aria-label="breadcrumb">
@@ -94,17 +86,4 @@
 </article>
 {% endblock %}
 
-{% if page_tree %}
-{% block extra_scripts %}
-<script>
-(function() {
-    var details = document.querySelector('.toc-details');
-    var article = document.querySelector('.page--with-toc');
-    if (!details || !article) return;
-    details.addEventListener('toggle', function() {
-        article.classList.toggle('page--toc-collapsed', !details.open);
-    });
-})();
-</script>
-{% endblock %}
-{% endif %}
+

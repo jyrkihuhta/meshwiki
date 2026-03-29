@@ -143,15 +143,17 @@ class TestTocSidebar:
         )
         resp = await client.get("/page/TocPage")
         assert resp.status_code == 200
-        assert "toc-sidebar" in resp.text
-        assert "Pages" in resp.text
+        assert "page-tree-sidebar" in resp.text
+        assert "TocPage" in resp.text
 
     @pytest.mark.asyncio
     async def test_page_without_headings_no_toc(self, client):
         await meshwiki.main.storage.save_page("NoTocPage", "Just a paragraph of text.")
         resp = await client.get("/page/NoTocPage")
         assert resp.status_code == 200
-        assert "toc-sidebar" in resp.text  # Sidebar always shows when page_tree exists
+        assert (
+            "page-tree-sidebar" in resp.text
+        )  # Sidebar always shows when page_tree exists
 
     @pytest.mark.asyncio
     async def test_toc_contains_heading_text(self, client):
