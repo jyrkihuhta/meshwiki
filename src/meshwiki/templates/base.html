@@ -61,8 +61,8 @@
             </nav>
         </header>
 
-        <div class="content-wrapper{% if page_tree and not page_has_sidebar %} content-wrapper--with-sidebar{% endif %}">
-            {% if page_tree and not page_has_sidebar %}
+        <div class="content-wrapper{% if page_tree %} content-wrapper--with-sidebar{% endif %}">
+            {% if page_tree %}
             <aside class="page-tree-sidebar" id="page-tree-sidebar">
                 <nav class="page-tree" id="page-tree">
                     {{ render_tree(page_tree) }}
@@ -73,10 +73,6 @@
             <main class="main {% block main_class %}{% endblock %}">
                 {% block content %}{% endblock %}
             </main>
-
-            <footer class="footer">
-                <p style="display:none">MeshWiki - A modern wiki platform</p>
-            </footer>
         </div>
     </div>
     <div id="loading-bar" class="loading-bar"></div>
