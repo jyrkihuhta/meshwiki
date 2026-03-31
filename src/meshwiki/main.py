@@ -17,7 +17,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -113,13 +113,40 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# SessionMiddleware must be added last so it runs first (outermost)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=()"
+        )
+        if not settings.debug:
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+            "img-src 'self' data:; "
+            "connect-src 'self' wss:; "
+            "font-src 'self' https://cdnjs.cloudflare.com;"
+        )
+        return response
+
+
+# Middleware stack (added in reverse — last added runs outermost):
+# LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware → AuthMiddleware
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
 app.add_middleware(
     SessionMiddleware, secret_key=settings.session_secret, https_only=False
 )
-# LoggingMiddleware added after SessionMiddleware → runs outermost of all
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(LoggingMiddleware)
 
 
@@ -615,6 +642,34 @@ _start_time = time.monotonic()
 async def health_live():
     """Liveness probe — process is running."""
     return {"status": "ok", "uptime_seconds": round(time.monotonic() - _start_time, 1)}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness probe — app can serve traffic.
+
+    Returns 503 if the data directory is unreadable. Graph engine absence
+    degrades but does not fail readiness (it's optional).
+    """
+    checks: dict[str, str] = {}
+    ok = True
+
+    try:
+        data_dir = Path(settings.data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        list(data_dir.iterdir())
+        checks["storage"] = "ok"
+    except Exception as e:
+        checks["storage"] = f"error: {e}"
+        ok = False
+
+    engine = get_engine()
+    checks["graph_engine"] = "ok" if engine else "not_loaded"
+
+    status = "ready" if ok else "degraded"
+    return JSONResponse(
+        {"status": status, "checks": checks}, status_code=200 if ok else 503
+    )
 
 
 # ========== Observability ==========

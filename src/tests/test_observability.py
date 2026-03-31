@@ -1,6 +1,8 @@
 """Tests for M0.4 (structured logging) and M0.5 (Prometheus metrics)."""
 
 import importlib
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -178,3 +180,90 @@ async def test_logging_produces_structured_events():
     assert record.get("event") == "test_event"
     assert record.get("key") == "value"
     assert record.get("log_level") == "info"
+
+
+# ── M0.2: /health/ready endpoint ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_health_ready_returns_200_when_healthy(client):
+    """/health/ready must return 200 with storage=ok when data dir is accessible."""
+    resp = await client.get("/health/ready")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ready"
+    assert data["checks"]["storage"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_health_ready_returns_503_when_data_dir_broken(client):
+    """/health/ready must return 503 when the data directory cannot be accessed."""
+    broken = Path("/nonexistent_meshwiki_test_dir/pages")
+    with patch.object(meshwiki.main.settings, "data_dir", broken):
+        resp = await client.get("/health/ready")
+    assert resp.status_code == 503
+    data = resp.json()
+    assert data["status"] == "degraded"
+    assert "error" in data["checks"]["storage"]
+
+
+@pytest.mark.asyncio
+async def test_health_ready_exempt_from_auth(auth_client):
+    """/health/ready must be accessible without authentication."""
+    resp = await auth_client.get("/health/ready")
+    assert resp.status_code == 200
+
+
+# ── M0.5: Security headers middleware ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_security_headers_present(client):
+    """Core security headers must be present on every response."""
+    resp = await client.get("/health/live")
+    assert resp.headers.get("x-content-type-options") == "nosniff"
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert resp.headers.get("referrer-policy") == "strict-origin-when-cross-origin"
+    assert "geolocation=()" in resp.headers.get("permissions-policy", "")
+
+
+@pytest.mark.asyncio
+async def test_hsts_absent_in_debug_mode(no_auth_settings):
+    """HSTS must NOT be set when debug=True (we're not on HTTPS in dev)."""
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        data_dir=no_auth_settings.data_dir,
+        auth_enabled=False,
+        graph_watch=False,
+        debug=True,
+    )
+    importlib.reload(meshwiki.main)
+    try:
+        from meshwiki.core.graph import init_engine, shutdown_engine
+
+        init_engine(no_auth_settings.data_dir, watch=False)
+        meshwiki.main.manager.start_polling()
+        async with AsyncClient(
+            transport=ASGITransport(app=meshwiki.main.app),
+            base_url="http://test",
+            follow_redirects=False,
+        ) as c:
+            resp = await c.get("/health/live")
+        meshwiki.main.manager.stop_polling()
+        shutdown_engine()
+    finally:
+        cfg.settings = original
+        importlib.reload(meshwiki.main)
+
+    assert "strict-transport-security" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_csp_header_present(client):
+    """Content-Security-Policy must include self and CDN sources."""
+    resp = await client.get("/health/live")
+    csp = resp.headers.get("content-security-policy", "")
+    assert "default-src 'self'" in csp
+    assert "unpkg.com" in csp
+    assert "cdnjs.cloudflare.com" in csp
+    assert "wss:" in csp
