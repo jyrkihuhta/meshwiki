@@ -239,27 +239,33 @@ class TestQueryMultipleFilters:
 
     def test_query_multiple_filters_and(self, wiki_with_metadata):
         # status=active AND has priority
-        results = wiki_with_metadata.query([
-            Filter.equals("status", "active"),
-            Filter.has_key("priority"),
-        ])
+        results = wiki_with_metadata.query(
+            [
+                Filter.equals("status", "active"),
+                Filter.has_key("priority"),
+            ]
+        )
         assert len(results) == 1
         assert results[0].name == "ProjectA"
 
     def test_query_multiple_filters_no_match(self, wiki_with_metadata):
         # No page has both status=draft AND tags=rust
-        results = wiki_with_metadata.query([
-            Filter.equals("status", "draft"),
-            Filter.equals("tags", "rust"),
-        ])
+        results = wiki_with_metadata.query(
+            [
+                Filter.equals("status", "draft"),
+                Filter.equals("tags", "rust"),
+            ]
+        )
         assert len(results) == 0
 
     def test_query_three_filters(self, wiki_with_metadata):
-        results = wiki_with_metadata.query([
-            Filter.has_key("tags"),
-            Filter.has_key("priority"),
-            Filter.equals("status", "active"),
-        ])
+        results = wiki_with_metadata.query(
+            [
+                Filter.has_key("tags"),
+                Filter.has_key("priority"),
+                Filter.equals("status", "active"),
+            ]
+        )
         assert len(results) == 1
         assert results[0].name == "ProjectA"
 
@@ -274,8 +280,7 @@ class TestMetaTable:
 
     def test_metatable_basic(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "active")],
-            ["name", "status", "priority"]
+            [Filter.equals("status", "active")], ["name", "status", "priority"]
         )
         assert isinstance(result, MetaTableResult)
         assert len(result) == 1
@@ -290,8 +295,7 @@ class TestMetaTable:
 
     def test_metatable_multiple_rows(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.has_key("tags")],
-            ["name", "status"]
+            [Filter.has_key("tags")], ["name", "status"]
         )
         assert len(result) == 3  # ProjectA, ProjectB, Docs
 
@@ -302,8 +306,7 @@ class TestMetaTable:
 
     def test_metatable_iteration(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.has_key("tags")],
-            ["name", "tags"]
+            [Filter.has_key("tags")], ["name", "tags"]
         )
 
         names = []
@@ -317,7 +320,7 @@ class TestMetaTable:
     def test_metatable_missing_column(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
             [Filter.equals("status", "archived")],
-            ["name", "priority"]  # Archive has no priority
+            ["name", "priority"],  # Archive has no priority
         )
 
         assert len(result) == 1
@@ -328,8 +331,7 @@ class TestMetaTable:
 
     def test_metatable_file_path_column(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "draft")],
-            ["name", "file_path"]
+            [Filter.equals("status", "draft")], ["name", "file_path"]
         )
 
         row = result.rows[0]
@@ -337,16 +339,14 @@ class TestMetaTable:
 
     def test_metatable_is_empty(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "nonexistent")],
-            ["name"]
+            [Filter.equals("status", "nonexistent")], ["name"]
         )
         assert result.is_empty()
         assert len(result) == 0
 
     def test_metatable_repr(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "active")],
-            ["name", "status"]
+            [Filter.equals("status", "active")], ["name", "status"]
         )
         repr_str = repr(result)
         assert "MetaTableResult" in repr_str
@@ -358,8 +358,7 @@ class TestMetaTableRow:
 
     def test_row_get_existing_column(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "active")],
-            ["name", "tags"]
+            [Filter.equals("status", "active")], ["name", "tags"]
         )
         row = result.rows[0]
 
@@ -370,7 +369,7 @@ class TestMetaTableRow:
     def test_row_get_missing_column(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
             [Filter.equals("status", "active")],
-            ["name"]  # Only name column
+            ["name"],  # Only name column
         )
         row = result.rows[0]
 
@@ -379,8 +378,7 @@ class TestMetaTableRow:
 
     def test_row_repr(self, wiki_with_metadata):
         result = wiki_with_metadata.metatable(
-            [Filter.equals("status", "active")],
-            ["name"]
+            [Filter.equals("status", "active")], ["name"]
         )
         row = result.rows[0]
         repr_str = repr(row)

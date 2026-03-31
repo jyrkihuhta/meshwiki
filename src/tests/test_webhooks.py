@@ -1,10 +1,8 @@
 """Unit tests for the outbound webhook dispatcher."""
 
-import asyncio
 import hashlib
 import hmac
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 

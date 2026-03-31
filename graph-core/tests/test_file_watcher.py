@@ -5,7 +5,7 @@ import time
 import tempfile
 import pytest
 
-from graph_core import GraphEngine, GraphEvent
+from graph_core import GraphEngine
 
 
 def wait_for_events(engine, timeout=5.0, poll_interval=0.3):
