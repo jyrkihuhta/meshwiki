@@ -667,7 +667,9 @@ async def health_ready():
     checks["graph_engine"] = "ok" if engine else "not_loaded"
 
     status = "ready" if ok else "degraded"
-    return JSONResponse({"status": status, "checks": checks}, status_code=200 if ok else 503)
+    return JSONResponse(
+        {"status": status, "checks": checks}, status_code=200 if ok else 503
+    )
 
 
 # ========== Observability ==========
