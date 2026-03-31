@@ -39,7 +39,7 @@ RUN groupadd -r app --gid 1001 && \
     useradd -r -g app --uid 1001 --no-log-init app
 
 # Install Python dependencies
-COPY src/pyproject.toml .
+COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 
 # Install the graph_core wheel from builder stage
