@@ -11,7 +11,7 @@ from starlette.responses import RedirectResponse, Response
 
 # Paths that never require authentication
 _PUBLIC_PATHS = frozenset({"/login", "/health/live", "/health/ready", "/metrics"})
-_PUBLIC_PREFIXES = ("/static/",)
+_PUBLIC_PREFIXES = ("/static/", "/api/v1/")
 
 # In-memory rate limiter: ip -> (fail_count, lockout_until)
 _login_attempts: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))

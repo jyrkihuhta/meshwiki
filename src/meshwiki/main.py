@@ -32,6 +32,7 @@ from meshwiki.auth import (
     verify_password,
 )
 from meshwiki.config import settings
+from meshwiki.core.dependencies import set_storage
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
 from meshwiki.core.logging import configure_logging, get_logger
 from meshwiki.core.metrics import (
@@ -56,7 +57,15 @@ async def lifespan(app: FastAPI):
     """Application lifespan: initialize and shutdown graph engine."""
     init_engine(settings.data_dir, watch=settings.graph_watch)
     manager.start_polling()
+    if settings.factory_enabled:
+        from meshwiki.core.webhooks import dispatcher
+
+        await dispatcher.start()
     yield
+    if settings.factory_enabled:
+        from meshwiki.core.webhooks import dispatcher
+
+        await dispatcher.stop()
     manager.stop_polling()
     shutdown_engine()
 
@@ -179,6 +188,13 @@ templates.env.filters["timeago"] = timeago_filter
 
 # Initialize storage
 storage = FileStorage(settings.data_dir)
+set_storage(storage)
+
+# Mount factory API if enabled
+if settings.factory_enabled:
+    from meshwiki.api import router as api_v1_router
+
+    app.include_router(api_v1_router)
 
 
 # Template context helper

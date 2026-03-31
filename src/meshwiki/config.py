@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     auth_password: str = ""
     session_secret: str = "dev-secret-change-in-production"
 
+    # Agent factory
+    factory_enabled: bool = False
+    factory_api_key: str = ""
+    factory_webhook_url: str = ""
+    factory_webhook_secret: str = ""
+    github_webhook_secret: str = ""
+
     model_config = SettingsConfigDict(
         env_prefix="MESHWIKI_",
         env_file=".env",
