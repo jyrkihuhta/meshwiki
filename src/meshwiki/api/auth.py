@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import meshwiki.config as cfg
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+import meshwiki.config as cfg
 
 _bearer = HTTPBearer(auto_error=False)
 
