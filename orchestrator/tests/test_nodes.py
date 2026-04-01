@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from factory.agents.pm_agent import _build_subtask
@@ -11,6 +12,7 @@ from factory.nodes.collect import collect_results_node
 from factory.nodes.decompose import _build_subtask_page, decompose_node
 from factory.nodes.escalate import escalate_node
 from factory.nodes.finalize import finalize_node
+from factory.nodes.merge_check import merge_check_node
 from factory.nodes.pm_review import pm_review_node
 from factory.nodes.task_intake import task_intake_node
 from factory.state import FactoryState, SubTask
@@ -544,3 +546,206 @@ async def test_escalate_exhausted() -> None:
     # Status should remain "failed" when not retriable
     assert result["subtasks"][0]["attempt"] == 2
     assert result["subtasks"][0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# merge_check_node
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_merged_pr() -> None:
+    """merge_check_node sets subtask status to 'merged' when PR is merged."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=10,
+    )
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(
+        return_value={"number": 10, "state": "closed", "merged": True}
+    )
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    assert result["subtasks"][0]["status"] == "merged"
+    mock_github.get_pr.assert_awaited_once_with(10)
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_closed_not_merged() -> None:
+    """merge_check_node sets subtask status to 'failed' when PR is closed but not merged."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=11,
+    )
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(
+        return_value={"number": 11, "state": "closed", "merged": False}
+    )
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    assert result["subtasks"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_still_open() -> None:
+    """merge_check_node leaves subtask status unchanged when PR is still open."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=12,
+    )
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(
+        return_value={"number": 12, "state": "open", "merged": False}
+    )
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    assert result["subtasks"][0]["status"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_pr_number_from_url() -> None:
+    """merge_check_node extracts pr_number from pr_url when pr_number is None."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+    )
+    review_sub["pr_number"] = None
+    review_sub["pr_url"] = "https://github.com/owner/repo/pull/42"
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(
+        return_value={"number": 42, "state": "closed", "merged": True}
+    )
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    mock_github.get_pr.assert_awaited_once_with(42)
+    assert result["subtasks"][0]["status"] == "merged"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_no_pr_skipped() -> None:
+    """merge_check_node skips subtasks with no pr_number and no pr_url."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+    )
+    review_sub["pr_number"] = None
+    review_sub["pr_url"] = None
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    mock_github.get_pr.assert_not_awaited()
+    assert result["subtasks"][0]["status"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_skips_non_review_subtasks() -> None:
+    """merge_check_node does not call GitHub API for subtasks not in 'review' status."""
+    pending_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="pending",
+        pr_number=5,
+    )
+    state = _make_state(subtasks=[pending_sub])
+
+    mock_github = AsyncMock()
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    mock_github.get_pr.assert_not_awaited()
+    assert result["subtasks"][0]["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_api_error_continues() -> None:
+    """merge_check_node logs and continues when GitHub API returns an error."""
+    review_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=13,
+    )
+    state = _make_state(subtasks=[review_sub])
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "404 Not Found",
+            request=httpx.Request("GET", "https://api.github.com/repos/o/r/pulls/13"),
+            response=httpx.Response(404),
+        )
+    )
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    # Status should remain unchanged when the API call fails
+    assert result["subtasks"][0]["status"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_merge_check_node_multiple_subtasks() -> None:
+    """merge_check_node handles mixed statuses across multiple subtasks."""
+    merged_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=20,
+    )
+    open_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_02",
+        title="Sub 02",
+        status="review",
+        pr_number=21,
+    )
+    pending_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_03",
+        title="Sub 03",
+        status="pending",
+    )
+    state = _make_state(subtasks=[merged_sub, open_sub, pending_sub])
+
+    async def _fake_get_pr(pr_number: int) -> dict:
+        if pr_number == 20:
+            return {"number": 20, "state": "closed", "merged": True}
+        return {"number": 21, "state": "open", "merged": False}
+
+    mock_github = AsyncMock()
+    mock_github.get_pr = AsyncMock(side_effect=_fake_get_pr)
+
+    with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
+        result = await merge_check_node(state)
+
+    statuses = {s["id"]: s["status"] for s in result["subtasks"]}
+    assert statuses[merged_sub["id"]] == "merged"
+    assert statuses[open_sub["id"]] == "review"
+    assert statuses[pending_sub["id"]] == "pending"

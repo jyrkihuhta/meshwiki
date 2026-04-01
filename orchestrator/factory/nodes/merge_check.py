@@ -1,9 +1,12 @@
 """Merge check node: verify all PRs have been merged before finalization."""
 
-import json
-import logging
-import subprocess
+from __future__ import annotations
 
+import logging
+
+import httpx
+
+from ..integrations.github_client import GitHubClient, _extract_pr_number
 from ..state import FactoryState
 
 logger = logging.getLogger(__name__)
@@ -12,9 +15,15 @@ logger = logging.getLogger(__name__)
 async def merge_check_node(state: FactoryState) -> dict:
     """Confirm that all subtask PRs have been merged into the main branch.
 
-    Uses the ``gh`` CLI to check each subtask PR that is in ``"review"``
-    status.  If GitHub reports the PR as ``MERGED``, the subtask status is
-    updated to ``"merged"``.
+    Uses the GitHub REST API (via :class:`~factory.integrations.github_client.GitHubClient`)
+    to check the state of each subtask PR that is currently in ``"review"``
+    status.
+
+    - If the PR is merged (``pr["merged"]`` is ``True``), the subtask status is
+      updated to ``"merged"``.
+    - If the PR is closed but not merged, the subtask status is updated to
+      ``"failed"``.
+    - If the PR is still open the subtask status is left unchanged.
 
     Args:
         state: Current FactoryState after pm_review / human_review_code.
@@ -26,28 +35,59 @@ async def merge_check_node(state: FactoryState) -> dict:
         "merge_check: verifying PR merges for task %s",
         state.get("task_wiki_page", "<unknown>"),
     )
+
+    github_client = GitHubClient()
     subtasks = list(state["subtasks"])
+
     for i, subtask in enumerate(subtasks):
-        if subtask.get("pr_number") and subtask["status"] == "review":
-            result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    str(subtask["pr_number"]),
-                    "--json",
-                    "state,mergedAt",
-                ],
-                capture_output=True,
-                text=True,
+        if subtask["status"] != "review":
+            continue
+
+        pr_number: int | None = subtask.get("pr_number")
+
+        # Fall back to extracting from pr_url if pr_number is not set
+        if pr_number is None:
+            pr_url = subtask.get("pr_url")
+            if pr_url:
+                pr_number = _extract_pr_number(pr_url)
+
+        if pr_number is None:
+            logger.warning(
+                "merge_check: subtask %s in 'review' has no pr_number or pr_url — skipping",
+                subtask["id"],
             )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if data.get("state") == "MERGED":
-                    logger.info(
-                        "merge_check: PR #%s is merged for subtask %s",
-                        subtask["pr_number"],
-                        subtask["id"],
-                    )
-                    subtasks[i] = {**subtask, "status": "merged"}
+            continue
+
+        try:
+            pr = await github_client.get_pr(pr_number)
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "merge_check: failed to fetch PR #%s for subtask %s: %s",
+                pr_number,
+                subtask["id"],
+                exc,
+            )
+            continue
+
+        if pr.get("merged"):
+            logger.info(
+                "merge_check: PR #%s is merged for subtask %s",
+                pr_number,
+                subtask["id"],
+            )
+            subtasks[i] = {**subtask, "status": "merged"}
+        elif pr.get("state") == "closed":
+            logger.info(
+                "merge_check: PR #%s is closed (not merged) for subtask %s — marking failed",
+                pr_number,
+                subtask["id"],
+            )
+            subtasks[i] = {**subtask, "status": "failed"}
+        else:
+            logger.debug(
+                "merge_check: PR #%s is still open for subtask %s",
+                pr_number,
+                subtask["id"],
+            )
+
     return {"subtasks": subtasks}
