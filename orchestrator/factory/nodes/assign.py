@@ -9,16 +9,26 @@ from ..state import FactoryState, SubTask
 logger = logging.getLogger(__name__)
 
 
-def assign_grinders_node(state: FactoryState) -> list[Send]:
+def assign_grinders_node(state: FactoryState) -> dict:
+    """No-op state update before fan-out.
+
+    The actual fan-out to parallel grinders is handled by :func:`route_grinders`,
+    which is registered as the conditional edge routing function on this node.
+    LangGraph requires nodes to return dicts; ``Send`` objects must come from
+    routing functions, not nodes directly.
     """
-    Fan out pending/changes_requested subtasks to parallel grinder instances.
+    return {}
+
+
+def route_grinders(state: FactoryState) -> list[Send]:
+    """Fan out pending/changes_requested subtasks to parallel grinder instances.
 
     Detects file overlap and serializes conflicting subtasks — only subtasks
     with non-overlapping ``files_touched`` sets are dispatched in this round.
-    The rest remain 'pending' and will be dispatched in a subsequent round.
+    The rest remain 'pending' and will be picked up in a subsequent round.
 
-    Stub: builds Send commands with correct structure but grind_node is also
-    a stub. File-overlap detection logic is present as specified.
+    Returns:
+        List of ``Send`` commands, one per non-conflicting pending subtask.
     """
     pending = [
         s
@@ -39,7 +49,6 @@ def assign_grinders_node(state: FactoryState) -> list[Send]:
     for subtask in pending:
         files = set(subtask.get("files_touched") or [])
         if files & assigned_files:
-            # Defer: leave status as-is, will be picked up next round
             logger.debug(
                 "assign_grinders: deferring subtask %s due to file conflict",
                 subtask["id"],
@@ -48,8 +57,7 @@ def assign_grinders_node(state: FactoryState) -> list[Send]:
             assigned_files |= files
             to_dispatch.append(subtask)
 
-    sends = [
+    return [
         Send("grind", {**state, "_current_subtask_id": subtask["id"]})
         for subtask in to_dispatch
     ]
-    return sends

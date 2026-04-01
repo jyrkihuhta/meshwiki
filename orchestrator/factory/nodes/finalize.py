@@ -2,7 +2,6 @@
 
 import logging
 
-from ..config import get_settings
 from ..integrations.meshwiki_client import MeshWikiClient
 from ..state import FactoryState
 
@@ -21,10 +20,7 @@ async def finalize_node(state: FactoryState) -> dict:
     Returns:
         Partial state update setting ``graph_status`` to ``"completed"``.
     """
-    settings = get_settings()
-    client = MeshWikiClient(
-        base_url=settings.meshwiki_url, api_key=settings.meshwiki_api_key
-    )
+    client = MeshWikiClient()
 
     logger.info(
         "finalize: completing task %s (cost: $%.4f)",

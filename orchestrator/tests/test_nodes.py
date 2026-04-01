@@ -452,8 +452,7 @@ async def test_finalize_node() -> None:
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
-        with patch("factory.nodes.finalize.get_settings"):
-            result = await finalize_node(state)
+        result = await finalize_node(state)
 
     assert result["graph_status"] == "completed"
     mock_client_instance.transition_task.assert_awaited_once()
@@ -475,8 +474,7 @@ async def test_finalize_node_handles_client_error() -> None:
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
-        with patch("factory.nodes.finalize.get_settings"):
-            result = await finalize_node(state)
+        result = await finalize_node(state)
 
     assert result["graph_status"] == "completed"
 
@@ -507,8 +505,7 @@ async def test_escalate_retriable() -> None:
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
-        with patch("factory.nodes.escalate.get_settings"):
-            result = await escalate_node(state)
+        result = await escalate_node(state)
 
     assert result["escalation_decision"] == "retry"
     assert result["graph_status"] == "escalated"
@@ -538,8 +535,7 @@ async def test_escalate_exhausted() -> None:
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
-        with patch("factory.nodes.escalate.get_settings"):
-            result = await escalate_node(state)
+        result = await escalate_node(state)
 
     assert result["escalation_decision"] == "abandon"
     assert result["graph_status"] == "escalated"

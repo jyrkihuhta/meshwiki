@@ -1,7 +1,7 @@
 # Domain: Agent Factory
 
 **Owner:** TBD
-**Status:** Phases 1–4 complete, Phase 5 next
+**Status:** Phases 1–7 complete
 **Language:** Python (MeshWiki layer) + future Python (LangGraph orchestrator)
 **PRD:** `docs/prd/003-agent-factory.md`
 
@@ -48,7 +48,27 @@ The autonomous agent software development factory:
 - [x] `pm_review` node — PM reviews grinder PRs, approves or requests changes
 - [x] `factory/integrations/github_client.py` — stub (implemented in Phase 5)
 
-### Phase 5–7: Grinder Agent + Chat + Hardening (not started)
+### Phase 5: Grinder Agent ✅ (merged #TBD)
+- [x] `orchestrator/factory/agents/grinder_agent.py` — `grind_subtask()` agentic loop via MiniMax M2.7
+- [x] `grind` node — runs grinder for a single subtask, returns updated subtask
+- [x] `factory/integrations/github_client.py` — full async GitHub REST client (`get_pr`, `get_pr_diff`, `approve_pr`, `request_changes`, `close_pr`)
+- [x] `collect_results` node — tallies completed/failed subtasks after fan-out
+- [x] `merge_check` node — verifies all PRs merged via GitHub API
+- [x] Direct-grind mode (`skip_decomposition: true` in task frontmatter)
+
+### Phase 6: PM Chat Interface ✅ (merged #TBD)
+- [x] `factory/webhook_server.py` — updated with HMAC verification and event routing
+- [x] `factory/graph.py` — full StateGraph with all 11 nodes, conditional routing, interrupt points
+- [x] `escalate` node — retry/abandon logic with attempt counter management
+- [x] `finalize` node — transitions parent task to `done`, persists `cost_usd`
+
+### Phase 7: End-to-End Pipeline Hardening ✅ (merged #TBD)
+- [x] `orchestrator/factory/main.py` — orchestrator entrypoint (FastAPI + uvicorn, health at `/health`)
+- [x] Standardized `MeshWikiClient` instantiation across all nodes (consistent no-arg constructor)
+- [x] `pm_review` node fully wires diff fetching via `GitHubClient.get_pr_diff()` into `review_with_pm()`
+- [x] `finalize` node completes `MeshWikiClient.transition_task(name, "done")` with `cost_usd`
+- [x] `escalate` node completes retry logic: increments `attempt`, resets to `pending` for retriable subtasks
+- [x] `orchestrator/tests/test_pipeline.py` — integration smoke tests (4 tests) exercising full graph with mocked I/O
 
 ## Architecture
 

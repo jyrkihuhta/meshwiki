@@ -16,6 +16,7 @@ from .nodes import (
     human_review_plan_node,
     merge_check_node,
     pm_review_node,
+    route_grinders,
     task_intake_node,
 )
 from .state import FactoryState
@@ -132,7 +133,7 @@ def build_graph(checkpointer=None):
         {"approved": "assign_grinders", "rejected": "decompose"},
     )
 
-    graph.add_edge("assign_grinders", "grind")
+    graph.add_conditional_edges("assign_grinders", route_grinders)
     graph.add_edge("grind", "collect_results")
 
     graph.add_conditional_edges(

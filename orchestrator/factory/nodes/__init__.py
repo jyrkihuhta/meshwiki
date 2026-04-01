@@ -1,6 +1,6 @@
 """Node functions for the factory LangGraph."""
 
-from .assign import assign_grinders_node
+from .assign import assign_grinders_node, route_grinders
 from .collect import collect_results_node
 from .decompose import decompose_node
 from .escalate import escalate_node
@@ -16,6 +16,7 @@ __all__ = [
     "decompose_node",
     "human_review_plan_node",
     "assign_grinders_node",
+    "route_grinders",
     "grind_node",
     "collect_results_node",
     "pm_review_node",

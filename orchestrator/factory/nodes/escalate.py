@@ -2,7 +2,6 @@
 
 import logging
 
-from ..config import get_settings
 from ..integrations.meshwiki_client import MeshWikiClient
 from ..state import FactoryState
 
@@ -32,10 +31,7 @@ async def escalate_node(state: FactoryState) -> dict:
         Partial state update with updated ``subtasks``, ``graph_status``, and
         ``escalation_decision``.
     """
-    settings = get_settings()
-    client = MeshWikiClient(
-        base_url=settings.meshwiki_url, api_key=settings.meshwiki_api_key
-    )
+    client = MeshWikiClient()
 
     failed_ids = state.get("failed_subtask_ids", [])
     failed_subtasks = [s for s in state["subtasks"] if s["id"] in failed_ids]
