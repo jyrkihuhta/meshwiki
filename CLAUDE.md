@@ -17,6 +17,7 @@ Read these for full context:
 - `docs/getting-started.md` - Setup and deployment guide
 - `docs/architecture.md` - System design and components
 - `docs/prd/002-meshwiki-mvp.md` - Application requirements and status
+- `docs/prd/003-agent-factory.md` - Agent factory full spec (phases, API, orchestrator)
 
 - `docs/prd/001-infrastructure.md` - Infrastructure requirements
 - `docs/custom-macros.md` - How to create custom `<<Macro>>` extensions
@@ -293,6 +294,7 @@ Each domain has a dedicated doc in `docs/domains/`:
 |--------|-----|-------------|
 | Graph Engine | `graph-engine.md` | Rust core, petgraph, PyO3 |
 | Business Logic | `business-logic.md` | Python wiki functionality |
+| Agent Factory | `factory.md` | JSON API, state machine, webhooks, orchestrator |
 | Authentication | `authentication.md` | User auth (planned) |
 | Infrastructure | `infrastructure.md` | k8s, deployment |
 | Observability | `observability.md` | Logging, metrics |
