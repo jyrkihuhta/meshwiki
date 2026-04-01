@@ -1,22 +1,83 @@
 """PM review node: PM agent reviews grinder-produced code."""
 
+from __future__ import annotations
+
 import logging
 
-from ..state import FactoryState
+from ..agents.pm_agent import review_with_pm
+from ..integrations.github_client import GitHubClient
+from ..integrations.meshwiki_client import MeshWikiClient
+from ..state import FactoryState, SubTask
 
 logger = logging.getLogger(__name__)
 
 
-def pm_review_node(state: FactoryState) -> dict:
-    """
-    Call the PM agent to review code produced by grinders.
+async def pm_review_node(state: FactoryState) -> dict:
+    """Call the PM agent to review code produced by grinders.
 
-    Stub: logs and returns an empty update.
-    Full implementation will fetch PR diffs via GitHubClient and invoke
-    pm_agent.review_prs() to approve or request changes on each subtask.
+    Iterates over all subtasks in 'review' status, calls the PM agent to
+    approve or request changes, and updates each subtask's status accordingly.
+
+    Args:
+        state: Current FactoryState.
+
+    Returns:
+        Partial state update with the updated ``subtasks`` list.
     """
     logger.info(
         "pm_review: reviewing results for task %s",
         state.get("task_wiki_page", "<unknown>"),
     )
-    return {}
+
+    meshwiki_client = MeshWikiClient()
+    github_client = GitHubClient()
+
+    subtasks: list[SubTask] = list(state.get("subtasks", []))
+    review_subtasks = [s for s in subtasks if s["status"] == "review"]
+
+    logger.info("pm_review: %d subtask(s) in review status", len(review_subtasks))
+
+    updated_subtasks: list[SubTask] = []
+    for subtask in subtasks:
+        if subtask["status"] != "review":
+            updated_subtasks.append(subtask)
+            continue
+
+        logger.info(
+            "pm_review: reviewing subtask %s (%s)", subtask["id"], subtask["title"]
+        )
+        try:
+            result = await review_with_pm(
+                state, subtask, meshwiki_client, github_client
+            )
+        except Exception as exc:
+            logger.error(
+                "pm_review: review failed for subtask %s: %s", subtask["id"], exc
+            )
+            updated_subtask = SubTask(**{**subtask, "review_feedback": str(exc)})
+            updated_subtasks.append(updated_subtask)
+            continue
+
+        decision: str = result.get("decision", "changes_requested")
+        feedback: str | None = result.get("feedback")
+
+        if decision == "approved":
+            updated_subtask = SubTask(
+                **{**subtask, "status": "merged", "review_feedback": feedback}
+            )
+            logger.info("pm_review: subtask %s approved", subtask["id"])
+        else:
+            updated_subtask = SubTask(
+                **{
+                    **subtask,
+                    "status": "changes_requested",
+                    "review_feedback": feedback,
+                }
+            )
+            logger.info(
+                "pm_review: subtask %s changes_requested: %s", subtask["id"], feedback
+            )
+
+        updated_subtasks.append(updated_subtask)
+
+    return {"subtasks": updated_subtasks}
