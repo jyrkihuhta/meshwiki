@@ -508,6 +508,33 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     assert result["status"] == "review"
 
 
+def _make_sandbox_mock(commands_side_effect: list) -> MagicMock:
+    """Build a mock Sandbox usable as a context manager."""
+    mock_commands = MagicMock()
+    mock_commands.run = MagicMock(side_effect=commands_side_effect)
+    mock_sandbox = MagicMock()
+    mock_sandbox.commands = mock_commands
+    mock_sandbox.files = MagicMock()
+    # Context manager support
+    mock_sandbox.__enter__ = MagicMock(return_value=mock_sandbox)
+    mock_sandbox.__exit__ = MagicMock(return_value=False)
+    return mock_sandbox
+
+
+def _e2b_command_sequence(kilo_result: MagicMock) -> list:
+    """Return the expected commands.run side_effect list for grind_subtask_e2b.
+
+    Sequence:
+      1. git config (combined: email + name + credential helper)
+      2. Node.js bootstrap (nodesource + apt + npm install -g kilo)
+      3. git clone
+      4. pip install
+      5. kilo run  ← caller supplies the result
+    """
+    ok = MagicMock(exit_code=0, stdout="", stderr="")
+    return [ok, ok, MagicMock(exit_code=0, stdout="", stderr=""), ok, kilo_result]
+
+
 @pytest.mark.asyncio
 async def test_grind_subtask_e2b_extracts_pr_url() -> None:
     """grind_subtask_e2b sets status='review' and pr_url when output contains a PR URL."""
@@ -518,35 +545,10 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
     meshwiki_client.transition_task = AsyncMock(return_value={})
 
     pr_url = "https://github.com/owner/repo/pull/42"
-    fake_output = f"Running kilo...\nDone!\n{pr_url}"
-
-    # Build mock Sandbox
-    mock_cmd_result = MagicMock()
-    mock_cmd_result.exit_code = 0
-    mock_cmd_result.stdout = fake_output
-    mock_cmd_result.stderr = ""
-
-    mock_clone_result = MagicMock()
-    mock_clone_result.exit_code = 0
-    mock_clone_result.stdout = ""
-    mock_clone_result.stderr = ""
-
-    mock_commands = MagicMock()
-    mock_commands.run = MagicMock(
-        side_effect=[
-            MagicMock(exit_code=0, stdout="", stderr=""),  # npm install
-            MagicMock(exit_code=0, stdout="", stderr=""),  # git config email
-            MagicMock(exit_code=0, stdout="", stderr=""),  # git config name
-            mock_clone_result,  # git clone
-            MagicMock(exit_code=0, stdout="", stderr=""),  # pip install
-            mock_cmd_result,  # kilo run
-        ]
+    kilo_result = MagicMock(
+        exit_code=0, stdout=f"Running kilo...\nDone!\n{pr_url}", stderr=""
     )
-    mock_files = MagicMock()
-    mock_sandbox = MagicMock()
-    mock_sandbox.commands = mock_commands
-    mock_sandbox.files = mock_files
-    mock_sandbox.kill = MagicMock()
+    mock_sandbox = _make_sandbox_mock(_e2b_command_sequence(kilo_result))
 
     mock_settings = MagicMock(
         e2b_api_key="e2b-test",
@@ -556,19 +558,13 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
         grinder_model="MiniMax-M2.7",
     )
 
-    with patch(
-        "factory.agents.grinder_agent.get_settings",
-        return_value=mock_settings,
-    ):
-        with patch(
-            "e2b_code_interpreter.Sandbox",
-            return_value=mock_sandbox,
-        ):
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.Sandbox") as mock_cls:
+            mock_cls.create.return_value = mock_sandbox
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
     assert result["status"] == "review"
     assert result["pr_url"] == pr_url
-    mock_sandbox.kill.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -580,34 +576,12 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
     meshwiki_client.get_page = AsyncMock(return_value={"content": "# Task spec"})
     meshwiki_client.transition_task = AsyncMock(return_value={})
 
-    fake_output = "Running kilo...\nSomething went wrong.\nNo PR was created."
-
-    mock_cmd_result = MagicMock()
-    mock_cmd_result.exit_code = 0
-    mock_cmd_result.stdout = fake_output
-    mock_cmd_result.stderr = ""
-
-    mock_clone_result = MagicMock()
-    mock_clone_result.exit_code = 0
-    mock_clone_result.stdout = ""
-    mock_clone_result.stderr = ""
-
-    mock_commands = MagicMock()
-    mock_commands.run = MagicMock(
-        side_effect=[
-            MagicMock(exit_code=0, stdout="", stderr=""),  # npm install
-            MagicMock(exit_code=0, stdout="", stderr=""),  # git config email
-            MagicMock(exit_code=0, stdout="", stderr=""),  # git config name
-            mock_clone_result,  # git clone
-            MagicMock(exit_code=0, stdout="", stderr=""),  # pip install
-            mock_cmd_result,  # kilo run
-        ]
+    kilo_result = MagicMock(
+        exit_code=0,
+        stdout="Running kilo...\nSomething went wrong.\nNo PR was created.",
+        stderr="",
     )
-    mock_files = MagicMock()
-    mock_sandbox = MagicMock()
-    mock_sandbox.commands = mock_commands
-    mock_sandbox.files = mock_files
-    mock_sandbox.kill = MagicMock()
+    mock_sandbox = _make_sandbox_mock(_e2b_command_sequence(kilo_result))
 
     mock_settings = MagicMock(
         e2b_api_key="e2b-test",
@@ -617,14 +591,9 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
         grinder_model="MiniMax-M2.7",
     )
 
-    with patch(
-        "factory.agents.grinder_agent.get_settings",
-        return_value=mock_settings,
-    ):
-        with patch(
-            "e2b_code_interpreter.Sandbox",
-            return_value=mock_sandbox,
-        ):
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.Sandbox") as mock_cls:
+            mock_cls.create.return_value = mock_sandbox
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
     assert result["status"] == "failed"
@@ -633,7 +602,7 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_grind_subtask_e2b_sandbox_error() -> None:
-    """grind_subtask_e2b handles Sandbox constructor raising an exception gracefully."""
+    """grind_subtask_e2b handles Sandbox.create raising an exception gracefully."""
     state = _make_state()
     subtask = _make_subtask()
     meshwiki_client = AsyncMock()
@@ -648,14 +617,9 @@ async def test_grind_subtask_e2b_sandbox_error() -> None:
         grinder_model="MiniMax-M2.7",
     )
 
-    with patch(
-        "factory.agents.grinder_agent.get_settings",
-        return_value=mock_settings,
-    ):
-        with patch(
-            "e2b_code_interpreter.Sandbox",
-            side_effect=RuntimeError("sandbox auth failed"),
-        ):
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.Sandbox") as mock_cls:
+            mock_cls.create.side_effect = RuntimeError("sandbox auth failed")
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
     assert result["status"] == "failed"
