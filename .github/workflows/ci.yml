@@ -399,6 +399,7 @@ jobs:
         run: |
           scp deploy/vps/docker-compose.prod.yml "${VPS_USER}@${VPS_HOST}:/opt/meshwiki/docker-compose.yml"
           envsubst '$VPS_DOMAIN' < deploy/vps/Caddyfile | ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/Caddyfile"
+          ssh "${VPS_USER}@${VPS_HOST}" "docker exec meshwiki-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true"
 
       - name: Write orchestrator env to VPS
         env:

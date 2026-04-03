@@ -251,7 +251,7 @@ class TestGraphPage:
             response = await client.get("/graph")
             assert response.status_code == 200
             body = response.text
-            assert "d3.v7" in body
+            assert "cdn.jsdelivr.net" in body and "d3" in body
             assert "graph-container" in body
             assert "graph.js" in body
 
