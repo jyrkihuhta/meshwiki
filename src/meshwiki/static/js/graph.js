@@ -17,6 +17,12 @@
     var tooltipVisible = false;
     var tooltipFadeTimeout = null;
 
+    // Search state
+    var searchQuery = "";
+    var matchedNodes = [];
+    var highlightedNode = null;
+    var searchInput, searchResults, searchClear, searchContainer;
+
     function formatTimestamp(ts) {
         if (!ts || ts === 0) return "Unknown";
         var date = new Date(ts * 1000);
@@ -153,6 +159,215 @@
     var linkSel = linkGroup.selectAll("line");
     var nodeSel = nodeGroup.selectAll("g.node");
 
+    // Search UI
+    function initSearchUI() {
+        searchContainer = document.createElement("div");
+        searchContainer.className = "graph-search-container";
+        searchContainer.innerHTML =
+            '<div class="graph-search-input-wrapper">' +
+            '<input type="text" class="graph-search-input" placeholder="Search nodes..." autocomplete="off" />' +
+            '<button class="graph-search-clear" type="button" aria-label="Clear search">&times;</button>' +
+            "</div>" +
+            '<div class="graph-search-results"></div>';
+        container.style.position = "relative";
+        container.appendChild(searchContainer);
+
+        searchInput = searchContainer.querySelector(".graph-search-input");
+        searchResults = searchContainer.querySelector(".graph-search-results");
+        searchClear = searchContainer.querySelector(".graph-search-clear");
+
+        searchInput.addEventListener("input", handleSearchInput);
+        searchInput.addEventListener("keydown", handleSearchKeydown);
+        searchClear.addEventListener("click", clearSearch);
+
+        document.addEventListener("click", function (e) {
+            if (!searchContainer.contains(e.target)) {
+                searchResults.classList.remove("visible");
+            }
+        });
+    }
+
+    function handleSearchInput(e) {
+        var query = e.target.value.trim();
+        searchClear.classList.toggle("visible", query.length > 0);
+
+        if (query.length === 0) {
+            clearSearch();
+            return;
+        }
+
+        searchQuery = query;
+        performSearch(query);
+    }
+
+    function handleSearchKeydown(e) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            var focused = searchResults.querySelector(".focused");
+            if (focused) {
+                selectResult(focused);
+            } else if (matchedNodes.length > 0) {
+                panToNode(matchedNodes[0].id);
+            }
+            searchResults.classList.remove("visible");
+        } else if (e.key === "Escape") {
+            searchResults.classList.remove("visible");
+            searchInput.blur();
+        } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            navigateResults(1);
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            navigateResults(-1);
+        }
+    }
+
+    function performSearch(query) {
+        var lowerQuery = query.toLowerCase();
+        matchedNodes = nodes.filter(function (n) {
+            return n.id.toLowerCase().includes(lowerQuery);
+        });
+
+        if (matchedNodes.length === 0) {
+            searchResults.innerHTML =
+                '<div class="graph-search-result-item" style="color: var(--color-text-muted); cursor: default;">No matches</div>';
+        } else {
+            searchResults.innerHTML = matchedNodes
+                .slice(0, 10)
+                .map(function (n, i) {
+                    var highlighted = highlightMatch(n.id, query);
+                    return (
+                        '<div class="graph-search-result-item" data-name="' +
+                        n.id +
+                        '" data-index="' +
+                        i +
+                        '">' +
+                        highlighted +
+                        "</div>"
+                    );
+                })
+                .join("");
+        }
+
+        searchResults.classList.add("visible");
+
+        searchResults.querySelectorAll(".graph-search-result-item[data-name]").forEach(function (item) {
+            item.addEventListener("click", function () {
+                selectResult(item);
+            });
+        });
+
+        updateHighlights();
+    }
+
+    function highlightMatch(text, query) {
+        var lowerText = text.toLowerCase();
+        var lowerQuery = query.toLowerCase();
+        var idx = lowerText.indexOf(lowerQuery);
+        if (idx === -1) return text;
+        return (
+            text.slice(0, idx) +
+            "<mark>" +
+            text.slice(idx, idx + query.length) +
+            "</mark>" +
+            text.slice(idx + query.length)
+        );
+    }
+
+    function navigateResults(direction) {
+        var items = searchResults.querySelectorAll(".graph-search-result-item[data-name]");
+        if (items.length === 0) return;
+
+        var focusedIdx = -1;
+        items.forEach(function (item, i) {
+            if (item.classList.contains("focused")) {
+                focusedIdx = i;
+                item.classList.remove("focused");
+            }
+        });
+
+        var newIdx = focusedIdx + direction;
+        if (newIdx < 0) newIdx = items.length - 1;
+        if (newIdx >= items.length) newIdx = 0;
+
+        items[newIdx].classList.add("focused");
+        items[newIdx].scrollIntoView({ block: "nearest" });
+    }
+
+    function selectResult(item) {
+        var name = item.getAttribute("data-name");
+        panToNode(name);
+        searchResults.classList.remove("visible");
+    }
+
+    function panToNode(name) {
+        var nodeData = nodes.find(function (n) {
+            return n.id === name;
+        });
+        if (!nodeData || nodeData.x === undefined || nodeData.y === undefined) return;
+
+        highlightedNode = name;
+
+        var nodeEls = nodeGroup.selectAll("g.node").filter(function (d) {
+            return d.id === name;
+        });
+        nodeEls.classed("panning", true);
+
+        var scale = zoom.scaleExtent()[1] * 0.8;
+        var tx = width / 2 - nodeData.x * scale;
+        var ty = height / 2 - nodeData.y * scale;
+
+        svg.transition()
+            .duration(500)
+            .call(
+                zoom.transform,
+                d3.zoomIdentity.translate(tx, ty).scale(scale),
+                function () {
+                    setTimeout(function () {
+                        nodeEls.classed("panning", false);
+                    }, 500);
+                }
+            );
+
+        updateHighlights();
+    }
+
+    function updateHighlights() {
+        if (searchQuery.length === 0) {
+            nodeGroup.selectAll("g.node").classed("dimmed", false).classed("match", false);
+            linkGroup.selectAll("line").attr("stroke-opacity", 0.6);
+            return;
+        }
+
+        var lowerQuery = searchQuery.toLowerCase();
+        var matchedIds = matchedNodes.map(function (n) {
+            return n.id;
+        });
+
+        nodeGroup.selectAll("g.node").each(function (d) {
+            var isMatch = matchedIds.indexOf(d.id) !== -1;
+            d3.select(this).classed("match", isMatch).classed("dimmed", !isMatch);
+        });
+
+        linkGroup.selectAll("line").attr("stroke-opacity", function (l) {
+            var srcId = typeof l.source === "object" ? l.source.id : l.source;
+            var tgtId = typeof l.target === "object" ? l.target.id : l.target;
+            return matchedIds.indexOf(srcId) !== -1 || matchedIds.indexOf(tgtId) !== -1 ? 0.8 : 0.15;
+        });
+    }
+
+    function clearSearch() {
+        searchQuery = "";
+        matchedNodes = [];
+        highlightedNode = null;
+        searchInput.value = "";
+        searchClear.classList.remove("visible");
+        searchResults.classList.remove("visible");
+        searchResults.innerHTML = "";
+        updateHighlights();
+    }
+
+    // Drag behavior
     function drag(sim) {
         return d3.drag()
             .on("start", function (event, d) {
@@ -410,6 +625,7 @@
             nodes.push.apply(nodes, data.nodes);
             links.push.apply(links, data.links);
             render();
+            initSearchUI();
         })
         .catch(function (err) {
             console.error("Failed to load graph:", err);
