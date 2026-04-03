@@ -48,7 +48,7 @@ async def test_get_page_not_found(client: MeshWikiClient) -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_page_sends_api_key(client: MeshWikiClient) -> None:
-    """get_page sends the X-API-Key header."""
+    """get_page sends the Authorization: Bearer header."""
     page_data = {"name": "Task_0001", "content": "", "metadata": {}}
     route = respx.get(f"{BASE_URL}/api/v1/pages/Task_0001").mock(
         return_value=httpx.Response(200, json=page_data)
@@ -56,7 +56,7 @@ async def test_get_page_sends_api_key(client: MeshWikiClient) -> None:
 
     await client.get_page("Task_0001")
     assert route.called
-    assert route.calls[0].request.headers["x-api-key"] == "test-key"
+    assert route.calls[0].request.headers["authorization"] == "Bearer test-key"
 
 
 # ---------------------------------------------------------------------------
