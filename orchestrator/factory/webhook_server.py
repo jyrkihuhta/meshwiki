@@ -41,7 +41,7 @@ def _verify_signature(body: bytes, signature_header: str | None) -> None:
         return  # Dev mode: skip verification
 
     if not signature_header:
-        raise HTTPException(status_code=403, detail="Missing X-MeshWiki-Signature")
+        raise HTTPException(status_code=403, detail="Missing X-MeshWiki-Signature-256")
 
     expected = hmac.new(
         settings.webhook_secret.encode(),
@@ -91,7 +91,7 @@ async def health() -> dict[str, str]:
 @app.post("/webhook")
 async def receive_webhook(
     request: Request,
-    x_meshwiki_signature: str | None = Header(default=None),
+    x_meshwiki_signature_256: str | None = Header(default=None),
 ) -> dict[str, str]:
     """
     Receive an outbound webhook event from MeshWiki.
@@ -111,7 +111,7 @@ async def receive_webhook(
     - everything else   — log and return ``{"status": "ignored"}``
     """
     body = await request.body()
-    _verify_signature(body, x_meshwiki_signature)
+    _verify_signature(body, x_meshwiki_signature_256)
 
     payload = await request.json()
     event: str = payload.get("event", "")
