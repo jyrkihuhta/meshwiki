@@ -45,11 +45,14 @@ def _build_subtask_page(subtask: SubTask, parent_task: str) -> str:
         f'title: "{subtask["title"]}"\n'
         f"type: task\n"
         f"status: planned\n"
+        f"skip_decomposition: true\n"
         f'parent_task: "{parent_task}"\n'
         f'estimation: "{estimation_label}"\n'
         f"tags:\n"
         f"  - factory\n"
         f"---\n"
+        f"\n"
+        f"<<TaskStatus>>\n"
         f"\n"
         f"# {subtask['title']}\n"
         f"\n"

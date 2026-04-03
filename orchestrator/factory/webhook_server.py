@@ -132,10 +132,16 @@ async def receive_webhook(
     if event == "task.assigned":
         initial_state = _build_initial_state(page_name, data)
         config = {"configurable": {"thread_id": page_name}}
-        asyncio.create_task(
+
+        def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
+            if not t.cancelled() and (exc := t.exception()):
+                logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
+
+        task = asyncio.create_task(
             _graph.ainvoke(initial_state, config=config),
             name=f"graph:{page_name}",
         )
+        task.add_done_callback(_log_exc)
         logger.info("webhook: started graph task for %s", page_name)
         return {"status": "started"}
 

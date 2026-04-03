@@ -437,6 +437,10 @@ jobs:
           PREV_VERSION=\$(cat .current_version 2>/dev/null || echo latest)
           echo "Deploying ${NEW_VERSION} (was: \${PREV_VERSION})"
 
+          # Persist version so manual docker compose commands use the right image
+          sed -i '/^MESHWIKI_VERSION=/d' .env
+          echo "MESHWIKI_VERSION=${NEW_VERSION}" >> .env
+
           MESHWIKI_VERSION="${NEW_VERSION}" docker compose pull
           MESHWIKI_VERSION="${NEW_VERSION}" docker compose up -d
 
