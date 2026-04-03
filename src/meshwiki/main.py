@@ -381,6 +381,39 @@ async def view_page(request: Request, name: str):
         except Exception:
             pass
 
+    # For epic pages, fetch child tasks so <<EpicStatus>> can render them.
+    page_type = frontmatter.get("type", "")
+    if isinstance(page_type, list):
+        page_type = page_type[0] if page_type else ""
+    if page_type == "epic":
+        all_pages = await storage.list_pages_with_metadata()
+        child_tasks = []
+        for p in all_pages:
+            if p.metadata is None:
+                continue
+            meta = p.metadata.model_dump()
+            parent_epic = (
+                meta.get("parent_epic") or p.metadata.model_extra.get("parent_epic")
+                if hasattr(p.metadata, "model_extra")
+                else None
+            )
+            if isinstance(parent_epic, list):
+                parent_epic = parent_epic[0] if parent_epic else None
+            if parent_epic == name:
+                status = (
+                    meta.get("status")
+                    or (
+                        p.metadata.model_extra.get("status")
+                        if hasattr(p.metadata, "model_extra")
+                        else None
+                    )
+                    or "planned"
+                )
+                if isinstance(status, list):
+                    status = status[0] if status else "planned"
+                child_tasks.append({"name": p.name, "title": p.title, "status": status})
+        frontmatter["_child_tasks"] = child_tasks
+
     # Parse content with wiki links, TOC, and page context for macros.
     html_content, toc_html = parse_wiki_content_with_toc(
         page.content,
