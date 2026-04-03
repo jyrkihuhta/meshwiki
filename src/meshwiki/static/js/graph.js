@@ -1,13 +1,26 @@
 (function () {
     "use strict";
 
+    var MIN_RADIUS = 5;
+    var MAX_RADIUS = 24;
+
+    function calculateRadius(backlinksCount) {
+        if (backlinksCount <= 0) return MIN_RADIUS;
+        if (backlinksCount === 1) return MIN_RADIUS + 2;
+        var logScale = Math.min(1, Math.log(backlinksCount + 1) / Math.log(101));
+        return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * logScale;
+    }
+
+    function getNodeRadius(d) {
+        return calculateRadius(d.backlinks_count || 0);
+    }
+
     var container = document.getElementById("graph-container");
     var svg = d3.select("#graph-svg");
     var statsEl = document.getElementById("graph-stats");
     var wsStatusEl = document.getElementById("ws-status");
     var unavailableEl = document.getElementById("graph-unavailable");
 
-    // Tooltip element
     var tooltip = document.createElement("div");
     tooltip.className = "graph-tooltip";
     tooltip.setAttribute("role", "tooltip");
@@ -183,6 +196,78 @@
         document.addEventListener("click", function (e) {
             if (!searchContainer.contains(e.target)) {
                 searchResults.classList.remove("visible");
+            }
+        });
+    }
+
+    var legendCollapsed = false;
+    var legendDraggable = null;
+    var legendEl = null;
+
+    function initLegend() {
+        legendEl = document.createElement("div");
+        legendEl.className = "graph-legend";
+        legendEl.innerHTML =
+            '<div class="graph-legend-header">' +
+            '<span class="graph-legend-title">Node Size</span>' +
+            '<button class="graph-legend-toggle" aria-label="Toggle legend">&minus;</button>' +
+            "</div>" +
+            '<div class="graph-legend-content">' +
+            '<div class="graph-legend-item">' +
+            '<svg width="40" height="30"><circle cx="20" cy="15" r="' + MIN_RADIUS + '" fill="var(--color-text-muted)" opacity="0.5"/></svg>' +
+            '<span class="graph-legend-label">0 links</span>' +
+            "</div>" +
+            '<div class="graph-legend-item">' +
+            '<svg width="40" height="30"><circle cx="20" cy="15" r="' + (MIN_RADIUS + 5) + '" fill="var(--color-text-muted)" opacity="0.5"/></svg>' +
+            '<span class="graph-legend-label">~5 links</span>' +
+            "</div>" +
+            '<div class="graph-legend-item">' +
+            '<svg width="40" height="30"><circle cx="20" cy="15" r="' + (MIN_RADIUS + 10) + '" fill="var(--color-text-muted)" opacity="0.5"/></svg>' +
+            '<span class="graph-legend-label">~25 links</span>' +
+            "</div>" +
+            '<div class="graph-legend-item">' +
+            '<svg width="40" height="30"><circle cx="20" cy="15" r="' + MAX_RADIUS + '" fill="var(--color-text-muted)" opacity="0.5"/></svg>' +
+            '<span class="graph-legend-label">100+ links</span>' +
+            "</div>" +
+            "</div>";
+        container.appendChild(legendEl);
+
+        var legendHeader = legendEl.querySelector(".graph-legend-header");
+        var legendToggle = legendEl.querySelector(".graph-legend-toggle");
+
+        legendToggle.addEventListener("click", function () {
+            legendCollapsed = !legendCollapsed;
+            var content = legendEl.querySelector(".graph-legend-content");
+            var label = legendCollapsed ? "+" : "\u2212";
+            legendToggle.textContent = label;
+            content.style.display = legendCollapsed ? "none" : "flex";
+        });
+
+        var legendPos = { x: 0, y: 0 };
+        var isDragging = false;
+        var startPos = { x: 0, y: 0 };
+
+        legendHeader.addEventListener("mousedown", function (e) {
+            if (e.target === legendToggle) return;
+            isDragging = true;
+            startPos = { x: e.clientX - legendPos.x, y: e.clientY - legendPos.y };
+            legendEl.classList.add("dragging");
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!isDragging) return;
+            legendPos.x = e.clientX - startPos.x;
+            legendPos.y = e.clientY - startPos.y;
+            legendEl.style.right = "auto";
+            legendEl.style.bottom = "auto";
+            legendEl.style.left = legendPos.x + "px";
+            legendEl.style.top = legendPos.y + "px";
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (isDragging) {
+                isDragging = false;
+                legendEl.classList.remove("dragging");
             }
         });
     }
@@ -424,7 +509,9 @@
                 .select("circle")
                 .transition().duration(200)
                 .attr("r", function (d) {
-                    return d.id === focusedNodeId ? 12 : 6;
+                    if (d.id === focusedNodeId) return getNodeRadius(d) * 1.5;
+                    if (neighborIds.has(d.id)) return getNodeRadius(d) * 0.8;
+                    return getNodeRadius(d) * 0.6;
                 });
             linkGroup.selectAll("line")
                 .transition().duration(200)
@@ -446,7 +533,7 @@
             .style("opacity", 1)
             .select("circle")
             .transition().duration(200)
-            .attr("r", 8);
+            .attr("r", function (d) { return getNodeRadius(d); });
         linkGroup.selectAll("line")
             .transition().duration(200)
             .style("opacity", 0.6);
@@ -537,7 +624,7 @@
             });
 
         nodeEnter.append("circle")
-            .attr("r", 8)
+            .attr("r", function (d) { return getNodeRadius(d); })
             .attr("fill", function (d) { return color(d.id); })
             .attr("stroke", nodeStroke)
             .attr("stroke-width", 1.5);
@@ -595,11 +682,11 @@
             .filter(function (d) { return d.id === name; })
             .select("circle")
             .transition().duration(200)
-            .attr("r", 14)
+            .attr("r", MAX_RADIUS)
             .attr("stroke", "#f59e0b")
             .attr("stroke-width", 3)
             .transition().duration(600)
-            .attr("r", 8)
+            .attr("r", function (d) { return getNodeRadius(d); })
             .attr("stroke", nodeStroke)
             .attr("stroke-width", 1.5);
     }
@@ -626,6 +713,7 @@
             links.push.apply(links, data.links);
             render();
             initSearchUI();
+            initLegend();
         })
         .catch(function (err) {
             console.error("Failed to load graph:", err);
