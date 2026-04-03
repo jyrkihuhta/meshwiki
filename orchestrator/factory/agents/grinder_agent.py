@@ -550,7 +550,7 @@ async def grind_subtask_e2b(
             repo = settings.github_repo
             clone_url = f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
             result = sbx.commands.run(
-                f"git clone {clone_url} /workspace/repo",
+                f"git clone {clone_url} /tmp/repo",
                 timeout=0,
             )
             if result.exit_code != 0:
@@ -558,12 +558,12 @@ async def grind_subtask_e2b(
 
             # Install Python deps
             sbx.commands.run(
-                "cd /workspace/repo && pip install -e '.[dev]' -q",
+                "cd /tmp/repo && pip install -e '.[dev]' -q",
                 timeout=0,
             )
 
             # Write task file and run Kilo
-            sbx.files.write("/workspace/task.md", task_prompt)
+            sbx.files.write("/tmp/task.md", task_prompt)
 
             logger.info(
                 "e2b grinder: running Kilo (model=%s) for subtask %s...",
@@ -571,19 +571,21 @@ async def grind_subtask_e2b(
                 subtask["id"],
             )
             result = sbx.commands.run(
-                f'cd /workspace/repo && kilo run --auto --model {model_arg} "$(cat /workspace/task.md)"',
+                f'cd /tmp/repo && kilo run --auto --model {model_arg} "$(cat /tmp/task.md)"',
                 timeout=0,
             )
 
             output = (result.stdout or "") + (result.stderr or "")
             logger.info("e2b grinder output tail: %s", output[-2000:])
 
-            # Extract PR URL (last https://github.com/.../pull/... line)
-            for line in reversed(output.splitlines()):
-                line = line.strip()
-                if line.startswith("https://github.com/") and "/pull/" in line:
-                    pr_url = line
-                    break
+            # Extract PR URL — search anywhere in output (Kilo may print raw JSON)
+            import re as _re
+
+            match = _re.search(
+                r'https://github\.com/[^/\s"]+/[^/\s"]+/pull/\d+', output
+            )
+            if match:
+                pr_url = match.group(0)
 
             if pr_url:
                 status = "review"
