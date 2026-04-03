@@ -7,7 +7,7 @@
     function calculateRadius(backlinksCount) {
         if (backlinksCount <= 0) return MIN_RADIUS;
         if (backlinksCount === 1) return MIN_RADIUS + 2;
-        var logScale = Math.log(backlinksCount + 1) / Math.log(101);
+        var logScale = Math.min(1, Math.log(backlinksCount + 1) / Math.log(101));
         return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * logScale;
     }
 
@@ -678,7 +678,6 @@
 
     function flashNode(name) {
         var nodeStroke = getThemeColor("--color-bg", "#fff");
-        var baseRadius = MIN_RADIUS;
         nodeGroup.selectAll("g.node")
             .filter(function (d) { return d.id === name; })
             .select("circle")
