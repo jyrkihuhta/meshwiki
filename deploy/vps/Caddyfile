@@ -1,12 +1,9 @@
+{
+    servers {
+        protocols h1
+    }
+}
+
 ${VPS_DOMAIN} {
-    @websocket {
-        header Upgrade websocket
-    }
-    handle @websocket {
-        reverse_proxy meshwiki:8000 {
-            header_up Connection {http.request.header.Connection}
-            header_up Upgrade {http.request.header.Upgrade}
-        }
-    }
     reverse_proxy meshwiki:8000
 }
