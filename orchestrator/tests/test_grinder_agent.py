@@ -509,15 +509,13 @@ async def test_grind_subtask_routes_to_e2b() -> None:
 
 
 def _make_sandbox_mock(commands_side_effect: list) -> AsyncMock:
-    """Build a mock AsyncSandbox usable as an async context manager."""
+    """Build a mock AsyncSandbox returned directly from AsyncSandbox.create()."""
     mock_commands = AsyncMock()
     mock_commands.run = AsyncMock(side_effect=commands_side_effect)
     mock_sandbox = AsyncMock()
     mock_sandbox.commands = mock_commands
     mock_sandbox.files = AsyncMock()
-    # Async context manager support
-    mock_sandbox.__aenter__ = AsyncMock(return_value=mock_sandbox)
-    mock_sandbox.__aexit__ = AsyncMock(return_value=False)
+    mock_sandbox.kill = AsyncMock(return_value=None)
     return mock_sandbox
 
 
