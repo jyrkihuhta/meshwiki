@@ -223,6 +223,83 @@
     font-weight: 600;
 }
 
+/* Legend */
+.graph-legend {
+    position: absolute;
+    bottom: 1rem;
+    right: 1rem;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 0.5rem;
+    font-size: 0.75rem;
+    z-index: 40;
+    box-shadow: 0 2px 8px var(--color-shadow);
+    min-width: 140px;
+}
+
+.graph-legend-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.25rem 0.25rem 0.5rem 0.25rem;
+    border-bottom: 1px solid var(--color-border);
+    cursor: move;
+    user-select: none;
+}
+
+.graph-legend-title {
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.graph-legend-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 0;
+    font-size: 0.625rem;
+    line-height: 1;
+}
+
+.graph-legend-toggle:hover {
+    color: var(--color-text);
+}
+
+.graph-legend-content {
+    padding: 0.5rem 0.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.graph-legend.collapsed .graph-legend-content {
+    display: none;
+}
+
+.graph-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.graph-legend-svg {
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+}
+
+.graph-legend-node {
+    fill: var(--color-primary);
+    stroke: var(--color-bg);
+    stroke-width: 1.5;
+}
+
+.graph-legend-label {
+    color: var(--color-text-muted);
+}
+
 /* Dark theme adjustments */
 [data-theme="dark"] .graph-search-input {
     background: var(--color-bg-secondary);
@@ -244,4 +321,8 @@
 
 [data-theme="dark"] .node.dimmed {
     opacity: 0.35;
+}
+
+[data-theme="dark"] .graph-legend {
+    background: var(--color-bg-secondary);
 }
