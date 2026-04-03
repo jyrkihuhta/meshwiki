@@ -102,6 +102,6 @@ python -m pytest tests/ -v  # 70 tests
 
 ## Related
 
-- [[Architecture Overview]] - Full system architecture
-- [[Python Development]] - Python app development
-- [[MetaTable Queries]] - Using MetaTable from wiki pages
+- [[Docs/Architecture Overview]] - Full system architecture
+- [[Docs/Python Development]] - Python app development
+- [[Docs/MetaTable Queries]] - Using MetaTable from wiki pages

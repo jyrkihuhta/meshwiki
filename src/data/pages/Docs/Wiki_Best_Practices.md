@@ -59,7 +59,7 @@ author: yourname
 
 ## MetaTable Dashboards
 
-Create dashboard pages using [[MetaTable Queries]]:
+Create dashboard pages using [[Docs/MetaTable Queries]]:
 
 ```
 <<MetaTable(status=active, ||name||author||priority||)>>
@@ -74,5 +74,5 @@ Create dashboard pages using [[MetaTable Queries]]:
 
 ## Related
 
-- [[Getting Started]] - New user guide
-- [[Markdown Guide]] - Formatting reference
+- [[Docs/Getting Started]] - New user guide
+- [[Docs/Markdown Guide]] - Formatting reference

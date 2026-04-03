@@ -14,7 +14,7 @@ Welcome to MeshWiki! This guide covers the basics of creating and navigating wik
 ## Creating Pages
 
 1. Click **New Page** or visit `/page/YourPageName/edit`
-2. Write your content using [[Markdown Guide|Markdown]]
+2. Write your content using [[Docs/Markdown Guide|Markdown]]
 3. Add frontmatter at the top for metadata (title, tags, status)
 4. Click **Save** or press `Ctrl+S`
 
@@ -35,8 +35,8 @@ author: yourname
 
 This metadata is:
 - Displayed in the page header
-- Queryable via [[MetaTable Queries|MetaTable]]
-- Visible in the [[Architecture Overview|graph engine]]
+- Queryable via [[Docs/MetaTable Queries|MetaTable]]
+- Visible in the [[Docs/Architecture Overview|graph engine]]
 
 ## Linking Pages
 
@@ -68,6 +68,6 @@ The editor includes:
 
 ## Next Steps
 
-- Read the [[Markdown Guide]] for formatting details
-- Learn about [[MetaTable Queries]] for metadata queries
+- Read the [[Docs/Markdown Guide]] for formatting details
+- Learn about [[Docs/MetaTable Queries]] for metadata queries
 - Check the [[Project Roadmap]] for planned features

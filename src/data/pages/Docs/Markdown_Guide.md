@@ -46,7 +46,7 @@ Headings automatically generate a table of contents sidebar on the page view.
 [[PageName|Display Text]]
 ```
 
-Wiki links are the primary way to connect pages. See [[Getting Started]] for more.
+Wiki links are the primary way to connect pages. See [[Docs/Getting Started]] for more.
 
 ## Lists
 
@@ -113,10 +113,10 @@ Query metadata across pages:
 <<MetaTable(status=active, ||name||status||author||)>>
 ```
 
-See [[MetaTable Queries]] for the full reference.
+See [[Docs/MetaTable Queries]] for the full reference.
 
 ## Related Pages
 
-- [[Getting Started]] - Basic wiki usage
-- [[MetaTable Queries]] - Advanced metadata queries
-- [[Architecture Overview]] - How the parser works
+- [[Docs/Getting Started]] - Basic wiki usage
+- [[Docs/MetaTable Queries]] - Advanced metadata queries
+- [[Docs/Architecture Overview]] - How the parser works

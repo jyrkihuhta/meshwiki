@@ -33,7 +33,7 @@ A high-performance graph engine compiled as a Python module via PyO3.
 - **YAML parsing** - Frontmatter extraction with `serde_yaml`
 - **Link extraction** - Wiki link parsing with `pulldown-cmark`
 - **File watching** - Live updates via `notify` crate with 500ms debounce
-- **Query engine** - Filter-based metadata queries for [[MetaTable Queries|MetaTable]]
+- **Query engine** - Filter-based metadata queries for [[Docs/MetaTable Queries|MetaTable]]
 
 ### Frontend
 
@@ -77,7 +77,7 @@ Pages are stored as plain Markdown files:
 ## Related
 
 - [[Project Roadmap]] - Development timeline
-- [[Getting Started]] - Setup instructions
-- [[MetaTable Queries]] - Query engine usage
-- [[Kubernetes Setup]] - Deployment details
+- [[Docs/Getting Started]] - Setup instructions
+- [[Docs/MetaTable Queries]] - Query engine usage
+- [[Docs/Kubernetes Setup]] - Deployment details
 

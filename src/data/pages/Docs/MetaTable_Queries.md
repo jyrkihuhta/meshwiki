@@ -66,7 +66,7 @@ Multiple filters are comma-separated and AND'd together.
 
 1. The Markdown preprocessor detects `<<MetaTable(...)>>` macros
 2. Filters and columns are parsed from the arguments
-3. The [[Architecture Overview|Rust graph engine]] queries the in-memory graph
+3. The [[Docs/Architecture Overview|Rust graph engine]] queries the in-memory graph
 4. Results are rendered as an HTML table
 5. The table is stashed as raw HTML to prevent Markdown interference
 
@@ -83,5 +83,5 @@ MetaTable requires the Rust graph engine (`graph_core`). Without it, a "graph en
 
 ## Related
 
-- [[Markdown Guide]] - General formatting syntax
-- [[Architecture Overview]] - Graph engine details
+- [[Docs/Markdown Guide]] - General formatting syntax
+- [[Docs/Architecture Overview]] - Graph engine details
