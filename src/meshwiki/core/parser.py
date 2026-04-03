@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import datetime, timezone
 from html import escape as html_escape
 from typing import Callable
 from xml.etree.ElementTree import Element
@@ -253,6 +254,134 @@ class MetaTableExtension(Extension):
             MetaTablePreprocessor(md),
             "metatable",
             30,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RecentChanges macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+RECENTCHANGES_PATTERN = re.compile(r"<<RecentChanges(?:\((\d+)\))?>>")
+
+
+def _timeago(dt: datetime | None) -> str:
+    """Convert datetime to relative time string (inlined from main.py)."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        now = datetime.now()
+    else:
+        now = datetime.now(timezone.utc)
+    diff = now - dt
+    seconds = diff.total_seconds()
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        m = int(seconds // 60)
+        return f"{m}m ago"
+    elif seconds < 86400:
+        h = int(seconds // 3600)
+        return f"{h}h ago"
+    elif seconds < 604800:
+        d = int(seconds // 86400)
+        return f"{d}d ago"
+    else:
+        return dt.strftime("%Y-%m-%d")
+
+
+def _render_recent_changes(n: int = 10) -> str:
+    """Render the <<RecentChanges(n)>> macro as an HTML list of recent pages."""
+    try:
+        from meshwiki.core.dependencies import get_storage
+
+        storage = get_storage()
+    except RuntimeError:
+        return (
+            '<div class="recent-changes-wrapper">'
+            '<p class="recent-changes-unavailable">'
+            "<em>RecentChanges: storage not available</em></p></div>"
+        )
+
+    try:
+        import asyncio
+
+        pages = asyncio.run(storage.list_pages_with_metadata())
+    except Exception as e:
+        return (
+            f'<div class="recent-changes-wrapper">'
+            f'<p class="recent-changes-error"><em>RecentChanges error: {e}</em></p></div>'
+        )
+
+    filtered = [p for p in pages if not p.name.startswith("Factory/")]
+    sorted_pages = sorted(
+        filtered,
+        key=lambda p: p.metadata.modified or datetime.min,
+        reverse=True,
+    )
+    top_pages = sorted_pages[:n]
+
+    if not top_pages:
+        return (
+            '<div class="recent-changes-wrapper">'
+            '<p class="recent-changes-empty"><em>No pages found</em></p></div>'
+        )
+
+    lines = ['<div class="recent-changes-wrapper">', '<ul class="recent-changes-list">']
+    for page in top_pages:
+        url_name = page.name.replace(" ", "_")
+        time_str = _timeago(page.metadata.modified)
+        lines.append(
+            f'<li class="recent-changes-item">'
+            f'<a href="/page/{url_name}" class="wiki-link">{html_escape(page.name)}</a>'
+            f'<span class="recent-changes-time">{html_escape(time_str)}</span>'
+            f"</li>"
+        )
+    lines.append("</ul></div>")
+    return "\n".join(lines)
+
+
+class RecentChangesPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<RecentChanges(n)>> macros with an HTML list."""
+
+    def run(self, lines: list[str]) -> list[str]:
+        """Process lines, replacing RecentChanges macro."""
+        text = "\n".join(lines)
+        if "<<RecentChanges" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00RCBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            n_str = m.group(1)
+            n = int(n_str) if n_str else 10
+            html = _render_recent_changes(n)
+            return self.md.htmlStash.store(html)
+
+        text = RECENTCHANGES_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00RCBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class RecentChangesExtension(Extension):
+    """Markdown extension for <<RecentChanges(n)>> macros."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        """Add RecentChanges preprocessor."""
+        md.preprocessors.register(
+            RecentChangesPreprocessor(md),
+            "recentchanges",
+            29,
         )
 
 
@@ -573,6 +702,7 @@ def create_parser(
             StrikethroughExtension(),  # ~~strikethrough~~
             WikiLinkExtension(page_exists=page_exists),  # [[WikiLinks]]
             MetaTableExtension(),  # <<MetaTable(...)>>
+            RecentChangesExtension(),  # <<RecentChanges(n)>>
             TaskStatusExtension(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<TaskStatus>>
