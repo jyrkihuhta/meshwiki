@@ -57,7 +57,11 @@ def _verify_signature(body: bytes, signature_header: str | None) -> None:
 
 
 def _build_initial_state(page_name: str, data: dict[str, Any]) -> FactoryState:
-    """Build the initial FactoryState for a new graph thread."""
+    """Build the initial FactoryState for a new graph thread.
+
+    ``skip_decomposition`` is handled by ``task_intake_node`` which reads the
+    full page from MeshWiki — no need to inspect the webhook payload here.
+    """
     return FactoryState(
         thread_id=page_name,
         task_wiki_page=page_name,
@@ -74,6 +78,7 @@ def _build_initial_state(page_name: str, data: dict[str, Any]) -> FactoryState:
         cost_usd=0.0,
         graph_status="intake",
         error=None,
+        escalation_decision=None,
     )
 
 
