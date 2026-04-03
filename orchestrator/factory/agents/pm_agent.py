@@ -63,7 +63,7 @@ PM_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "page_name": {
                     "type": "string",
-                    "description": "The MeshWiki page name for this subtask (e.g. Task_0042_Sub_01_add_search).",
+                    "description": "The MeshWiki page name for this subtask. Use the format 'Factory/TASK{N:03d} - {Short descriptive title}' where N is the next available task number (e.g. 'Factory/TASK003 - Add search feature'). Scan existing Factory pages to find the highest number and increment by 1.",
                 },
                 "title": {
                     "type": "string",
