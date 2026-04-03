@@ -634,6 +634,16 @@ async def api_graph():
         for target in engine.get_outlinks(page.name):
             links.append({"source": page.name, "target": target})
 
+    # Add implicit parent→child edges for subpages (pages with "/" in name)
+    page_ids = {p.name for p in pages}
+    for page in pages:
+        if "/" in page.name:
+            parent_name = page.name.rsplit("/", 1)[0]
+            if parent_name in page_ids:
+                links.append(
+                    {"source": parent_name, "target": page.name, "type": "parent"}
+                )
+
     return {"nodes": nodes, "links": links}
 
 

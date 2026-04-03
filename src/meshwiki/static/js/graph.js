@@ -158,7 +158,7 @@
         .attr("fill", "var(--color-text-muted)");
 
     var simulation = d3.forceSimulation(nodes)
-        .force("link", d3.forceLink(links).id(function (d) { return d.id; }).distance(120))
+        .force("link", d3.forceLink(links).id(function (d) { return d.id; }).distance(function (d) { return d.type === "parent" ? 60 : 120; }))
         .force("charge", d3.forceManyBody().strength(-300))
         .force("center", d3.forceCenter(width / 2, height / 2))
         .force("collision", d3.forceCollide().radius(30))
@@ -590,10 +590,11 @@
             });
         linkSel.exit().remove();
         linkSel = linkSel.enter().append("line")
-            .attr("stroke", linkColor)
-            .attr("stroke-opacity", 0.6)
-            .attr("stroke-width", 1.5)
-            .attr("marker-end", "url(#arrowhead)")
+            .attr("stroke", function (d) { return d.type === "parent" ? getThemeColor("--color-text-muted", "#aaa") : linkColor; })
+            .attr("stroke-opacity", function (d) { return d.type === "parent" ? 0.35 : 0.6; })
+            .attr("stroke-width", function (d) { return d.type === "parent" ? 1 : 1.5; })
+            .attr("stroke-dasharray", function (d) { return d.type === "parent" ? "5,4" : null; })
+            .attr("marker-end", function (d) { return d.type === "parent" ? null : "url(#arrowhead)"; })
             .merge(linkSel);
 
         nodeSel = nodeGroup.selectAll("g.node")
@@ -634,7 +635,10 @@
             .attr("dy", 4)
             .attr("font-size", "12px")
             .attr("fill", textColor)
-            .text(function (d) { return d.id; });
+            .text(function (d) {
+                var parts = d.id.split("/");
+                return parts[parts.length - 1];
+            });
 
         nodeSel = nodeEnter.merge(nodeSel);
 
@@ -676,7 +680,11 @@
         }
     }
 
+    var flashCooldown = {};
     function flashNode(name) {
+        var now = Date.now();
+        if (flashCooldown[name] && now - flashCooldown[name] < 2000) return;
+        flashCooldown[name] = now;
         var nodeStroke = getThemeColor("--color-bg", "#fff");
         nodeGroup.selectAll("g.node")
             .filter(function (d) { return d.id === name; })
