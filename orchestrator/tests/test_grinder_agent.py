@@ -508,7 +508,7 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     assert result["status"] == "review"
 
 
-def _make_sandbox_mock(commands_side_effect: list) -> AsyncMock:
+def _make_sandbox_mock(commands_side_effect: list, pty_output: str = "") -> AsyncMock:
     """Build a mock AsyncSandbox returned directly from AsyncSandbox.create()."""
     mock_commands = AsyncMock()
     mock_commands.run = AsyncMock(side_effect=commands_side_effect)
@@ -516,10 +516,27 @@ def _make_sandbox_mock(commands_side_effect: list) -> AsyncMock:
     mock_sandbox.commands = mock_commands
     mock_sandbox.files = AsyncMock()
     mock_sandbox.kill = AsyncMock(return_value=None)
+
+    # PTY mock: capture on_data callback and fire it with pty_output bytes.
+    mock_pty_handle = AsyncMock()
+    mock_pty_handle.pid = 1234
+    mock_pty_handle.wait = AsyncMock(return_value=None)
+
+    async def _create_pty(**kwargs):
+        on_data = kwargs.get("on_data")
+        if on_data and pty_output:
+            await on_data(pty_output.encode())
+        return mock_pty_handle
+
+    mock_pty = AsyncMock()
+    mock_pty.create = _create_pty
+    mock_pty.send_stdin = AsyncMock(return_value=None)
+    mock_sandbox.pty = mock_pty
+
     return mock_sandbox
 
 
-def _e2b_command_sequence(kilo_result: MagicMock) -> list:
+def _e2b_command_sequence() -> list:
     """Return the expected commands.run side_effect list for grind_subtask_e2b.
 
     Sequence:
@@ -527,15 +544,15 @@ def _e2b_command_sequence(kilo_result: MagicMock) -> list:
       2. Node.js bootstrap (nodesource + apt + npm install -g kilo)
       3. git clone
       4. pip install
-      5. kilo run  ← caller supplies the result
+    Kilo now runs via PTY (not commands.run), so there is no 5th entry.
     """
     ok = MagicMock(exit_code=0, stdout="", stderr="")
-    return [ok, ok, MagicMock(exit_code=0, stdout="", stderr=""), ok, kilo_result]
+    return [ok, ok, MagicMock(exit_code=0, stdout="", stderr=""), ok]
 
 
 @pytest.mark.asyncio
 async def test_grind_subtask_e2b_extracts_pr_url() -> None:
-    """grind_subtask_e2b sets status='review' and pr_url when output contains a PR URL."""
+    """grind_subtask_e2b sets status='review' and pr_url when PTY output contains a PR URL."""
     state = _make_state()
     subtask = _make_subtask()
     meshwiki_client = AsyncMock()
@@ -543,10 +560,9 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
     meshwiki_client.transition_task = AsyncMock(return_value={})
 
     pr_url = "https://github.com/owner/repo/pull/42"
-    kilo_result = MagicMock(
-        exit_code=0, stdout=f"Running kilo...\nDone!\n{pr_url}", stderr=""
+    mock_sandbox = _make_sandbox_mock(
+        _e2b_command_sequence(), pty_output=f"Running kilo...\nDone!\n{pr_url}"
     )
-    mock_sandbox = _make_sandbox_mock(_e2b_command_sequence(kilo_result))
 
     mock_settings = MagicMock(
         e2b_api_key="e2b-test",
@@ -567,19 +583,17 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
 
 @pytest.mark.asyncio
 async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
-    """grind_subtask_e2b sets status='failed' when output has no PR URL."""
+    """grind_subtask_e2b sets status='failed' when PTY output has no PR URL."""
     state = _make_state()
     subtask = _make_subtask()
     meshwiki_client = AsyncMock()
     meshwiki_client.get_page = AsyncMock(return_value={"content": "# Task spec"})
     meshwiki_client.transition_task = AsyncMock(return_value={})
 
-    kilo_result = MagicMock(
-        exit_code=0,
-        stdout="Running kilo...\nSomething went wrong.\nNo PR was created.",
-        stderr="",
+    mock_sandbox = _make_sandbox_mock(
+        _e2b_command_sequence(),
+        pty_output="Running kilo...\nSomething went wrong.\nNo PR was created.",
     )
-    mock_sandbox = _make_sandbox_mock(_e2b_command_sequence(kilo_result))
 
     mock_settings = MagicMock(
         e2b_api_key="e2b-test",
