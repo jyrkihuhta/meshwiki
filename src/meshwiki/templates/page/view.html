@@ -77,15 +77,16 @@
         </aside>
         {% endif %}
 
-        {% if page.metadata.tags %}
         <footer class="page-footer">
+            {% if page.metadata.tags %}
             <div class="tags">
                 {% for tag in page.metadata.tags %}
                 <a href="/search?tag={{ tag }}" class="tag tag-link">{{ tag }}</a>
                 {% endfor %}
             </div>
+            {% endif %}
+            <span class="word-count">{{ word_count(page.content) }} words</span>
         </footer>
-        {% endif %}
     </div>
 </article>
 {% endblock %}

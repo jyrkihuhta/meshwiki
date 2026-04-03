@@ -329,3 +329,20 @@ def extract_wiki_links(content: str) -> list[str]:
     """
     matches = re.findall(WIKI_LINK_PATTERN, content)
     return [m[0].strip() for m in matches]
+
+
+FRONTMATTER_PATTERN = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+def word_count(content: str) -> int:
+    """Count words in Markdown content, stripping frontmatter.
+
+    Args:
+        content: Raw Markdown content (may include frontmatter).
+
+    Returns:
+        Integer word count of the Markdown body (excluding frontmatter).
+    """
+    stripped = FRONTMATTER_PATTERN.sub("", content)
+    words = stripped.split()
+    return len(words)

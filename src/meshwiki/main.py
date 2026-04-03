@@ -43,7 +43,11 @@ from meshwiki.core.metrics import (
     page_writes_total,
 )
 from meshwiki.core.models import Page
-from meshwiki.core.parser import parse_wiki_content, parse_wiki_content_with_toc
+from meshwiki.core.parser import (
+    parse_wiki_content,
+    parse_wiki_content_with_toc,
+    word_count,
+)
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.ws_manager import manager
 
@@ -185,6 +189,7 @@ def timeago_filter(dt: datetime | None) -> str:
 
 
 templates.env.filters["timeago"] = timeago_filter
+templates.env.globals["word_count"] = word_count
 
 # Initialize storage
 storage = FileStorage(settings.data_dir)

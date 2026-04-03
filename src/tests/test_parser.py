@@ -5,6 +5,7 @@ from meshwiki.core.parser import (
     extract_wiki_links,
     parse_wiki_content,
     parse_wiki_content_with_toc,
+    word_count,
 )
 
 # ============================================================
@@ -215,3 +216,66 @@ class TestMetaTableInCodeBlock:
         html = parse_wiki_content(content)
         assert "<table" not in html
         assert "MetaTable" in html
+
+
+# ============================================================
+# word_count
+# ============================================================
+
+
+class TestWordCount:
+    def test_normal_paragraph(self):
+        assert word_count("Hello world this is a test") == 6
+
+    def test_empty_content(self):
+        assert word_count("") == 0
+        assert word_count("   ") == 0
+
+    def test_content_with_only_frontmatter(self):
+        content = """---
+title: Test Page
+tags: [test, sample]
+---
+"""
+        assert word_count(content) == 0
+
+    def test_content_with_frontmatter_and_body(self):
+        content = """---
+title: Test Page
+tags: [test, sample]
+---
+This is the body content.
+"""
+        assert word_count(content) == 5
+
+    def test_content_with_code_blocks(self):
+        content = """---
+title: Test
+---
+This is text.
+
+```python
+def hello():
+    print("hello world")
+```
+
+More text here.
+"""
+        assert word_count(content) == 12
+
+    def test_content_with_wiki_links(self):
+        content = """---
+title: Test
+---
+See [[PageOne]] and [[PageTwo]] for details.
+"""
+        assert word_count(content) == 6
+
+    def test_frontmatter_stripped(self):
+        content = """---
+created: '2026-01-01'
+modified: '2026-01-02'
+---
+This is body text with five words.
+"""
+        assert word_count(content) == 7
