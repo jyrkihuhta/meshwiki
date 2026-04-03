@@ -1779,6 +1779,34 @@ article.page > .breadcrumb {
     font-size: 0.9rem;
 }
 
+/* ── Epic status ── */
+.epic-progress {
+    margin-bottom: 1rem;
+}
+.epic-progress-label {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    display: block;
+    margin-bottom: 0.4rem;
+}
+.epic-progress-bar {
+    height: 8px;
+    background: var(--color-border);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.epic-progress-fill {
+    height: 100%;
+    background: #22c55e;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+.epic-no-tasks {
+    color: var(--color-text-muted);
+    font-style: italic;
+    font-size: 0.9rem;
+}
+
 /* ── Terminal window ── */
 .task-status-terminal {
     border-radius: 8px;

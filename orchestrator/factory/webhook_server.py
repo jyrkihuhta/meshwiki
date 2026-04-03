@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -131,22 +132,26 @@ async def receive_webhook(
     if event == "task.assigned":
         initial_state = _build_initial_state(page_name, data)
         config = {"configurable": {"thread_id": page_name}}
-        # ainvoke will run until the first interrupt (human_review_plan)
-        await _graph.ainvoke(initial_state, config=config)
-        logger.info("webhook: started graph thread for %s", page_name)
+        asyncio.create_task(
+            _graph.ainvoke(initial_state, config=config),
+            name=f"graph:{page_name}",
+        )
+        logger.info("webhook: started graph task for %s", page_name)
         return {"status": "started"}
 
     if event == "task.approved":
         config = {"configurable": {"thread_id": page_name}}
         approval = data.get("approval", "approve")
         feedback = data.get("feedback")
-        # Resume the paused thread with the human's decision
-        await _graph.ainvoke(
-            {"human_approval_response": approval, "human_feedback": feedback},
-            config=config,
+        asyncio.create_task(
+            _graph.ainvoke(
+                {"human_approval_response": approval, "human_feedback": feedback},
+                config=config,
+            ),
+            name=f"graph:{page_name}:resume",
         )
         logger.info(
-            "webhook: resumed graph thread for %s (approval=%s)", page_name, approval
+            "webhook: resumed graph task for %s (approval=%s)", page_name, approval
         )
         return {"status": "resumed"}
 

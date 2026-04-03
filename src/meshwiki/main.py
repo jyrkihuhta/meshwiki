@@ -381,6 +381,39 @@ async def view_page(request: Request, name: str):
         except Exception:
             pass
 
+    # For epic pages, fetch child tasks so <<EpicStatus>> can render them.
+    page_type = frontmatter.get("type", "")
+    if isinstance(page_type, list):
+        page_type = page_type[0] if page_type else ""
+    if page_type == "epic":
+        all_pages = await storage.list_pages_with_metadata()
+        child_tasks = []
+        for p in all_pages:
+            if p.metadata is None:
+                continue
+            meta = p.metadata.model_dump()
+            parent_epic = (
+                meta.get("parent_epic") or p.metadata.model_extra.get("parent_epic")
+                if hasattr(p.metadata, "model_extra")
+                else None
+            )
+            if isinstance(parent_epic, list):
+                parent_epic = parent_epic[0] if parent_epic else None
+            if parent_epic == name:
+                status = (
+                    meta.get("status")
+                    or (
+                        p.metadata.model_extra.get("status")
+                        if hasattr(p.metadata, "model_extra")
+                        else None
+                    )
+                    or "planned"
+                )
+                if isinstance(status, list):
+                    status = status[0] if status else "planned"
+                child_tasks.append({"name": p.name, "title": p.title, "status": status})
+        frontmatter["_child_tasks"] = child_tasks
+
     # Parse content with wiki links, TOC, and page context for macros.
     html_content, toc_html = parse_wiki_content_with_toc(
         page.content,
@@ -613,29 +646,46 @@ async def ws_graph(websocket: WebSocket):
 async def ws_terminal(websocket: WebSocket, name: str):
     """WebSocket endpoint that streams live PTY output for a running task.
 
-    The orchestrator pushes raw terminal chunks via POST /api/v1/tasks/{name}/terminal.
-    This endpoint drains the per-task queue and forwards chunks to the browser
-    xterm.js instance.  A ``None`` sentinel in the queue signals end-of-stream.
+    Replays the full buffer to late-joining clients, then streams new chunks
+    as they arrive.  Multiple concurrent connections are supported.
     """
-    from meshwiki.core.terminal_sessions import get_session
+    from meshwiki.core.terminal_sessions import get_session, subscribe, unsubscribe
 
     await websocket.accept()
-    q = get_session(name)
-    if q is None:
+    session = get_session(name)
+    if session is None:
         await websocket.send_text(
             "\r\n\x1b[2m[no active terminal session for this task]\x1b[0m\r\n"
         )
         await websocket.close()
         return
+
+    # Subscribe BEFORE snapshotting the buffer — no await between these two
+    # lines so no chunk can slip through the gap (asyncio is cooperative).
+    sub_q = subscribe(name)  # None if session already closed
+    buffer_snapshot = list(session.buffer)
+
+    sub_q_ref = sub_q  # keep reference for finally block
     try:
+        # Replay full history
+        for chunk in buffer_snapshot:
+            await websocket.send_text(chunk)
+
+        # If session was already closed when we connected, we're done
+        if sub_q is None:
+            return
+
+        # Stream live chunks
         while True:
-            chunk = await q.get()
+            chunk = await sub_q.get()
             if chunk is None:  # sentinel — task finished
                 break
             await websocket.send_text(chunk)
     except WebSocketDisconnect:
         pass
     finally:
+        if sub_q_ref is not None:
+            unsubscribe(name, sub_q_ref)
         await websocket.close()
 
 

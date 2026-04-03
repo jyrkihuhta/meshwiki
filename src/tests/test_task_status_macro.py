@@ -273,7 +273,6 @@ class TestTerminalSection:
 
 class TestTerminalSessions:
     def setup_method(self):
-        # Clear any lingering sessions from other tests.
         from meshwiki.core import terminal_sessions
 
         terminal_sessions._sessions.clear()
@@ -289,7 +288,69 @@ class TestTerminalSessions:
 
         assert get_session("NonExistent") is None
 
-    def test_put_chunk_enqueues(self):
+    def test_put_chunk_buffers_and_fans_out(self):
+        import asyncio
+
+        from meshwiki.core.terminal_sessions import (
+            create_session,
+            get_session,
+            put_chunk,
+            subscribe,
+        )
+
+        create_session("TestTask2")
+        sub_q = subscribe("TestTask2")
+
+        async def _run():
+            await put_chunk("TestTask2", "hello")
+            session = get_session("TestTask2")
+            assert session.buffer == ["hello"]
+            return sub_q.get_nowait()
+
+        result = asyncio.run(_run())
+        assert result == "hello"
+
+    def test_close_session_keeps_buffer_sends_sentinel(self):
+        import asyncio
+
+        from meshwiki.core.terminal_sessions import (
+            close_session,
+            create_session,
+            get_session,
+            put_chunk,
+            subscribe,
+        )
+
+        create_session("TestTask3")
+        sub_q = subscribe("TestTask3")
+
+        async def _run():
+            await put_chunk("TestTask3", "line1")
+            await close_session("TestTask3")
+
+        asyncio.run(_run())
+
+        session = get_session("TestTask3")
+        assert session is not None  # buffer kept after close
+        assert session.closed is True
+        assert session.buffer == ["line1"]
+        assert sub_q.get_nowait() == "line1"
+        assert sub_q.get_nowait() is None  # sentinel
+
+    def test_subscribe_returns_none_for_closed_session(self):
+        import asyncio
+
+        from meshwiki.core.terminal_sessions import (
+            close_session,
+            create_session,
+            subscribe,
+        )
+
+        create_session("TestTask4")
+        asyncio.run(close_session("TestTask4"))
+        assert subscribe("TestTask4") is None
+
+    def test_replay_buffer_on_reconnect(self):
         import asyncio
 
         from meshwiki.core.terminal_sessions import (
@@ -298,26 +359,14 @@ class TestTerminalSessions:
             put_chunk,
         )
 
-        create_session("TestTask2")
+        create_session("TestTask5")
 
         async def _run():
-            await put_chunk("TestTask2", "hello")
-            q = get_session("TestTask2")
-            return q.get_nowait()
+            await put_chunk("TestTask5", "a")
+            await put_chunk("TestTask5", "b")
 
-        result = asyncio.run(_run())
-        assert result == "hello"
+        asyncio.run(_run())
 
-    def test_close_session_sends_sentinel(self):
-        import asyncio
-
-        from meshwiki.core.terminal_sessions import (
-            close_session,
-            create_session,
-            get_session,
-        )
-
-        create_session("TestTask3")
-
-        asyncio.run(close_session("TestTask3"))
-        assert get_session("TestTask3") is None  # removed from registry
+        # Buffer accumulates all chunks regardless of subscribers
+        session = get_session("TestTask5")
+        assert session.buffer == ["a", "b"]

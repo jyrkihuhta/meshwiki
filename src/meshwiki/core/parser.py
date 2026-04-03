@@ -265,7 +265,7 @@ RECENTCHANGES_PATTERN = re.compile(r"<<RecentChanges(?:\((\d+)\))?>>")
 
 
 def _timeago(dt: datetime | None) -> str:
-    """Convert datetime to relative time string (inlined from main.py)."""
+    """Convert datetime to relative time string."""
     if dt is None:
         return ""
     if dt.tzinfo is None:
@@ -344,7 +344,6 @@ class RecentChangesPreprocessor(Preprocessor):
     """Preprocessor that replaces <<RecentChanges(n)>> macros with an HTML list."""
 
     def run(self, lines: list[str]) -> list[str]:
-        """Process lines, replacing RecentChanges macro."""
         text = "\n".join(lines)
         if "<<RecentChanges" not in text:
             return lines
@@ -377,7 +376,6 @@ class RecentChangesExtension(Extension):
     """Markdown extension for <<RecentChanges(n)>> macros."""
 
     def extendMarkdown(self, md: Markdown) -> None:
-        """Add RecentChanges preprocessor."""
         md.preprocessors.register(
             RecentChangesPreprocessor(md),
             "recentchanges",
@@ -464,6 +462,11 @@ def _mermaid_diagram(status: str) -> str:
         done_nodes = _HAPPY_PATH[:idx]
         current_nodes = [status]
         pending_nodes = _HAPPY_PATH[idx + 1 :]
+        # merged is terminal for factory tasks — absorb "done" into done nodes
+        # so it renders green rather than as a pending white node.
+        if status == "merged" and "done" in pending_nodes:
+            pending_nodes = [n for n in pending_nodes if n != "done"]
+            done_nodes = done_nodes + ["done"]
     elif is_off_path:
         branch_from = _OFF_PATH_BRANCH[status]
         b_idx = _HAPPY_PATH.index(branch_from)
@@ -673,6 +676,165 @@ class TaskStatusExtension(Extension):
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EpicStatus macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+EPICSTATUS_PATTERN = re.compile(r"<<EpicStatus>>")
+
+# Terminal states count as "complete" for progress calculation.
+_COMPLETE_STATES = {"merged", "done"}
+_EPIC_BADGE_CLASS = {
+    "planned": "gray",
+    "in_progress": "amber",
+    "review": "purple",
+    "merged": "green",
+    "done": "green",
+    "failed": "red",
+    "rejected": "red",
+    "blocked": "orange",
+}
+
+
+def _render_epic_status(page_name: str, page_metadata: dict) -> str:
+    """Render the <<EpicStatus>> macro as an HTML string."""
+    if _get_meta_str(page_metadata, "type") != "epic":
+        return (
+            '<p class="task-status-error">'
+            "<code>&lt;&lt;EpicStatus&gt;&gt;</code> is only available on epic pages."
+            "</p>"
+        )
+
+    child_tasks: list[dict] = page_metadata.get("_child_tasks", [])
+    title = _get_meta_str(page_metadata, "title", page_name)
+
+    # ── Progress counter ──────────────────────────────────────────────────────
+    total = len(child_tasks)
+    complete = sum(1 for t in child_tasks if t.get("status") in _COMPLETE_STATES)
+    pct = int(complete / total * 100) if total else 0
+
+    progress_html = (
+        f'<div class="epic-progress">'
+        f'<span class="epic-progress-label">{complete} / {total} tasks complete</span>'
+        f'<div class="epic-progress-bar">'
+        f'<div class="epic-progress-fill" style="width:{pct}%"></div>'
+        f"</div>"
+        f"</div>"
+    )
+
+    # ── Mermaid flowchart ─────────────────────────────────────────────────────
+    if child_tasks:
+        lines = ["flowchart TD"]
+        # Epic root node
+        safe_title = title.replace('"', "'")
+        lines.append(f'    epic["{html_escape(safe_title)}"]:::epic_node')
+
+        for i, task in enumerate(child_tasks):
+            node_id = f"t{i}"
+            task_title = task.get("title") or task.get("name", f"Task {i+1}")
+            status = task.get("status", "planned")
+            # Short label: strip 'Factory/' prefix for readability
+            label = task_title.replace('"', "'")
+            icon = (
+                "✓"
+                if status in _COMPLETE_STATES
+                else ("⚡" if status == "in_progress" else "○")
+            )
+            lines.append(f'    {node_id}["{icon} {html_escape(label)}"]:::{status}')
+            lines.append(f"    epic --> {node_id}")
+
+        # classDefs
+        lines.append(
+            "    classDef epic_node fill:#1e40af,color:#fff,stroke:#1d4ed8,font-weight:bold"
+        )
+        lines.append("    classDef planned fill:#94a3b8,color:#fff,stroke:#64748b")
+        lines.append("    classDef decomposed fill:#94a3b8,color:#fff,stroke:#64748b")
+        lines.append("    classDef approved fill:#3b82f6,color:#fff,stroke:#2563eb")
+        lines.append("    classDef in_progress fill:#f59e0b,color:#fff,stroke:#d97706")
+        lines.append("    classDef review fill:#a855f7,color:#fff,stroke:#9333ea")
+        lines.append("    classDef merged fill:#22c55e,color:#fff,stroke:#16a34a")
+        lines.append("    classDef done fill:#22c55e,color:#fff,stroke:#16a34a")
+        lines.append("    classDef failed fill:#ef4444,color:#fff,stroke:#dc2626")
+        lines.append("    classDef rejected fill:#ef4444,color:#fff,stroke:#dc2626")
+        lines.append("    classDef blocked fill:#f97316,color:#fff,stroke:#ea580c")
+
+        mermaid_src = "\n".join(lines)
+        diagram_html = (
+            '<div class="task-status-diagram">'
+            f'<div class="mermaid">{html_escape(mermaid_src)}</div>'
+            "</div>"
+        )
+    else:
+        diagram_html = (
+            '<p class="epic-no-tasks">No tasks linked to this epic yet. '
+            "Add <code>parent_epic: "
+            f"{html_escape(page_name)}</code> to task pages.</p>"
+        )
+
+    return (
+        f'<div class="task-status-wrapper epic-status-wrapper">'
+        f"{progress_html}"
+        f"{diagram_html}"
+        f"</div>"
+    )
+
+
+class EpicStatusPreprocessor(Preprocessor):
+    """Replace <<EpicStatus>> with rendered HTML, skipping code blocks."""
+
+    def __init__(
+        self, md: Markdown, page_name: str | None, page_metadata: dict | None
+    ) -> None:
+        super().__init__(md)
+        self.page_name = page_name or ""
+        self.page_metadata = page_metadata or {}
+
+    def run(self, lines: list[str]) -> list[str]:
+        # Stash fenced code blocks to avoid replacing macros inside them.
+        in_fence = False
+        fence_char = ""
+        processed: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not in_fence and (
+                stripped.startswith("```") or stripped.startswith("~~~")
+            ):
+                in_fence = True
+                fence_char = stripped[:3]
+                processed.append(line)
+                continue
+            if in_fence:
+                processed.append(line)
+                if stripped.startswith(fence_char):
+                    in_fence = False
+                continue
+            if EPICSTATUS_PATTERN.search(line):
+                html = _render_epic_status(self.page_name, self.page_metadata)
+                placeholder = self.md.htmlStash.store(html)
+                processed.append(placeholder)
+            else:
+                processed.append(line)
+        return processed
+
+
+class EpicStatusExtension(Extension):
+    """Markdown extension for <<EpicStatus>> macro."""
+
+    def __init__(
+        self, page_name: str | None = None, page_metadata: dict | None = None, **kwargs
+    ):
+        self.page_name = page_name
+        self.page_metadata = page_metadata
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            EpicStatusPreprocessor(md, self.page_name, self.page_metadata),
+            "epicstatus",
+            28,
+        )
+
+
 def create_parser(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
@@ -702,10 +864,13 @@ def create_parser(
             StrikethroughExtension(),  # ~~strikethrough~~
             WikiLinkExtension(page_exists=page_exists),  # [[WikiLinks]]
             MetaTableExtension(),  # <<MetaTable(...)>>
-            RecentChangesExtension(),  # <<RecentChanges(n)>>
             TaskStatusExtension(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<TaskStatus>>
+            EpicStatusExtension(
+                page_name=page_name, page_metadata=page_metadata
+            ),  # <<EpicStatus>>
+            RecentChangesExtension(),  # <<RecentChanges(n)>>
         ]
     )
 

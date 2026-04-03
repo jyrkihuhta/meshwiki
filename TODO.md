@@ -90,6 +90,7 @@ Document the extension system and add useful built-in macros.
 - [ ] `<<RecentChanges(n=10)>>` macro — show recently modified pages
 - [ ] `<<BackLinks>>` macro — inline backlinks (alternative to sidebar panel)
 - [ ] `<<PageCount>>` macro — total page count for dashboards
+- [ ] Live MetaTable refresh — wire WebSocket `page_updated` events to trigger HTMX re-fetch of MetaTable sections without full page reload
 **Key files:** `core/parser.py` (new extensions), `docs/custom-macros.md`
 
 ### Milestone 12: Authentication
@@ -211,6 +212,17 @@ Deploy PR branches to a staging server for automated browser testing.
 - `deploy/vps/staging.Caddyfile` (new)
 - `.github/workflows/staging-deploy.yml` (new)
 - Update `ci.yml` to require staging E2E pass before merge
+
+---
+
+## Agent Factory Backlog
+
+- [ ] **Signed grinder commits** — factory bot commits show as "unverified" on GitHub. Options: create a GitHub App and use its installation token (commits attributed to the app and signed), or configure GPG signing in the E2B sandbox with a dedicated factory key.
+- [ ] **PostgreSQL checkpointer** — replace MemorySaver so graph state survives orchestrator restarts
+- [ ] **Anthropic API key for PM decomposition** — currently requires `skip_decomposition: true`; wire in a key to enable full PM-driven task breakdown
+- [ ] **Cost tracking** — aggregate token usage across grinder runs and write a cost summary to the task wiki page on completion
+- [ ] **Webhook handler decoupling** — `ainvoke` blocks the HTTP handler for the full pipeline duration; move graph execution to a background task so the webhook returns immediately
+- [ ] **Bookkeeper bot** — a periodic job (e.g. every 5 min) that scans all `type: task` pages and reconciles stale states: tasks stuck `in_progress` with no active terminal session and no recent PTY activity should be transitioned to `failed`; tasks in `review` where the PR has already been merged on GitHub should be transitioned to `merged`; tasks in `review` where the PR was closed without merging should be transitioned to `failed`. Prevents tasks from getting permanently stuck when the orchestrator crashes, restarts, or has a logic error mid-run.
 
 ---
 
