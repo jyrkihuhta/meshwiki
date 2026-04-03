@@ -124,7 +124,7 @@ def test_webhook_valid_hmac(client: TestClient, monkeypatch) -> None:
         content=payload,
         headers={
             "Content-Type": "application/json",
-            "X-Meshwiki-Signature": sig,
+            "X-Meshwiki-Signature-256": sig,
         },
     )
     assert resp.status_code == 200
