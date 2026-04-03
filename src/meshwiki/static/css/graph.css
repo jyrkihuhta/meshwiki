@@ -1,0 +1,93 @@
+.graph-page {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+}
+
+.graph-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.75rem 2rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.graph-toolbar h1 {
+    font-size: 1.25rem;
+    margin: 0;
+}
+
+.graph-stats {
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+}
+
+.graph-ws-status {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 9999px;
+    background: var(--color-bg-secondary);
+    color: var(--color-text-muted);
+    margin-left: auto;
+}
+
+.graph-ws-status.connected {
+    background: var(--color-success-bg);
+    color: var(--color-success-text);
+}
+
+.graph-container {
+    flex: 1;
+    overflow: hidden;
+    background: var(--color-bg);
+}
+
+#graph-svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.graph-unavailable {
+    padding: 3rem;
+    text-align: center;
+    color: var(--color-text-muted);
+}
+
+#graph-svg .node {
+    transition: opacity 0.2s ease;
+}
+
+#graph-svg .links line {
+    transition: stroke-opacity 0.2s ease, opacity 0.2s ease;
+}
+
+.exit-focus-btn {
+    margin-left: auto;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.exit-focus-btn:hover {
+    background: var(--color-bg-tertiary);
+    border-color: var(--color-text-muted);
+}
+
+.exit-focus-btn:active {
+    transform: translateY(1px);
+}
+
+[data-theme="dark"] .exit-focus-btn {
+    background: var(--color-bg-secondary);
+    border-color: var(--color-border);
+}
+
+[data-theme="dark"] .exit-focus-btn:hover {
+    background: var(--color-bg-tertiary);
+}

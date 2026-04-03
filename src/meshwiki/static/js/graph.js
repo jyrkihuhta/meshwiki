@@ -103,12 +103,10 @@
         return div.innerHTML;
     }
 
-    // Read theme colors from CSS variables
     function getThemeColor(varName, fallback) {
         return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || fallback;
     }
 
-    // Sizing
     function getSize() {
         var rect = container.getBoundingClientRect();
         return { width: rect.width, height: rect.height };
@@ -119,19 +117,15 @@
     var height = size.height;
     svg.attr("width", width).attr("height", height);
 
-    // Data arrays (D3 mutates these in-place)
     var nodes = [];
     var links = [];
 
-    // Color scale
     var color = d3.scaleOrdinal(d3.schemeTableau10);
 
-    // SVG groups for layering (links below nodes)
     var g = svg.append("g");
     var linkGroup = g.append("g").attr("class", "links");
     var nodeGroup = g.append("g").attr("class", "nodes");
 
-    // Arrow marker for directed edges
     svg.append("defs").append("marker")
         .attr("id", "arrowhead")
         .attr("viewBox", "0 -5 10 10")
@@ -144,7 +138,6 @@
         .attr("d", "M0,-5L10,0L0,5")
         .attr("fill", "var(--color-text-muted)");
 
-    // Force simulation
     var simulation = d3.forceSimulation(nodes)
         .force("link", d3.forceLink(links).id(function (d) { return d.id; }).distance(120))
         .force("charge", d3.forceManyBody().strength(-300))
@@ -152,17 +145,14 @@
         .force("collision", d3.forceCollide().radius(30))
         .on("tick", ticked);
 
-    // Zoom
     var zoom = d3.zoom()
         .scaleExtent([0.1, 4])
         .on("zoom", function (event) { g.attr("transform", event.transform); });
     svg.call(zoom);
 
-    // Selection references
     var linkSel = linkGroup.selectAll("line");
     var nodeSel = nodeGroup.selectAll("g.node");
 
-    // Drag behavior
     function drag(sim) {
         return d3.drag()
             .on("start", function (event, d) {
@@ -181,17 +171,120 @@
             });
     }
 
+    var focusedNodeId = null;
+    var exitFocusBtn = null;
+
+    function getLinkId(link) {
+        var src = typeof link.source === "object" ? link.source.id : link.source;
+        var tgt = typeof link.target === "object" ? link.target.id : link.target;
+        return { source: src, target: tgt };
+    }
+
+    function getNeighborIds(nodeId) {
+        var neighborIds = new Set();
+        neighborIds.add(nodeId);
+        links.forEach(function (link) {
+            var ids = getLinkId(link);
+            if (ids.source === nodeId) neighborIds.add(ids.target);
+            if (ids.target === nodeId) neighborIds.add(ids.source);
+        });
+        return neighborIds;
+    }
+
+    function isLinkInFocus(link) {
+        if (!focusedNodeId) return true;
+        var ids = getLinkId(link);
+        var neighborIds = getNeighborIds(focusedNodeId);
+        return neighborIds.has(ids.source) && neighborIds.has(ids.target);
+    }
+
+    function applyFocusMode() {
+        if (focusedNodeId) {
+            var neighborIds = getNeighborIds(focusedNodeId);
+            nodeGroup.selectAll("g.node")
+                .transition().duration(200)
+                .style("opacity", function (d) {
+                    return neighborIds.has(d.id) ? 1 : 0.1;
+                })
+                .select("circle")
+                .transition().duration(200)
+                .attr("r", function (d) {
+                    return d.id === focusedNodeId ? 12 : 6;
+                });
+            linkGroup.selectAll("line")
+                .transition().duration(200)
+                .style("opacity", function (d) {
+                    return isLinkInFocus(d) ? 0.8 : 0.05;
+                });
+            updateStats(true);
+        }
+    }
+
+    function clearFocusMode() {
+        focusedNodeId = null;
+        if (exitFocusBtn) {
+            exitFocusBtn.remove();
+            exitFocusBtn = null;
+        }
+        nodeGroup.selectAll("g.node")
+            .transition().duration(200)
+            .style("opacity", 1)
+            .select("circle")
+            .transition().duration(200)
+            .attr("r", 8);
+        linkGroup.selectAll("line")
+            .transition().duration(200)
+            .style("opacity", 0.6);
+        updateUrlParam(null);
+        updateStats(false);
+    }
+
+    function enterFocusMode(nodeId) {
+        focusedNodeId = nodeId;
+        createExitFocusButton();
+        applyFocusMode();
+        updateUrlParam(nodeId);
+    }
+
+    function createExitFocusButton() {
+        if (exitFocusBtn) exitFocusBtn.remove();
+        exitFocusBtn = document.createElement("button");
+        exitFocusBtn.id = "exit-focus-btn";
+        exitFocusBtn.className = "exit-focus-btn";
+        exitFocusBtn.textContent = "Exit focus";
+        exitFocusBtn.style.cssText = "margin-left: auto; padding: 0.35rem 0.75rem; " +
+            "border-radius: 6px; border: 1px solid var(--color-border); " +
+            "background: var(--color-bg-secondary); color: var(--color-text); " +
+            "cursor: pointer; font-size: 0.875rem;";
+        var toolbar = document.querySelector(".graph-toolbar");
+        if (toolbar) toolbar.appendChild(exitFocusBtn);
+        exitFocusBtn.addEventListener("click", clearFocusMode);
+    }
+
+    function updateUrlParam(nodeId) {
+        var url = new URL(window.location.href);
+        if (nodeId) {
+            url.searchParams.set("focus", nodeId);
+        } else {
+            url.searchParams.delete("focus");
+        }
+        history.replaceState(null, "", url.toString());
+    }
+
+    function getUrlFocusParam() {
+        var params = new URLSearchParams(window.location.search);
+        return params.get("focus");
+    }
+
     function render() {
         var linkColor = getThemeColor("--color-text-muted", "#999");
         var textColor = getThemeColor("--color-text", "#333");
         var nodeStroke = getThemeColor("--color-bg", "#fff");
 
-        // Links
         linkSel = linkGroup.selectAll("line")
             .data(links, function (d) {
-                var src = typeof d.source === "object" ? d.source.id : d.source;
-                var tgt = typeof d.target === "object" ? d.target.id : d.target;
-                return src + "->" + tgt;
+                var ids = getLinkId(d);
+                return ids.source + "->" + ids.target;
             });
         linkSel.exit().remove();
         linkSel = linkSel.enter().append("line")
@@ -201,7 +294,6 @@
             .attr("marker-end", "url(#arrowhead)")
             .merge(linkSel);
 
-        // Nodes
         nodeSel = nodeGroup.selectAll("g.node")
             .data(nodes, function (d) { return d.id; });
         nodeSel.exit().remove();
@@ -223,6 +315,10 @@
             })
             .on("mouseout", function (event, d) {
                 hideTooltip();
+            })
+            .on("dblclick", function (event, d) {
+                event.stopPropagation();
+                enterFocusMode(d.id);
             });
 
         nodeEnter.append("circle")
@@ -240,12 +336,20 @@
 
         nodeSel = nodeEnter.merge(nodeSel);
 
-        // Restart simulation
+        svg.on("dblclick", function () {
+            if (focusedNodeId) clearFocusMode();
+        });
+
         simulation.nodes(nodes);
         simulation.force("link").links(links);
         simulation.alpha(0.3).restart();
 
-        updateStats();
+        var urlFocus = getUrlFocusParam();
+        if (urlFocus && nodes.find(function (n) { return n.id === urlFocus; })) {
+            enterFocusMode(urlFocus);
+        } else {
+            updateStats(false);
+        }
     }
 
     function ticked() {
@@ -259,8 +363,15 @@
             .attr("transform", function (d) { return "translate(" + d.x + "," + d.y + ")"; });
     }
 
-    function updateStats() {
-        statsEl.textContent = nodes.length + " pages, " + links.length + " links";
+    function updateStats(isFocused) {
+        if (isFocused && focusedNodeId) {
+            var neighborIds = getNeighborIds(focusedNodeId);
+            var visibleNodes = nodes.filter(function (n) { return neighborIds.has(n.id); }).length;
+            var visibleLinks = links.filter(function (l) { return isLinkInFocus(l); }).length;
+            statsEl.textContent = "Focus: " + focusedNodeId + " (" + visibleNodes + " pages, " + visibleLinks + " links)";
+        } else {
+            statsEl.textContent = nodes.length + " pages, " + links.length + " links";
+        }
     }
 
     function flashNode(name) {
@@ -278,7 +389,6 @@
             .attr("stroke-width", 1.5);
     }
 
-    // Resize handler
     window.addEventListener("resize", function () {
         var s = getSize();
         width = s.width;
@@ -288,7 +398,12 @@
         simulation.alpha(0.1).restart();
     });
 
-    // ========== Load initial data ==========
+    document.addEventListener("keydown", function (event) {
+        if (event.key === "Escape" && focusedNodeId) {
+            clearFocusMode();
+        }
+    });
+
     fetch("/api/graph")
         .then(function (r) { return r.json(); })
         .then(function (data) {
@@ -300,13 +415,6 @@
             console.error("Failed to load graph:", err);
             unavailableEl.style.display = "block";
         });
-
-    // ========== WebSocket for live updates ==========
-    function getLinkId(link) {
-        var src = typeof link.source === "object" ? link.source.id : link.source;
-        var tgt = typeof link.target === "object" ? link.target.id : link.target;
-        return { source: src, target: tgt };
-    }
 
     function handleEvent(msg) {
         switch (msg.type) {
