@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 
-from ..config import settings
+from ..config import get_settings
 from ..state import FactoryState, SubTask
 
 if TYPE_CHECKING:
@@ -213,7 +213,7 @@ async def decompose_with_pm(
     Returns:
         List of SubTask TypedDicts produced by the PM agent.
     """
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
 
@@ -337,7 +337,7 @@ async def review_with_pm(
         Dict with ``decision`` ("approved" | "changes_requested") and
         optional ``feedback`` string.
     """
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
 
     pr_number: int | None = subtask.get("pr_number")
     diff = ""
