@@ -767,8 +767,9 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
     else:
         diagram_html = (
             '<p class="epic-no-tasks">No tasks linked to this epic yet. '
-            "Add <code>parent_epic: "
-            f"{html_escape(page_name)}</code> to task pages.</p>"
+            f"Create task pages under <code>{html_escape(page_name)}/</code> "
+            "or add <code>parent_epic: "
+            f"{html_escape(page_name)}</code> to existing task pages.</p>"
         )
 
     return (

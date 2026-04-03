@@ -399,7 +399,7 @@ async def view_page(request: Request, name: str):
             )
             if isinstance(parent_epic, list):
                 parent_epic = parent_epic[0] if parent_epic else None
-            if parent_epic == name:
+            if parent_epic == name or p.name.startswith(name + "/"):
                 status = (
                     meta.get("status")
                     or (

@@ -64,7 +64,7 @@ PM_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "page_name": {
                     "type": "string",
-                    "description": "The MeshWiki page name for this subtask. Use the format 'Factory/TASK{N:03d} - {Short descriptive title}' where N is the next available task number (e.g. 'Factory/TASK003 - Add search feature'). Scan existing Factory pages to find the highest number and increment by 1.",
+                    "description": "The MeshWiki page name for this subtask. Use the format '{parent_page_name}/TASK{N:03d} - {Short descriptive title}' where parent_page_name is the wiki page being decomposed and N starts at 001 for each epic (e.g. if decomposing 'Factory/GraphViewEnhancements', create 'Factory/GraphViewEnhancements/TASK001 - Add search feature'). Scan existing subpages of the parent to find the highest N and increment by 1.",
                 },
                 "title": {
                     "type": "string",
