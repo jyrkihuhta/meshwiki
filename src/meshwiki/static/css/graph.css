@@ -40,6 +40,7 @@
     flex: 1;
     overflow: hidden;
     background: var(--color-bg);
+    position: relative;
 }
 
 #graph-svg {
@@ -244,4 +245,86 @@
 
 [data-theme="dark"] .node.dimmed {
     opacity: 0.35;
+}
+
+.graph-legend {
+    position: absolute;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    box-shadow: 0 2px 8px var(--color-shadow);
+    z-index: 40;
+    min-width: 140px;
+}
+
+.graph-legend-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    cursor: grab;
+    user-select: none;
+}
+
+.graph-legend-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-text);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.graph-legend-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: 1rem;
+    padding: 0 2px;
+    line-height: 1;
+}
+
+.graph-legend-toggle:hover {
+    color: var(--color-text);
+}
+
+.graph-legend-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.graph-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.graph-legend-item svg {
+    flex-shrink: 0;
+}
+
+.graph-legend-item svg circle {
+    fill: var(--color-text-muted);
+}
+
+.graph-legend-label {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+}
+
+[data-theme="dark"] .graph-legend {
+    background: var(--color-bg-secondary);
+}
+
+[data-theme="dark"] .graph-legend-title {
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .graph-legend-label {
+    color: var(--color-text-muted);
 }

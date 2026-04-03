@@ -128,6 +128,24 @@
 
     var color = d3.scaleOrdinal(d3.schemeTableau10);
 
+    var MIN_NODE_RADIUS = 5;
+    var MAX_NODE_RADIUS = 24;
+
+    function getNodeRadius(backlinksCount) {
+        if (backlinksCount <= 0) return MIN_NODE_RADIUS;
+        var minLog = Math.log(1);
+        var maxLog = Math.log(Math.max(backlinksCount, 1));
+        var scaled = (Math.log(backlinksCount + 1) - minLog) / (maxLog - minLog + 0.001);
+        return MIN_NODE_RADIUS + scaled * (MAX_NODE_RADIUS - MIN_NODE_RADIUS);
+    }
+
+    function getBacklinkTier(backlinksCount) {
+        if (backlinksCount === 0) return "none";
+        if (backlinksCount <= 2) return "few";
+        if (backlinksCount <= 5) return "some";
+        return "many";
+    }
+
     var g = svg.append("g");
     var linkGroup = g.append("g").attr("class", "links");
     var nodeGroup = g.append("g").attr("class", "nodes");
@@ -183,6 +201,73 @@
         document.addEventListener("click", function (e) {
             if (!searchContainer.contains(e.target)) {
                 searchResults.classList.remove("visible");
+            }
+        });
+    }
+
+    var legendContainer = null;
+    var legendCollapsed = false;
+
+    function initLegend() {
+        legendContainer = document.createElement("div");
+        legendContainer.className = "graph-legend";
+        legendContainer.innerHTML =
+            '<div class="graph-legend-header">' +
+            '<span class="graph-legend-title">Node Size</span>' +
+            '<button class="graph-legend-toggle" type="button" aria-label="Toggle legend">&minus;</button>' +
+            "</div>" +
+            '<div class="graph-legend-body">' +
+            '<div class="graph-legend-item">' +
+            '<svg width="60" height="30"><circle cx="15" cy="15" r="5" fill="#999"/></svg>' +
+            '<span class="graph-legend-label">0-2 links</span>' +
+            "</div>" +
+            '<div class="graph-legend-item">' +
+            '<svg width="60" height="30"><circle cx="15" cy="15" r="9" fill="#999"/></svg>' +
+            '<span class="graph-legend-label">3-5 links</span>' +
+            "</div>" +
+            '<div class="graph-legend-item">' +
+            '<svg width="60" height="30"><circle cx="15" cy="15" r="14" fill="#999"/></svg>' +
+            '<span class="graph-legend-label">6+ links</span>' +
+            "</div>" +
+            "</div>";
+        container.appendChild(legendContainer);
+
+        var toggleBtn = legendContainer.querySelector(".graph-legend-toggle");
+        var legendBody = legendContainer.querySelector(".graph-legend-body");
+
+        toggleBtn.addEventListener("click", function () {
+            legendCollapsed = !legendCollapsed;
+            legendBody.style.display = legendCollapsed ? "none" : "flex";
+            toggleBtn.textContent = legendCollapsed ? "+" : "\u2212";
+        });
+
+        var legendHeader = legendContainer.querySelector(".graph-legend-header");
+        var isDragging = false;
+        var dragOffsetX = 0;
+        var dragOffsetY = 0;
+
+        legendHeader.addEventListener("mousedown", function (e) {
+            if (e.target === toggleBtn) return;
+            isDragging = true;
+            dragOffsetX = e.clientX - legendContainer.offsetLeft;
+            dragOffsetY = e.clientY - legendContainer.offsetTop;
+            legendContainer.style.cursor = "grabbing";
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!isDragging) return;
+            var newX = e.clientX - dragOffsetX;
+            var newY = e.clientY - dragOffsetY;
+            var maxX = container.clientWidth - legendContainer.clientWidth - 10;
+            var maxY = container.clientHeight - legendContainer.clientHeight - 10;
+            legendContainer.style.left = Math.max(0, Math.min(maxX, newX)) + "px";
+            legendContainer.style.top = Math.max(0, Math.min(maxY, newY)) + "px";
+        });
+
+        document.addEventListener("mouseup", function () {
+            isDragging = false;
+            if (legendContainer) {
+                legendContainer.style.cursor = "";
             }
         });
     }
@@ -424,7 +509,10 @@
                 .select("circle")
                 .transition().duration(200)
                 .attr("r", function (d) {
-                    return d.id === focusedNodeId ? 12 : 6;
+                    if (d.id === focusedNodeId) {
+                        return Math.max(getNodeRadius(d.backlinks_count || 0) * 1.5, 12);
+                    }
+                    return Math.max(getNodeRadius(d.backlinks_count || 0) * 0.7, 4);
                 });
             linkGroup.selectAll("line")
                 .transition().duration(200)
@@ -446,7 +534,7 @@
             .style("opacity", 1)
             .select("circle")
             .transition().duration(200)
-            .attr("r", 8);
+            .attr("r", function (d) { return getNodeRadius(d.backlinks_count || 0); });
         linkGroup.selectAll("line")
             .transition().duration(200)
             .style("opacity", 0.6);
@@ -537,7 +625,7 @@
             });
 
         nodeEnter.append("circle")
-            .attr("r", 8)
+            .attr("r", function (d) { return getNodeRadius(d.backlinks_count || 0); })
             .attr("fill", function (d) { return color(d.id); })
             .attr("stroke", nodeStroke)
             .attr("stroke-width", 1.5);
@@ -595,11 +683,11 @@
             .filter(function (d) { return d.id === name; })
             .select("circle")
             .transition().duration(200)
-            .attr("r", 14)
+            .attr("r", function (d) { return getNodeRadius(d.backlinks_count || 0) * 1.8; })
             .attr("stroke", "#f59e0b")
             .attr("stroke-width", 3)
             .transition().duration(600)
-            .attr("r", 8)
+            .attr("r", function (d) { return getNodeRadius(d.backlinks_count || 0); })
             .attr("stroke", nodeStroke)
             .attr("stroke-width", 1.5);
     }
@@ -626,6 +714,7 @@
             links.push.apply(links, data.links);
             render();
             initSearchUI();
+            initLegend();
         })
         .catch(function (err) {
             console.error("Failed to load graph:", err);
