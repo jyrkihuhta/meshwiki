@@ -156,5 +156,3 @@ class TestGraphFocusMode:
             assert "HomePage" in node_ids
             assert "About" in node_ids
             assert "Contact" in node_ids
-
-
