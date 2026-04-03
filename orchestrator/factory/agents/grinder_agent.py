@@ -504,7 +504,8 @@ async def grind_subtask_e2b(
         f"5. Run: python -m pytest src/tests/ -x -q\n"
         f"6. Fix any lint/test failures\n"
         f"7. Commit and push the branch\n"
-        f"8. Create a PR with: gh pr create --title '...' --body '...'\n"
+        f"8. Create a PR with: gh pr create --title '[Factory] ...' --body '...'\n"
+        f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
         f"9. Print the PR URL on the last line of your output"
     )
 
@@ -518,8 +519,9 @@ async def grind_subtask_e2b(
     # Model string: Kilo expects "provider/model" format
     model_arg = f"minimax/{settings.grinder_model}"
 
+    sbx = None
     try:
-        async with await AsyncSandbox.create(
+        sbx = await AsyncSandbox.create(
             timeout=3600,  # sandbox lives up to 1 hour; default 5 min is too short
             envs={
                 "MINIMAX_API_KEY": settings.minimax_api_key,
@@ -527,73 +529,79 @@ async def grind_subtask_e2b(
                 "KILO_API_KEY": settings.minimax_api_key,
                 "GITHUB_TOKEN": settings.github_token,
                 "GH_TOKEN": settings.github_token,
-            }
-        ) as sbx:
-            logger.info("e2b grinder: sandbox created for subtask %s", subtask["id"])
+            },
+        )
+        logger.info("e2b grinder: sandbox created for subtask %s", subtask["id"])
 
-            # Configure git identity and credential helper
-            await sbx.commands.run(
-                'git config --global user.email "factory@meshwiki" && '
-                'git config --global user.name "Factory Grinder" && '
-                f'git config --global url."https://x-access-token:{settings.github_token}@github.com/".insteadOf "https://github.com/"',
-                timeout=0,
-            )
+        # Configure git identity and credential helper
+        await sbx.commands.run(
+            'git config --global user.email "factory@meshwiki" && '
+            'git config --global user.name "Factory Grinder" && '
+            f'git config --global url."https://x-access-token:{settings.github_token}@github.com/".insteadOf "https://github.com/"',
+            timeout=0,
+        )
 
-            # Bootstrap Node.js 20 + Kilo CLI (timeout=0 prevents premature kill)
-            logger.info("e2b grinder: bootstrapping Node.js + Kilo CLI...")
-            await sbx.commands.run(
-                "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && "
-                "sudo apt-get install -y nodejs && "
-                "sudo npm install -g @kilocode/cli",
-                timeout=0,
-            )
+        # Bootstrap Node.js 20 + Kilo CLI (timeout=0 prevents premature kill)
+        logger.info("e2b grinder: bootstrapping Node.js + Kilo CLI...")
+        await sbx.commands.run(
+            "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && "
+            "sudo apt-get install -y nodejs && "
+            "sudo npm install -g @kilocode/cli",
+            timeout=0,
+        )
 
-            # Clone repo
-            repo = settings.github_repo
-            clone_url = f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
-            result = await sbx.commands.run(
-                f"git clone {clone_url} /tmp/repo",
-                timeout=0,
-            )
-            if result.exit_code != 0:
-                raise RuntimeError(f"git clone failed: {result.stderr}")
+        # Clone repo
+        repo = settings.github_repo
+        clone_url = f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
+        result = await sbx.commands.run(
+            f"git clone {clone_url} /tmp/repo",
+            timeout=0,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"git clone failed: {result.stderr}")
 
-            # Install Python deps
-            await sbx.commands.run(
-                "cd /tmp/repo && pip install -e '.[dev]' -q",
-                timeout=0,
-            )
+        # Install Python deps
+        await sbx.commands.run(
+            "cd /tmp/repo && pip install -e '.[dev]' -q",
+            timeout=0,
+        )
 
-            # Write task file and run Kilo
-            await sbx.files.write("/tmp/task.md", task_prompt)
+        # Write task file and run Kilo
+        await sbx.files.write("/tmp/task.md", task_prompt)
 
-            logger.info(
-                "e2b grinder: running Kilo (model=%s) for subtask %s...",
-                model_arg,
-                subtask["id"],
-            )
-            result = await sbx.commands.run(
-                f'cd /tmp/repo && kilo run --auto --model {model_arg} "$(cat /tmp/task.md)"',
-                timeout=0,
-            )
+        logger.info(
+            "e2b grinder: running Kilo (model=%s) for subtask %s...",
+            model_arg,
+            subtask["id"],
+        )
+        result = await sbx.commands.run(
+            f'cd /tmp/repo && kilo run --auto --model {model_arg} "$(cat /tmp/task.md)"',
+            timeout=0,
+        )
 
-            output = (result.stdout or "") + (result.stderr or "")
-            logger.info("e2b grinder output tail: %s", output[-2000:])
+        output = (result.stdout or "") + (result.stderr or "")
+        logger.info("e2b grinder output tail: %s", output[-2000:])
 
-            match = _re.search(
-                r'https://github\.com/[^/\s"]+/[^/\s"]+/pull/\d+', output
-            )
-            if match:
-                pr_url = match.group(0)
+        match = _re.search(
+            r'https://github\.com/[^/\s"]+/[^/\s"]+/pull/\d+', output
+        )
+        if match:
+            pr_url = match.group(0)
 
-            if pr_url:
-                status = "review"
-                logger.info("e2b grinder: PR created %s", pr_url)
-            else:
-                logger.warning("e2b grinder: no PR URL found in output")
+        if pr_url:
+            status = "review"
+            logger.info("e2b grinder: PR created %s", pr_url)
+        else:
+            logger.warning("e2b grinder: no PR URL found in output")
 
     except Exception as exc:
         logger.exception("e2b grinder: sandbox error: %s", exc)
+    finally:
+        if sbx is not None:
+            try:
+                await sbx.kill()
+            except Exception:
+                pass
 
     subtask.update(
         {
