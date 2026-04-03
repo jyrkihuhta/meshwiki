@@ -43,5 +43,30 @@ async def grind_node(state: FactoryState) -> dict:
     meshwiki_client = MeshWikiClient()
     updated = await grind_subtask(state, subtask, meshwiki_client)
 
+    # Transition the wiki task page to reflect the grinder outcome
+    final_status = updated.get("status", "failed")
+    extra_fields: dict = {}
+    if updated.get("pr_url"):
+        extra_fields["pr_url"] = updated["pr_url"]
+    if updated.get("branch_name"):
+        extra_fields["branch"] = updated["branch_name"]
+    try:
+        await meshwiki_client.transition_task(
+            updated["wiki_page"], final_status, extra_fields or None
+        )
+        logger.info(
+            "grind_node: transitioned %s to %s (pr=%s)",
+            updated["wiki_page"],
+            final_status,
+            updated.get("pr_url"),
+        )
+    except Exception as exc:
+        logger.error(
+            "grind_node: failed to transition %s to %s: %s",
+            updated["wiki_page"],
+            final_status,
+            exc,
+        )
+
     subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
     return {"subtasks": subtasks}
