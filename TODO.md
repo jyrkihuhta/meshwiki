@@ -14,14 +14,19 @@
 | 7 | **Editor Experience** — live preview, toolbar, shortcuts, autocomplete | ✅ Complete |
 | 8 | **Navigation & Discovery** — search, TOC sidebar, tags, recent changes | ✅ Complete |
 | 9 | **Visual Polish** — dark mode, mobile responsive, notifications, code highlighting | ✅ Complete |
-| 10 | **Graph Enhancements** — node search, focus mode, tooltips, sizing | Planned |
+| 10 | **Graph Enhancements** — node search, focus mode, tooltips, sizing | ✅ Complete |
 | 11 | **Macro System** — PageList, RecentChanges, BackLinks, PageCount macros | Planned |
 | 12 | **Authentication** — user accounts, login/logout, access control | Planned |
 | 13 | **Observability** — structured logging, metrics endpoint | Planned |
+| S1 | **Staging Integration** — `staging` branch, grinders → staging, auto-merge, E2B template | 🔲 **NOW** |
+| F8 | **Factory v2: Gap Fixes** — cost tracking, concurrency control, bookkeeper bot | 🔲 Planned |
+| F9 | **Factory v2: HBR Manager** — resource tracking, daily budget, 24/7 scheduler | 🔲 Planned |
+| F10 | **Factory v2: Live Visualization** — D3.js factory graph, `/factory/live`, WebSocket | 🔲 Planned |
+| F11 | **Factory v2: Stale PR Bot** — autonomous CI failure fixer | 🔲 Planned |
 
-**Priority:** 7 → 8 → 11 → 9 → 10 → 12 → 13
+**Priority:** S1 → F8 → F9 → F10 → F11 → 11 → 12 → 13
 
-**274 tests passing** (70 graph-core + 204 Python), CI pipeline active.
+**~390 tests passing** (70 graph-core + ~320 Python), CI pipeline active.
 
 ---
 
@@ -69,17 +74,129 @@ Elevate the visual design and make it work on all screen sizes.
 
 **Key files:** `static/css/style.css` (dark theme, responsive, toast, loading), `templates/base.html` (theme toggle, hamburger, toast, loading bar, highlight.js), `main.py` (timeago filter, toast redirects)
 
-### Milestone 10: Graph Visualization Enhancements
+### Milestone 10: Graph Visualization Enhancements ✅
 Make the graph view more useful for navigation and exploration.
 
-- [ ] Search/filter box on graph page (highlight matching nodes, fade others)
-- [ ] Legend explaining node colors
-- [ ] Node sizing by connection count (more links = larger node)
-- [ ] Selected node detail panel (shows metadata, backlinks, outlinks)
-- [ ] Hover tooltip on nodes (page name + tag preview)
-- [ ] "Focus mode" — click a node to show only its neighborhood (n-hop subgraph)
+- [x] Search/filter box on graph page (highlight matching nodes, fade others)
+- [x] Legend explaining node colors and size scale (draggable)
+- [x] Node sizing by backlink count (logarithmic scale, MIN_RADIUS=5, MAX_RADIUS=24)
+- [x] Hover tooltip on nodes (page name, tags, backlink count)
+- [x] "Focus mode" — double-click a node to show only its neighborhood; Escape/double-click bg to exit
+- [x] Subpage edges — implicit dashed parent→child edges for pages with `/` in name; subpages cluster near parent
+- [x] Short node labels — last path segment only; full name in tooltip
+- [x] Flash cooldown — page_updated WebSocket events throttled to once per 2s per node
 
-**Key files:** `static/js/graph.js`, `templates/graph.html`, `static/css/style.css`
+**Key files:** `static/js/graph.js`, `static/css/graph.css`, `templates/graph.html`, `main.py` (`/api/graph`)
+
+### Milestone S1: Staging Integration 🔲 **HIGHEST PRIORITY**
+
+Staging server is running at `staging.wiki.penni.fi` (container up, Caddy routing ready).
+The remaining work wires staging into the full grinder workflow so grinders build on each other.
+
+**Key insight:** Grinders should clone from and PR into a `staging` branch (not `main`).
+Git becomes the communication channel — grinder B clones `staging` and inherits grinder A's merged work.
+Grinders touching the same files are still serialized; those on different files run in parallel.
+The human gate moves to `staging → main` (promoting a batch of grinder work to production).
+
+**Infrastructure (done ✅)**
+- [x] Staging container running on VPS (`meshwiki-meshwiki-staging-1`, healthy)
+- [x] Caddy routing `staging.wiki.penni.fi → meshwiki-staging:8000`
+- [x] Separate data dir `/opt/meshwiki/data/staging-pages`
+- [x] `/opt/meshwiki/staging/` git checkout
+- [x] `staging.env` written on VPS
+
+**DNS (user action required)**
+- [ ] Add A record: `staging.wiki.penni.fi → 135.181.38.57`
+
+**Integration branch**
+- [ ] Create `staging` branch in repo (from `main`)
+- [ ] Add CI trigger: push to `staging` branch → update staging checkout on VPS + smoke test
+  - Currently CI only triggers on `main` — the "update staging" step we added won't fire yet
+  - Add `staging` to the `on.push.branches` list, with a separate job that only runs on `staging`
+- [ ] Remove the "update staging on every branch push" logic added to the `main` deploy job (it's wrong — staging should track the `staging` branch, not whatever was last pushed to any branch)
+
+**Grinder changes (orchestrator)**
+- [ ] `grinder_agent.py`: clone from `staging` branch (`git clone --branch staging ...`) instead of `main`
+- [ ] `grinder_agent.py` / Kilo prompt: PR targets `staging` as base branch instead of `main`
+- [ ] `github_client.py`: add `base: str = "main"` param to PR creation so grinders can target `staging`
+- [ ] After PM approves: auto-merge grinder PR to `staging` — no `human_review_code` interrupt needed at this step. Human only reviews `staging → main`.
+  - Either remove the `human_review_code` node from the graph, or make it configurable (skip when `target_branch == "staging"`)
+  - Add `merge_pr_to_staging()` step after PM approval using `GitHubClient`
+
+**E2B sandbox speed (three tiers)**
+
+E2B has three distinct mechanisms. Use in order of availability:
+
+- [ ] **Tier 1 — Custom template** (available now, no beta needed)
+  - Pre-bake Node.js 20 + Kilo CLI + Python deps into an E2B snapshot
+  - Sandboxes spin up from template in ~200ms; only `git clone` (~20s) remains
+  - Build: `e2b template build` with a Dockerfile
+  - Add `FACTORY_E2B_TEMPLATE_ID` config; grinder uses `AsyncSandbox.create(template=...)`
+  - Bootstrap: ~2.5 min → **~25s**
+
+- [ ] **Tier 2 — Volume repo mirror** (private beta — contact support@e2b.dev)
+  - Volume holds pre-cloned git repo; multiple sandboxes mount it simultaneously (read-only semantics fine since each grinder creates its own worktree)
+  - NVMe attach is constant-time regardless of repo size
+  - Updated when `staging` branch is pushed
+  - Bootstrap: ~25s → **~5s**
+
+- [ ] **Tier 3 — Pause/resume warm pool** (future optimisation)
+  - Pre-warm N grinder sandboxes (cloned, checked out, ready), pause them (~4s/GB RAM)
+  - Resume on demand: ~1 second with full state preserved
+  - Bootstrap: ~5s → **<2s**
+
+**Key files:**
+- `.github/workflows/ci.yml` — add `staging` branch trigger + dedicated staging deploy job
+- `orchestrator/factory/agents/grinder_agent.py` — clone from staging, PR targets staging
+- `orchestrator/factory/integrations/github_client.py` — base branch param
+- `orchestrator/factory/graph.py` — make `human_review_code` interrupt optional/configurable
+- `orchestrator/factory/config.py` — add `FACTORY_TARGET_BRANCH` (default `staging`), `FACTORY_E2B_TEMPLATE_ID`
+
+### Milestone F8: Factory v2 — Gap Fixes 🔲
+Fix correctness and reliability issues in the v1 orchestrator.
+
+- [ ] Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
+- [ ] Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node`
+- [ ] httpx clients — share a single `httpx.AsyncClient` per session in `MeshWikiClient` and `GitHubClient`
+- [ ] Configurable PM model — `FACTORY_PM_MODEL` env var instead of hardcoded `"claude-sonnet-4-6"`
+- [ ] Review feedback in rework — append `subtask["review_feedback"]` to Kilo prompt on rework iterations
+- [ ] Bookkeeper bot — periodic job reconciling stale task states (stuck in_progress → failed, merged PRs → merged)
+- [ ] Signed grinder commits — GitHub App token or GPG key in E2B sandbox
+- [ ] Redecompose escalation — implement `"redecompose"` decision in `escalate_node`
+- [ ] Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
+
+**Key files:** `orchestrator/factory/cost.py` (new), `orchestrator/factory/nodes/assign.py`, `orchestrator/factory/agents/pm_agent.py`, `orchestrator/factory/agents/grinder_agent.py`, `orchestrator/factory/integrations/`
+
+### Milestone F9: Factory v2 — HBR Resource Manager 🔲
+Internal resource tracking and 24/7 heartbeat scheduler.
+
+- [ ] `factory/hbr.py` — track active sandboxes, daily cost vs budget, per-model API usage
+- [ ] `assign.py` checks `hbr.can_allocate_sandbox()` before dispatching
+- [ ] `factory/scheduler.py` — 60s heartbeat: reset budget at midnight, scan approved tasks that weren't webhook-triggered, dispatch if resources available
+- [ ] `GET /hbr/status` endpoint — active sandboxes, daily cost, budget remaining
+
+**Key files:** `orchestrator/factory/hbr.py` (new), `orchestrator/factory/scheduler.py` (new), `orchestrator/factory/webhook_server.py`
+
+### Milestone F10: Factory v2 — Live D3.js Visualization 🔲
+Real-time factory activity view using D3.js, same visual language as the wiki graph.
+
+- [ ] `core/factory_ws_manager.py` — push-based WebSocket manager + 500-entry activity ring buffer
+- [ ] `core/task_machine.py` — broadcast task transitions to factory WS after webhook emit
+- [ ] `GET /ws/factory` WebSocket endpoint
+- [ ] `GET /api/factory/graph` and `GET /api/factory/activity` REST endpoints
+- [ ] `/factory/live` page: D3 force graph (task circles colored by status, agent diamonds, dashed parent edges), detail panel (slide-in right, terminal embed for in_progress), activity feed strip at bottom
+- [ ] `base.html` — add conditional "Factory" nav link when `factory_enabled`
+
+**Key files:** `core/factory_ws_manager.py` (new), `static/js/factory.js` (new), `static/css/factory.css` (new), `templates/factory_live.html` (new), `core/task_machine.py`, `main.py`, `api/tasks.py`
+
+### Milestone F11: Factory v2 — Stale PR Bot 🔲
+First autonomous bot. Monitors CI failures on factory PRs and creates fix tasks.
+
+- [ ] `factory/bots/stale_pr_bot.py` — scan open `factory/*` PRs for check failures > 30min, create fix task pages
+- [ ] Integrate with scheduler (phase F9)
+- [ ] Safety guards: only `factory/*` branches, max 2 fix attempts per PR, respects budget
+
+**Key files:** `orchestrator/factory/bots/` (new), `orchestrator/factory/scheduler.py`
 
 ### Milestone 11: Macro System & Documentation
 Document the extension system and add useful built-in macros.
@@ -215,14 +332,25 @@ Deploy PR branches to a staging server for automated browser testing.
 
 ---
 
-## Agent Factory Backlog
+## Agent Factory Backlog (now tracked as Milestones F8–F11)
 
-- [ ] **Signed grinder commits** — factory bot commits show as "unverified" on GitHub. Options: create a GitHub App and use its installation token (commits attributed to the app and signed), or configure GPG signing in the E2B sandbox with a dedicated factory key.
-- [ ] **PostgreSQL checkpointer** — replace MemorySaver so graph state survives orchestrator restarts
-- [ ] **Anthropic API key for PM decomposition** — currently requires `skip_decomposition: true`; wire in a key to enable full PM-driven task breakdown
-- [ ] **Cost tracking** — aggregate token usage across grinder runs and write a cost summary to the task wiki page on completion
-- [ ] **Webhook handler decoupling** — `ainvoke` blocks the HTTP handler for the full pipeline duration; move graph execution to a background task so the webhook returns immediately
-- [ ] **Bookkeeper bot** — a periodic job (e.g. every 5 min) that scans all `type: task` pages and reconciles stale states: tasks stuck `in_progress` with no active terminal session and no recent PTY activity should be transitioned to `failed`; tasks in `review` where the PR has already been merged on GitHub should be transitioned to `merged`; tasks in `review` where the PR was closed without merging should be transitioned to `failed`. Prevents tasks from getting permanently stuck when the orchestrator crashes, restarts, or has a logic error mid-run.
+See `docs/domains/factory.md` for full v2 plan with phases.
+
+Previously completed:
+- [x] **PM uses Sonnet** — switched from Opus 4 to Sonnet 4.6
+- [x] **SQLite checkpointer** — replaced MemorySaver with AsyncSqliteSaver (state survives restarts)
+- [x] **Webhook handler decoupling** — `ainvoke` runs in background `asyncio.Task`, webhook returns immediately
+- [x] **Grinder auto-transitions task** — grinder node calls `transition_task()` on complete/fail, records `pr_url` and `branch`
+
+Moved to v2 milestones (see F8–F11 above):
+- Cost tracking → F8
+- Concurrency control / `active_grinders` → F8
+- Bookkeeper bot → F8
+- Signed grinder commits → F8
+- HBR resource manager + daily budget → F9
+- 24/7 heartbeat scheduler → F9
+- Live D3 factory visualization → F10
+- Stale PR fixer bot → F11
 
 ---
 

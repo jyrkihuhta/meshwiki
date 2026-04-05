@@ -262,12 +262,16 @@ Before committing:
 21. **E2E fixture scoping** - `base_url` and `data_dir` fixtures in `e2e/conftest.py` must be `scope="session"` to work with pytest-playwright's session-scoped browser fixtures. Function-scoped `clean_wiki` must access `e2e_server` dict directly (not the session-scoped `data_dir` fixture).
 22. **Playwright fill() doesn't trigger keyup** - HTMX triggers like `hx-trigger="keyup changed delay:300ms"` won't fire from Playwright `fill()`. Use `dispatch_event("keyup")` or `type()` after filling to trigger HTMX requests in E2E tests.
 23. **Dependabot auto-merge** - `.github/workflows/dependabot-auto-merge.yml` auto-merges non-major Dependabot PRs via `gh pr merge --auto --squash`.
+24. **Caddy HTTP/2 breaks WebSocket** - Caddy negotiates h2 via ALPN; browsers then use RFC 8441 extended CONNECT for WebSocket (no `Upgrade` header), which Caddy doesn't convert properly for the uvicorn backend. Fix: `{ servers { protocols h1 } }` in `deploy/vps/Caddyfile` forces HTTP/1.1 so traditional WebSocket upgrade works.
+25. **D3 must load from CSP-whitelisted CDN** - The CSP header (`SecurityHeadersMiddleware`) only allows scripts from `cdn.jsdelivr.net` and `cdnjs.cloudflare.com`. Use `https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js`; `d3js.org` is blocked, causing a silent ReferenceError that crashes graph.js before WebSocket connects.
+26. **Caddy reload not triggered by deploy** - `docker compose up -d` does not reload Caddy when only the mounted Caddyfile changes. The deploy script now runs `docker exec meshwiki-caddy-1 caddy reload` after writing the config. Without this, Caddyfile changes require a manual reload or container restart.
+27. **Graph API parent edges** - `/api/graph` returns links with `type: "parent"` for implicit subpage hierarchy (page `A/B` → edge from `A` if `A` exists). These render as dashed lines in graph.js. Regular wiki links have no `type` field.
 
-## Completed Milestones (1–9)
+## Completed Milestones (1–10)
 
-Milestones 1–9 cover infrastructure, wiki MVP, Rust graph engine, editor experience, navigation/discovery, and visual polish. All complete.
+Milestones 1–10 cover infrastructure, wiki MVP, Rust graph engine, editor experience, navigation/discovery, visual polish, and graph enhancements. All complete.
 
-**319 total tests passing** (70 graph-core + 200 Python unit + 49 Playwright E2E), CI pipeline active.
+**~390 total tests passing** (70 graph-core + ~270 Python unit + 49 Playwright E2E), CI pipeline active.
 
 **See:** `docs/domains/graph-engine.md` for Rust engine design.
 
@@ -280,7 +284,7 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
 python -m pytest tests/ -v       # 70 tests
 
 cd src
-python -m pytest tests/ -v       # 204 tests
+python -m pytest tests/ -v       # ~270 tests
 ```
 
 ## Subagent Workflow
@@ -316,7 +320,7 @@ The agent reads the domain doc for context, works autonomously, and reports back
 - Milestone 7: Editor Experience (live preview, toolbar, shortcuts) ✅
 - Milestone 8: Navigation & Discovery (search, TOC sidebar, tags) ✅
 - Milestone 9: Visual Polish & Responsiveness (dark mode, mobile, notifications) ✅
-- Milestone 10: Graph Visualization Enhancements (search, focus mode, node sizing)
+- Milestone 10: Graph Visualization Enhancements (search, focus mode, node sizing, subpage edges) ✅
 - Milestone 11: Macro System & Documentation (developer guide, built-in macros)
 - Milestone 12: Authentication (user accounts, access control)
 - Milestone 13: Observability (structured logging, metrics)

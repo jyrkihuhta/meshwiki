@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import hmac
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .config import get_settings
 from .graph import build_graph
@@ -16,12 +18,19 @@ from .state import FactoryState
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Factory Orchestrator")
 
-# Single compiled graph instance shared across webhook handlers.
-# The MemorySaver checkpointer is in-process; replace with PostgresSaver for
-# production deployments (see graph.build_graph TODO).
-_graph = build_graph()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Open the SQLite checkpoint DB, build the graph, close on shutdown."""
+    settings = get_settings()
+    async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver:
+        app.state.graph = build_graph(saver)
+        logger.info("factory: graph initialised with SQLite checkpointer at %s", settings.checkpoint_db)
+        yield
+    logger.info("factory: SQLite checkpointer closed")
+
+
+app = FastAPI(title="Factory Orchestrator", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +139,7 @@ async def receive_webhook(
     logger.info("webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name)
 
     if event == "task.assigned":
+        graph = request.app.state.graph
         initial_state = _build_initial_state(page_name, data)
         config = {"configurable": {"thread_id": page_name}}
 
@@ -138,7 +148,7 @@ async def receive_webhook(
                 logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
 
         task = asyncio.create_task(
-            _graph.ainvoke(initial_state, config=config),
+            graph.ainvoke(initial_state, config=config),
             name=f"graph:{page_name}",
         )
         task.add_done_callback(_log_exc)
@@ -146,11 +156,12 @@ async def receive_webhook(
         return {"status": "started"}
 
     if event == "task.approved":
+        graph = request.app.state.graph
         config = {"configurable": {"thread_id": page_name}}
         approval = data.get("approval", "approve")
         feedback = data.get("feedback")
         asyncio.create_task(
-            _graph.ainvoke(
+            graph.ainvoke(
                 {"human_approval_response": approval, "human_feedback": feedback},
                 config=config,
             ),

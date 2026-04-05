@@ -18,10 +18,42 @@ services:
       start_period: 10s
       retries: 3
 
+  meshwiki-staging:
+    image: ghcr.io/jyrkihuhta/meshwiki:${MESHWIKI_VERSION:-latest}
+    restart: unless-stopped
+    volumes:
+      - /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
+      - /opt/meshwiki/data/staging-pages:/data/pages
+    env_file: /opt/meshwiki/staging.env
+    expose:
+      - "8000"
+    command:
+      - uvicorn
+      - meshwiki.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/meshwiki
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
   orchestrator:
     image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:${ORCHESTRATOR_VERSION:-latest}
     restart: unless-stopped
     env_file: /opt/meshwiki/orchestrator.env
+    volumes:
+      - orchestrator_data:/data
     expose:
       - "8001"
     healthcheck:
@@ -55,3 +87,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  orchestrator_data:

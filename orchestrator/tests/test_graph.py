@@ -38,8 +38,8 @@ def test_graph_has_expected_nodes() -> None:
 
 
 def test_graph_default_checkpointer() -> None:
-    """build_graph() with no argument should still compile (uses MemorySaver)."""
-    graph = build_graph()
+    """build_graph(MemorySaver()) must compile (used in tests; prod uses AsyncSqliteSaver)."""
+    graph = build_graph(MemorySaver())
     assert graph is not None
 
 

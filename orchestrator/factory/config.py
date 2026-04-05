@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     repo_root: str = "/Users/jhuhta/meshwiki"  # FACTORY_REPO_ROOT
     grinder_provider: str = "e2b"  # FACTORY_GRINDER_PROVIDER
     grinder_model: str = "MiniMax-M2.7"  # FACTORY_GRINDER_MODEL
+    checkpoint_db: str = "/data/checkpoints.db"  # FACTORY_CHECKPOINT_DB
 
     model_config = SettingsConfigDict(env_prefix="FACTORY_")
 
