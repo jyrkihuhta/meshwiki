@@ -22,6 +22,8 @@ services:
     image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:${ORCHESTRATOR_VERSION:-latest}
     restart: unless-stopped
     env_file: /opt/meshwiki/orchestrator.env
+    volumes:
+      - orchestrator_data:/data
     expose:
       - "8001"
     healthcheck:
@@ -55,3 +57,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  orchestrator_data:

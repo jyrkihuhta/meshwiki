@@ -2,7 +2,6 @@
 
 import logging
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .nodes import (
@@ -83,21 +82,17 @@ def route_after_escalation(state: FactoryState) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_graph(checkpointer=None):
+def build_graph(checkpointer):
     """
     Build and compile the factory StateGraph.
 
     Args:
-        checkpointer: A LangGraph checkpointer instance.
-            Defaults to MemorySaver() if not provided.
-            TODO: Replace MemorySaver with PostgresSaver for production
-            (requires FACTORY_POSTGRES_DSN and langgraph-checkpoint-postgres).
+        checkpointer: A LangGraph checkpointer instance (e.g. AsyncSqliteSaver
+            in production, MemorySaver in tests).
 
     Returns:
         A compiled LangGraph graph ready for .invoke() / .ainvoke().
     """
-    if checkpointer is None:
-        checkpointer = MemorySaver()
 
     graph = StateGraph(FactoryState)
 

@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from factory.graph import build_graph
 from factory.state import FactoryState, SubTask
 
@@ -138,7 +140,7 @@ async def test_pipeline_happy_path_reaches_done() -> None:
         tokens_used=1234,
     )
 
-    graph = build_graph()
+    graph = build_graph(MemorySaver())
     config = {"configurable": {"thread_id": "Task_0042_test"}}
 
     with (
@@ -204,7 +206,7 @@ async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
         error_log=["Compilation error: undefined variable"],
     )
 
-    graph = build_graph()
+    graph = build_graph(MemorySaver())
     config = {"configurable": {"thread_id": "Task_0042_test_fail"}}
 
     with (
@@ -261,7 +263,7 @@ async def test_pipeline_pm_review_requests_changes_reruns_grinder() -> None:
         _make_pm_review_result("approved"),
     ]
 
-    graph = build_graph()
+    graph = build_graph(MemorySaver())
     config = {"configurable": {"thread_id": "Task_0042_test_rework"}}
 
     with (
@@ -325,7 +327,7 @@ async def test_finalize_calls_transition_to_done() -> None:
         pr_url="https://github.com/owner/repo/pull/99",
     )
 
-    graph = build_graph()
+    graph = build_graph(MemorySaver())
     config = {"configurable": {"thread_id": "Task_0042_test_finalize"}}
 
     with (
