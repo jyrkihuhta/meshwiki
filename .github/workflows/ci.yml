@@ -401,6 +401,27 @@ jobs:
           envsubst '$VPS_DOMAIN' < deploy/vps/Caddyfile | ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/Caddyfile"
           ssh "${VPS_USER}@${VPS_HOST}" "docker exec meshwiki-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true"
 
+      - name: Update staging source on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          DEPLOY_REF: ${{ github.ref_name }}
+        run: |
+          ssh "${VPS_USER}@${VPS_HOST}" << 'ENDSTAGINGDEPLOY'
+          set -euo pipefail
+          STAGING_DIR=/opt/meshwiki/staging
+          if [ ! -d "${STAGING_DIR}/.git" ]; then
+            git clone https://github.com/${{ github.repository }}.git "${STAGING_DIR}"
+          fi
+          cd "${STAGING_DIR}"
+          git fetch --all
+          git checkout "${{ github.ref_name }}"
+          git pull origin "${{ github.ref_name }}"
+          echo "Staging source updated to ${{ github.ref_name }} ($(git rev-parse --short HEAD))"
+          ENDSTAGINGDEPLOY
+          # Restart staging container so --reload picks up any new dependencies
+          ssh "${VPS_USER}@${VPS_HOST}" "cd /opt/meshwiki && docker compose restart meshwiki-staging || true"
+
       - name: Write orchestrator env to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -468,4 +489,5 @@ jobs:
           VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
         run: |
           curl -sf --max-time 30 "https://${VPS_DOMAIN}/health/live" > /dev/null
-          echo "Smoke tests passed"
+          curl -sf --max-time 30 "https://staging.${VPS_DOMAIN}/health/live" > /dev/null
+          echo "Smoke tests passed (prod + staging)"

@@ -7,3 +7,7 @@
 ${VPS_DOMAIN} {
     reverse_proxy meshwiki:8000
 }
+
+staging.${VPS_DOMAIN} {
+    reverse_proxy meshwiki-staging:8000
+}
