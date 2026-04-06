@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -169,6 +171,169 @@ PM_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+class _ToolUseBlock:
+    """Duck-typed Anthropic ToolUseBlock backed by an OpenAI tool_call."""
+
+    type = "tool_use"
+
+    def __init__(self, tool_call: Any) -> None:
+        self.id: str = tool_call.id
+        self.name: str = tool_call.function.name
+        self.input: dict[str, Any] = json.loads(tool_call.function.arguments or "{}")
+
+
+class _TextBlock:
+    """Duck-typed Anthropic TextBlock backed by an OpenAI content string."""
+
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _OpenAIResponseAdapter:
+    """Wraps an OpenAI ChatCompletion to match the Anthropic Messages interface.
+
+    The PM agent loops inspect ``response.stop_reason`` and ``response.content``
+    (a list of tool-use/text blocks). This adapter translates the OpenAI shape
+    so the existing loop code works without modification.
+    """
+
+    def __init__(self, oai_resp: Any) -> None:
+        choice = oai_resp.choices[0]
+        msg = choice.message
+
+        finish = choice.finish_reason  # "stop" | "tool_calls" | "length"
+        self.stop_reason = "end_turn" if finish == "stop" else "tool_use"
+
+        blocks: list[Any] = []
+        if msg.content:
+            blocks.append(_TextBlock(msg.content))
+        for tc in msg.tool_calls or []:
+            blocks.append(_ToolUseBlock(tc))
+        self.content = blocks
+
+
+def _anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic tool schema format to OpenAI function-calling format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {}),
+            },
+        }
+        for t in tools
+    ]
+
+
+async def _messages_create_with_retry(
+    client: anthropic.AsyncAnthropic,
+    *,
+    max_overload_attempts: int = 5,
+    **kwargs: Any,
+) -> Any:
+    """Call client.messages.create with extended retry for 529 overloaded errors.
+
+    The SDK's built-in retry uses short waits (~0.4s, 0.8s) which aren't
+    sufficient for real Anthropic overload events. This wrapper retries up to
+    ``max_overload_attempts`` times with 30-second exponential backoff (30s,
+    60s, 120s, 240s, 480s). If all attempts are exhausted, falls back to
+    MiniMax via OpenAI-compatible API if ``FACTORY_MINIMAX_API_KEY`` is set.
+    All other errors are re-raised immediately.
+    """
+    import openai
+
+    last_exc: BaseException | None = None
+    for attempt in range(max_overload_attempts):
+        try:
+            return await client.messages.create(**kwargs)
+        except anthropic.APIStatusError as exc:
+            if exc.status_code == 529 and attempt < max_overload_attempts - 1:
+                wait = 30 * (2**attempt)
+                logger.warning(
+                    "pm_agent: Anthropic API overloaded (529), retrying in %ds "
+                    "(attempt %d/%d)",
+                    wait,
+                    attempt + 1,
+                    max_overload_attempts,
+                )
+                await asyncio.sleep(wait)
+                last_exc = exc
+            else:
+                raise
+
+    # All Anthropic retries exhausted — fall back to MiniMax if available.
+    settings = get_settings()
+    if not settings.minimax_api_key:
+        raise last_exc  # type: ignore[misc]
+
+    logger.warning(
+        "pm_agent: Anthropic overloaded after %d attempts, falling back to MiniMax",
+        max_overload_attempts,
+    )
+
+    minimax_client = openai.AsyncOpenAI(
+        api_key=settings.minimax_api_key,
+        base_url="https://api.minimax.io/v1",
+    )
+
+    # Convert messages: Anthropic tool_result blocks → OpenAI tool role messages.
+    oai_messages: list[dict[str, Any]] = []
+    for msg in kwargs.get("messages", []):
+        if msg["role"] == "assistant":
+            content = msg["content"]
+            if isinstance(content, list):
+                text_parts = [b.text for b in content if hasattr(b, "text")]
+                tool_calls = [
+                    {
+                        "id": b.id,
+                        "type": "function",
+                        "function": {"name": b.name, "arguments": json.dumps(b.input)},
+                    }
+                    for b in content
+                    if hasattr(b, "type") and b.type == "tool_use"
+                ]
+                oai_msg: dict[str, Any] = {"role": "assistant", "content": " ".join(text_parts) or None}
+                if tool_calls:
+                    oai_msg["tool_calls"] = tool_calls
+                oai_messages.append(oai_msg)
+            else:
+                oai_messages.append({"role": "assistant", "content": content})
+        elif msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        oai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": block["tool_use_id"],
+                            "content": str(block.get("content", "")),
+                        })
+                    else:
+                        oai_messages.append({"role": "user", "content": str(block)})
+            else:
+                oai_messages.append({"role": "user", "content": content})
+
+    system = kwargs.get("system", "")
+    if system:
+        oai_messages.insert(0, {"role": "system", "content": system})
+
+    oai_tools = _anthropic_tools_to_openai(kwargs.get("tools", []))
+    oai_resp = await minimax_client.chat.completions.create(
+        model="MiniMax-M2.7",
+        max_tokens=kwargs.get("max_tokens", 4096),
+        messages=oai_messages,
+        tools=oai_tools if oai_tools else openai.NOT_GIVEN,
+        tool_choice="auto" if oai_tools else openai.NOT_GIVEN,
+    )
+
+    # Wrap OpenAI response in a duck-typed object matching Anthropic's interface.
+    return _OpenAIResponseAdapter(oai_resp)
+
+
 def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask:
     """Build a SubTask TypedDict from PM tool call input.
 
@@ -251,7 +416,8 @@ async def decompose_with_pm(
     tool_calls_remaining = 20
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
+        response = await _messages_create_with_retry(
+            client,
             model="claude-sonnet-4-6",
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
