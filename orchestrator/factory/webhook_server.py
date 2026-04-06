@@ -30,17 +30,20 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
        from the last node boundary rather than restarting from scratch.
     """
     client = MeshWikiClient(settings.meshwiki_url, settings.meshwiki_api_key)
-    try:
-        tasks = await client.list_tasks(status="in_progress")
-    except Exception as exc:
-        logger.warning("factory: could not fetch in_progress tasks on startup: %s", exc)
+    all_factory_tasks: list[dict] = []
+    for status in ("in_progress", "review"):
+        try:
+            tasks = await client.list_tasks(status=status)
+        except Exception as exc:
+            logger.warning("factory: could not fetch %s tasks on startup: %s", status, exc)
+            continue
+        all_factory_tasks.extend(t for t in tasks if t.get("assignee") == "factory")
+
+    if not all_factory_tasks:
         return
 
-    factory_tasks = [t for t in tasks if t.get("assignee") == "factory"]
-    if not factory_tasks:
-        return
-
-    logger.info("factory: found %d in_progress factory task(s) on startup", len(factory_tasks))
+    factory_tasks = all_factory_tasks
+    logger.info("factory: found %d active factory task(s) on startup", len(factory_tasks))
     for task in factory_tasks:
         page_name = task.get("name", "")
         if not page_name:
