@@ -61,11 +61,7 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
             logger.info("factory: no checkpoint for %s — skipping resume", page_name)
             continue
 
-        logger.info(
-            "factory: resuming interrupted task %s from checkpoint (next nodes: %s)",
-            page_name,
-            checkpoint_tuple.next,
-        )
+        logger.info("factory: resuming interrupted task %s from checkpoint", page_name)
 
         def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
             if not t.cancelled() and (exc := t.exception()):
