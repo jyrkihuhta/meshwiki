@@ -289,27 +289,12 @@ def _timeago(dt: datetime | None) -> str:
         return dt.strftime("%Y-%m-%d")
 
 
-def _render_recent_changes(n: int = 10) -> str:
+def _render_recent_changes(pages: list, n: int = 10) -> str:
     """Render the <<RecentChanges(n)>> macro as an HTML list of recent pages."""
-    try:
-        from meshwiki.core.dependencies import get_storage
-
-        storage = get_storage()
-    except RuntimeError:
+    if not pages:
         return (
             '<div class="recent-changes-wrapper">'
-            '<p class="recent-changes-unavailable">'
-            "<em>RecentChanges: storage not available</em></p></div>"
-        )
-
-    try:
-        import asyncio
-
-        pages = asyncio.run(storage.list_pages_with_metadata())
-    except Exception as e:
-        return (
-            f'<div class="recent-changes-wrapper">'
-            f'<p class="recent-changes-error"><em>RecentChanges error: {e}</em></p></div>'
+            '<p class="recent-changes-empty"><em>No pages found</em></p></div>'
         )
 
     filtered = [p for p in pages if not p.name.startswith("Factory/")]
@@ -343,6 +328,10 @@ def _render_recent_changes(n: int = 10) -> str:
 class RecentChangesPreprocessor(Preprocessor):
     """Preprocessor that replaces <<RecentChanges(n)>> macros with an HTML list."""
 
+    def __init__(self, md: Markdown, recent_pages: list | None):
+        super().__init__(md)
+        self.recent_pages = recent_pages or []
+
     def run(self, lines: list[str]) -> list[str]:
         text = "\n".join(lines)
         if "<<RecentChanges" not in text:
@@ -361,7 +350,7 @@ class RecentChangesPreprocessor(Preprocessor):
         def replace_match(m: re.Match) -> str:
             n_str = m.group(1)
             n = int(n_str) if n_str else 10
-            html = _render_recent_changes(n)
+            html = _render_recent_changes(self.recent_pages, n)
             return self.md.htmlStash.store(html)
 
         text = RECENTCHANGES_PATTERN.sub(replace_match, text)
@@ -375,9 +364,13 @@ class RecentChangesPreprocessor(Preprocessor):
 class RecentChangesExtension(Extension):
     """Markdown extension for <<RecentChanges(n)>> macros."""
 
+    def __init__(self, recent_pages: list | None = None, **kwargs):
+        self.recent_pages = recent_pages or []
+        super().__init__(**kwargs)
+
     def extendMarkdown(self, md: Markdown) -> None:
         md.preprocessors.register(
-            RecentChangesPreprocessor(md),
+            RecentChangesPreprocessor(md, self.recent_pages),
             "recentchanges",
             29,
         )
@@ -900,6 +893,7 @@ def create_parser(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
 ) -> Markdown:
     """Create a Markdown parser with wiki link support.
 
@@ -908,6 +902,7 @@ def create_parser(
                     Used to style missing page links differently.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
 
     Returns:
         Configured Markdown parser instance.
@@ -931,7 +926,7 @@ def create_parser(
             EpicStatusExtension(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<EpicStatus>>
-            RecentChangesExtension(),  # <<RecentChanges(n)>>
+            RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
         ]
     )
@@ -942,6 +937,7 @@ def parse_wiki_content(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
 ) -> str:
     """Parse wiki content (Markdown + wiki links) to HTML.
 
@@ -950,12 +946,16 @@ def parse_wiki_content(
         page_exists: Callback to check if a page exists.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
 
     Returns:
         HTML string.
     """
     parser = create_parser(
-        page_exists, page_name=page_name, page_metadata=page_metadata
+        page_exists,
+        page_name=page_name,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
     )
     return parser.convert(content)
 
@@ -965,6 +965,7 @@ def parse_wiki_content_with_toc(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
 ) -> tuple[str, str]:
     """Parse wiki content and return HTML with table of contents.
 
@@ -973,12 +974,16 @@ def parse_wiki_content_with_toc(
         page_exists: Callback to check if a page exists.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
 
     Returns:
         Tuple of (html_content, toc_html).
     """
     parser = create_parser(
-        page_exists, page_name=page_name, page_metadata=page_metadata
+        page_exists,
+        page_name=page_name,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
     )
     html = parser.convert(content)
     toc_html = getattr(parser, "toc", "")

@@ -414,12 +414,21 @@ async def view_page(request: Request, name: str):
                 child_tasks.append({"name": p.name, "title": p.title, "status": status})
         frontmatter["_child_tasks"] = child_tasks
 
+    # Fetch recent pages for <<RecentChanges>> macro.
+    all_pages = await storage.list_pages_with_metadata()
+    recent_pages = sorted(
+        [p for p in all_pages if p.metadata.modified],
+        key=lambda p: p.metadata.modified,
+        reverse=True,
+    )
+
     # Parse content with wiki links, TOC, and page context for macros.
     html_content, toc_html = parse_wiki_content_with_toc(
         page.content,
         page_exists=page_exists_sync,
         page_name=name,
         page_metadata=frontmatter,
+        recent_pages=recent_pages,
     )
 
     return templates.TemplateResponse(
@@ -497,7 +506,12 @@ async def save_page(request: Request, name: str, content: str = Form("")):
 @app.post("/api/preview", response_class=HTMLResponse)
 async def api_preview(content: str = Form("")):
     """Render markdown preview for the editor."""
-    html = parse_wiki_content(content, page_exists=page_exists_sync)
+    recent_pages = await storage.list_pages_with_metadata()
+    html = parse_wiki_content(
+        content,
+        page_exists=page_exists_sync,
+        recent_pages=recent_pages,
+    )
     return HTMLResponse(html)
 
 
