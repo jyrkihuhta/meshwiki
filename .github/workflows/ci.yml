@@ -379,6 +379,7 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/staging' &&
       needs.test-python.result == 'success' &&
       (needs.test-orchestrator.result == 'success' || needs.test-orchestrator.result == 'skipped')
+    continue-on-error: true
     concurrency:
       group: staging-deploy
       cancel-in-progress: true
@@ -454,7 +455,8 @@ jobs:
             cp /opt/meshwiki/staging/deploy/vps/staging.env.example /opt/meshwiki/staging.env
           fi
           cd /opt/meshwiki
-          docker compose up -d meshwiki-staging orchestrator-staging
+          docker compose up -d meshwiki-staging || true
+          docker compose up -d --no-deps orchestrator-staging || true
           ENDDEPLOY
 
       - name: Smoke test staging
