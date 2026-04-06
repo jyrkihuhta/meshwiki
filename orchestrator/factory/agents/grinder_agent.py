@@ -669,11 +669,13 @@ async def grind_subtask_e2b(
         pty_output = "".join(_pty_chunks)
         logger.info("e2b grinder: PTY output tail: %s", pty_output[-2000:])
 
-        match = _re.search(
+        # Use findall + take the last match: Kilo may output placeholder URLs
+        # earlier in its thinking; the actual PR URL appears at the end (step 10).
+        all_urls = _re.findall(
             r'https://github\.com/[^/\s"]+/[^/\s"]+/pull/\d+', pty_output
         )
-        if match:
-            pr_url = match.group(0)
+        if all_urls:
+            pr_url = all_urls[-1]
 
         if pr_url:
             status = "review"

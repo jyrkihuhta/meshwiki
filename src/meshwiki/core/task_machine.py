@@ -24,7 +24,7 @@ TASK_TRANSITIONS: dict[str, list[str]] = {
     "review": ["merged", "rejected", "blocked"],
     "merged": ["done"],
     "done": [],
-    "failed": ["planned", "blocked"],
+    "failed": ["planned", "in_progress", "blocked"],
     "rejected": ["in_progress", "blocked"],
     "blocked": ["planned", "approved", "in_progress"],
 }
@@ -39,6 +39,10 @@ CANONICAL_EVENTS: dict[tuple[str, str], str] = {
     ("review", "rejected"): "task.pr_rejected",
     ("merged", "done"): "task.completed",
     ("planned", "in_progress"): "task.assigned",  # direct grind (no PM decomposition)
+    (
+        "failed",
+        "in_progress",
+    ): "task.retry",  # escalator retry — does not re-trigger webhook
 }
 
 

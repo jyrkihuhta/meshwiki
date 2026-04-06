@@ -162,6 +162,7 @@ Document the extension system and add useful built-in macros.
 - [ ] `<<BackLinks>>` macro — inline backlinks (alternative to sidebar panel)
 - [ ] `<<PageCount>>` macro — total page count for dashboards
 - [ ] Live MetaTable refresh — wire WebSocket `page_updated` events to trigger HTMX re-fetch of MetaTable sections without full page reload
+- [ ] Macro escape syntax — preprocessors skip inline backtick spans and honor `\<<MacroName>>` as a literal `<<MacroName>>` (currently any bare `<<Macro>>` in prose triggers the preprocessor)
 **Key files:** `core/parser.py` (new extensions), `docs/custom-macros.md`
 
 ### Milestone 12: Authentication

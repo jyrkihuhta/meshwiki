@@ -57,6 +57,17 @@ async def escalate_node(state: FactoryState) -> dict:
     except Exception as exc:
         logger.error("escalate: failed to update task page: %s", exc)
 
+    # Transition retriable subtask wiki pages back to in_progress so that
+    # grind_node can later transition them to review (failed->review is invalid).
+    for s in retriable:
+        try:
+            await client.transition_task(s["wiki_page"], "in_progress")
+            logger.info("escalate: transitioned %s back to in_progress for retry", s["id"])
+        except Exception as exc:
+            logger.warning(
+                "escalate: could not transition %s to in_progress: %s", s["id"], exc
+            )
+
     # Increment attempt count on retriable failed subtasks and reset status
     retriable_ids = {s["id"] for s in retriable}
     subtasks = []
