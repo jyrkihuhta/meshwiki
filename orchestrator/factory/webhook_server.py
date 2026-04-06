@@ -192,7 +192,9 @@ async def receive_webhook(
     page_name: str = payload.get("page", "")
     data: dict[str, Any] = payload.get("data", {})
 
-    logger.info("webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name)
+    logger.info(
+        "webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name
+    )
 
     if event == "task.assigned":
         graph = request.app.state.graph

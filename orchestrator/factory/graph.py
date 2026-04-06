@@ -57,6 +57,7 @@ def route_after_grinding(state: FactoryState) -> str:
 def route_after_pm_review(state: FactoryState) -> str:
     """Route after PM reviews grinder-produced code."""
     from .config import get_settings
+
     needs_rework = [s for s in state["subtasks"] if s["status"] == "changes_requested"]
     exhausted = [s for s in needs_rework if s["attempt"] >= s["max_attempts"]]
     if exhausted:
