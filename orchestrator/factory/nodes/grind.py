@@ -34,6 +34,30 @@ async def grind_node(state: FactoryState) -> dict:
         logger.error("grind_node: subtask %r not found in state", subtask_id)
         return {}
 
+    # Guard: rework with no feedback wastes a full sandbox run.
+    # Fail fast so escalate_node can handle it rather than grinding blindly.
+    if subtask.get("attempt", 0) > 0 and not subtask.get("review_feedback"):
+        logger.warning(
+            "grind_node: subtask %s is a rework (attempt %d) but review_feedback is empty — failing fast",
+            subtask_id,
+            subtask.get("attempt", 0),
+        )
+        error_log = list(subtask.get("error_log") or []) + [
+            "PM requested changes but provided no feedback — cannot rework"
+        ]
+        updated = {**subtask, "status": "failed", "error_log": error_log}
+        meshwiki_client = MeshWikiClient()
+        try:
+            await meshwiki_client.transition_task(subtask["wiki_page"], "failed")
+        except Exception as exc:
+            logger.error(
+                "grind_node: failed to transition %s to failed: %s",
+                subtask["wiki_page"],
+                exc,
+            )
+        subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
+        return {"subtasks": subtasks}
+
     logger.info(
         "grind_node: running grinder for subtask %s (task %s)",
         subtask_id,
