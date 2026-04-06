@@ -263,6 +263,30 @@ class TestPageCountMacroViaApi:
 
 
 # ============================================================
+# BackLinks macro
+# ============================================================
+
+
+class TestBackLinksMacro:
+    def test_backlinks_renders_nothing_when_no_engine(self):
+        """BackLinks macro renders nothing when graph engine is unavailable."""
+        html = parse_wiki_content("<<BackLinks>>", page_name="TestPage")
+        assert "backlinks" not in html
+
+    def test_backlinks_not_in_code_block(self):
+        """BackLinks macro inside ``` should be literal text."""
+        content = "```\n<<BackLinks>>\n```"
+        html = parse_wiki_content(content, page_name="TestPage")
+        assert "backlinks" not in html
+
+    def test_backlinks_not_in_tilde_code(self):
+        """BackLinks macro inside ~~~ should be literal text."""
+        content = "~~~\n<<BackLinks>>\n~~~"
+        html = parse_wiki_content(content, page_name="TestPage")
+        assert "backlinks" not in html
+
+
+# ============================================================
 # MetaTable inside code blocks
 # ============================================================
 
