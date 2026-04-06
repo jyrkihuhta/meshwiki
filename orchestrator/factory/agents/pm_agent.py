@@ -150,7 +150,7 @@ PM_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "pm_request_changes",
-        "description": "Request changes on a subtask PR — the implementation does not meet acceptance criteria.",
+        "description": "Request changes on a subtask PR — the implementation does not meet acceptance criteria. You MUST provide non-empty feedback: the grinder has no other way to know what to fix.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -160,7 +160,7 @@ PM_TOOLS: list[dict[str, Any]] = [
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Detailed feedback describing what needs to change.",
+                    "description": "Detailed, actionable feedback describing exactly what needs to change. Must be non-empty — the grinder will fail immediately if this is blank.",
                 },
             },
             "required": ["subtask_id", "feedback"],
@@ -410,7 +410,12 @@ async def review_with_pm(
                 )
             elif tool_name == "pm_request_changes":
                 decision = "changes_requested"
-                feedback = tool_input.get("feedback")
+                feedback = tool_input.get("feedback") or None
+                if not feedback:
+                    logger.warning(
+                        "review_with_pm: pm_request_changes called with empty feedback for subtask %s",
+                        tool_input.get("subtask_id"),
+                    )
                 result_content = "Changes requested."
                 logger.info(
                     "review_with_pm: changes requested for subtask %s",
