@@ -1,5 +1,6 @@
 """Markdown parser with wiki link support."""
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -787,6 +788,137 @@ class TaskStatusExtension(Extension):
         )
 
 
+PAGELIST_PATTERN = re.compile(r"<<PageList(?:\(([^)]*)\))?>>")
+
+
+def _parse_pagelist_args(args_str: str | None) -> dict[str, str]:
+    """Parse comma-separated key=value pairs from a macro argument string.
+
+    Returns a dict of lowercased keys to raw string values.
+    Empty or None input returns {}.
+    """
+    if not args_str:
+        return {}
+    result = {}
+    for part in args_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            result[key.strip().lower()] = value.strip()
+    return result
+
+
+def _render_page_list(args_str: str | None) -> str:
+    """Render <<PageList(...)>> as an HTML list of wiki pages."""
+    from meshwiki.core.dependencies import get_storage
+
+    args = _parse_pagelist_args(args_str)
+
+    try:
+        storage = get_storage()
+    except RuntimeError:
+        return (
+            '<div class="page-list-wrapper">'
+            '<p class="page-list-unavailable">'
+            "<em>PageList: storage not available</em></p></div>"
+        )
+
+    try:
+        if "tag" in args:
+            pages = asyncio.run(storage.search_by_tag(args["tag"]))
+        else:
+            pages = asyncio.run(storage.list_pages_with_metadata())
+    except Exception:
+        return (
+            '<div class="page-list-wrapper">'
+            '<p class="page-list-unavailable">'
+            "<em>PageList: storage not available</em></p></div>"
+        )
+
+    if "prefix" in args:
+        prefix = args["prefix"]
+        pages = [p for p in pages if p.name.startswith(prefix)]
+
+    pages.sort(key=lambda p: p.name.lower())
+
+    if "limit" in args:
+        try:
+            limit = int(args["limit"])
+            if limit > 0:
+                pages = pages[:limit]
+        except ValueError:
+            pass
+
+    if not pages:
+        return (
+            '<div class="page-list-wrapper">'
+            '<p class="page-list-empty"><em>No pages found</em></p></div>'
+        )
+
+    lines = ['<div class="page-list-wrapper">', '<ul class="page-list">']
+    for page in pages:
+        url_name = page.name.replace(" ", "_")
+        tags_html = ""
+        if page.metadata.tags:
+            tag_links = [
+                f'<a href="/search?tag={html_escape(t)}" class="tag-pill">{html_escape(t)}</a>'
+                for t in page.metadata.tags
+            ]
+            tags_html = f'<span class="page-list-tags">{"".join(tag_links)}</span>'
+        lines.append(
+            f'<li class="page-list-item">'
+            f'<a href="/page/{url_name}" class="wiki-link">{html_escape(page.name)}</a>'
+            f"{tags_html}"
+            f"</li>"
+        )
+    lines.append("</ul></div>")
+    return "\n".join(lines)
+
+
+class PageListPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<PageList(...)>> macros with an HTML list."""
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<PageList" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00PLBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            args_str = m.group(1)
+            html = _render_page_list(args_str)
+            return self.md.htmlStash.store(html)
+
+        text = PAGELIST_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00PLBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class PageListExtension(Extension):
+    """Markdown extension for <<PageList(...)>> macros."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            PageListPreprocessor(md),
+            "pagelist",
+            28,
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BackLinks macro
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1070,6 +1202,7 @@ def create_parser(
             RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
+            PageListExtension(),  # <<PageList(...)>>
         ]
     )
 
