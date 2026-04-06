@@ -1079,6 +1079,12 @@ def _render_include(
             return f'<span class="include-missing">[[{page_name}]]</span>'
         parts: list[str] = []
         for matched_page in matching_pages:
+            if matched_page in include_chain:
+                parts.append(
+                    f'<span class="include-circular">[[{matched_page}]]'
+                    f"<em>(circular include skipped)</em></span>"
+                )
+                continue
             content = page_contents.get(matched_page, "")
             content = _strip_frontmatter(content)
             nested_html = parse_wiki_content(

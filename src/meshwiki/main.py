@@ -427,10 +427,10 @@ async def view_page(request: Request, name: str):
     page_contents: dict[str, str] = {}
     if "<<Include(" in page.content:
         all_page_names = await storage.list_pages()
-        raws = await asyncio.gather(
-            *(storage.get_raw_content(n) for n in all_page_names)
-        )
-        page_contents = {n: r for n, r in zip(all_page_names, raws) if r is not None}
+        pages = await asyncio.gather(*(storage.get_page(n) for n in all_page_names))
+        page_contents = {
+            n: p.content for n, p in zip(all_page_names, pages) if p is not None
+        }
 
     # Parse content with wiki links, TOC, and page context for macros.
     html_content, toc_html = parse_wiki_content_with_toc(

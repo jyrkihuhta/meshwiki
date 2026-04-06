@@ -252,6 +252,15 @@ class TestIncludeCircular:
         assert "circular" not in html
         assert "Content A" in html
 
+    def test_circular_pattern_include_skipped(self):
+        """Circular detection works inside pattern includes."""
+        page_contents = {
+            "Docs/Page1": "# Doc Page 1",
+            "Docs/Page2": "# Doc Page 2\n\n<<Include(Docs/Page1)>>\n\n<<Include(Docs/Page2)>>",
+        }
+        html = render("<<Include(Docs/*)>>", page_contents=page_contents)
+        assert html.count("include-circular") == 1
+
 
 class TestIncludeFrontmatter:
     """Tests for frontmatter stripping."""
