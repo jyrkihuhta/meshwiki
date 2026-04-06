@@ -416,20 +416,31 @@ jobs:
           FACTORY_GITHUB_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN }}
           FACTORY_MINIMAX_API_KEY: ${{ secrets.FACTORY_MINIMAX_API_KEY }}
         run: |
-          printf '%s\n' \
-            "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
-            "FACTORY_MESHWIKI_URL=http://meshwiki-staging:8000" \
-            "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
-            "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}" \
-            "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
-            "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
-            "FACTORY_GITHUB_REPO=${{ github.repository }}" \
-            "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
-            "FACTORY_HOST=0.0.0.0" \
-            "FACTORY_PORT=8002" \
-            "FACTORY_PR_BASE_BRANCH=staging" \
-            "FACTORY_AUTO_MERGE=true" | \
-          ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/orchestrator-staging.env"
+          {
+            printf '%s\n' \
+              "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
+              "FACTORY_MESHWIKI_URL=http://meshwiki-staging:8000" \
+              "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
+              "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
+              "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
+              "FACTORY_GITHUB_REPO=${{ github.repository }}" \
+              "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
+              "FACTORY_HOST=0.0.0.0" \
+              "FACTORY_PORT=8002" \
+              "FACTORY_PR_BASE_BRANCH=staging" \
+              "FACTORY_AUTO_MERGE=true"
+            [ -n "${FACTORY_ANTHROPIC_API_KEY}" ] && echo "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}"
+          } | ssh "${VPS_USER}@${VPS_HOST}" "
+            cat > /opt/meshwiki/orchestrator-staging.env.new
+            if grep -q FACTORY_ANTHROPIC_API_KEY /opt/meshwiki/orchestrator-staging.env.new; then
+              mv /opt/meshwiki/orchestrator-staging.env.new /opt/meshwiki/orchestrator-staging.env
+            else
+              grep -v '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator-staging.env > /opt/meshwiki/orchestrator-staging.env.tmp 2>/dev/null || true
+              cat /opt/meshwiki/orchestrator-staging.env.new >> /opt/meshwiki/orchestrator-staging.env.tmp
+              mv /opt/meshwiki/orchestrator-staging.env.tmp /opt/meshwiki/orchestrator-staging.env
+              rm -f /opt/meshwiki/orchestrator-staging.env.new
+            fi
+          "
 
       - name: Update staging source on VPS
         env:
@@ -542,18 +553,29 @@ jobs:
           FACTORY_GITHUB_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN }}
           FACTORY_MINIMAX_API_KEY: ${{ secrets.FACTORY_MINIMAX_API_KEY }}
         run: |
-          printf '%s\n' \
-            "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
-            "FACTORY_MESHWIKI_URL=http://meshwiki:8000" \
-            "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
-            "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}" \
-            "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
-            "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
-            "FACTORY_GITHUB_REPO=${{ github.repository }}" \
-            "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
-            "FACTORY_HOST=0.0.0.0" \
-            "FACTORY_PORT=8001" | \
-          ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/orchestrator.env"
+          {
+            printf '%s\n' \
+              "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
+              "FACTORY_MESHWIKI_URL=http://meshwiki:8000" \
+              "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
+              "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
+              "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
+              "FACTORY_GITHUB_REPO=${{ github.repository }}" \
+              "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
+              "FACTORY_HOST=0.0.0.0" \
+              "FACTORY_PORT=8001"
+            [ -n "${FACTORY_ANTHROPIC_API_KEY}" ] && echo "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}"
+          } | ssh "${VPS_USER}@${VPS_HOST}" "
+            cat > /opt/meshwiki/orchestrator.env.new
+            if grep -q FACTORY_ANTHROPIC_API_KEY /opt/meshwiki/orchestrator.env.new; then
+              mv /opt/meshwiki/orchestrator.env.new /opt/meshwiki/orchestrator.env
+            else
+              grep -v '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator.env > /opt/meshwiki/orchestrator.env.tmp 2>/dev/null || true
+              cat /opt/meshwiki/orchestrator.env.new >> /opt/meshwiki/orchestrator.env.tmp
+              mv /opt/meshwiki/orchestrator.env.tmp /opt/meshwiki/orchestrator.env
+              rm -f /opt/meshwiki/orchestrator.env.new
+            fi
+          "
 
       - name: Deploy and health check
         env:
