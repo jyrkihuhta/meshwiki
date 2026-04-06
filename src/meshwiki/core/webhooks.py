@@ -124,7 +124,10 @@ class WebhookDispatcher:
         from meshwiki.config import settings
 
         payload = evt.to_payload()
-        body = json.dumps(payload).encode()
+        body = json.dumps(
+            payload,
+            default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o),
+        ).encode()
 
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.factory_webhook_secret:
