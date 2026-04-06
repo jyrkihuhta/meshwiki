@@ -198,6 +198,33 @@ class TestParseWikiContentWithToc:
 
 
 # ============================================================
+# PageCount macro
+# ============================================================
+
+
+class TestPageCountMacro:
+    def test_page_count_renders_number(self):
+        html = parse_wiki_content("Total pages: <<PageCount>>")
+        assert "page-count" in html
+
+    def test_page_count_in_paragraph(self):
+        html = parse_wiki_content("There are <<PageCount>> pages.")
+        assert "page-count" in html
+
+    def test_page_count_not_in_code_block(self):
+        """PageCount macro inside ``` should be literal text."""
+        content = "```\n<<PageCount>>\n```"
+        html = parse_wiki_content(content)
+        assert "page-count" not in html
+
+    def test_page_count_not_in_tilde_code(self):
+        """PageCount macro inside ~~~ should be literal text."""
+        content = "~~~\n<<PageCount>>\n~~~"
+        html = parse_wiki_content(content)
+        assert "page-count" not in html
+
+
+# ============================================================
 # MetaTable inside code blocks
 # ============================================================
 
