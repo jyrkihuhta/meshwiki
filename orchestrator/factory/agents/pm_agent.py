@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from ..config import get_settings
+from ..integrations.github_client import _extract_pr_number
 from ..state import FactoryState, SubTask
 
 if TYPE_CHECKING:
@@ -339,7 +340,9 @@ async def review_with_pm(
     """
     client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
 
-    pr_number: int | None = subtask.get("pr_number")
+    pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
+        subtask.get("pr_url", "")
+    )
     diff = ""
     if pr_number is not None:
         diff = await github_client.get_pr_diff(pr_number)
