@@ -435,9 +435,17 @@ jobs:
         env:
           VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
         run: |
-          sleep 10
-          curl -sf --max-time 30 "https://staging.${VPS_DOMAIN}/health/live" > /dev/null
-          echo "Staging smoke test passed"
+          echo "Waiting for staging to become healthy..."
+          for i in $(seq 1 18); do
+            if curl -sf --max-time 10 "https://staging.${VPS_DOMAIN}/health/live" > /dev/null 2>&1; then
+              echo "Staging smoke test passed (attempt $i)"
+              exit 0
+            fi
+            echo "  Attempt $i/18: not ready, waiting 10s..."
+            sleep 10
+          done
+          echo "ERROR: staging smoke test failed after 3 minutes"
+          exit 1
 
   deploy:
     name: Deploy to production
