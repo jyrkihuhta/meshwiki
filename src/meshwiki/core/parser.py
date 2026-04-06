@@ -384,6 +384,73 @@ class RecentChangesExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PageCount macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+PAGECOUNT_PATTERN = re.compile(r"<<PageCount>>")
+
+
+def _render_page_count() -> str:
+    """Render the <<PageCount>> macro as a plain number."""
+    try:
+        from meshwiki.core.dependencies import get_storage
+
+        storage = get_storage()
+    except RuntimeError:
+        return '<span class="page-count-unavailable">—</span>'
+
+    try:
+        import asyncio
+
+        pages = asyncio.run(storage.list_pages())
+    except Exception:
+        return '<span class="page-count-error">?</span>'
+
+    return f'<span class="page-count">{len(pages)}</span>'
+
+
+class PageCountPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<PageCount>> with the total page count."""
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<PageCount>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00PCBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(_m: re.Match) -> str:
+            html = _render_page_count()
+            return self.md.htmlStash.store(html)
+
+        text = PAGECOUNT_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00PCBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class PageCountExtension(Extension):
+    """Markdown extension for <<PageCount>> macro."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            PageCountPreprocessor(md),
+            "pagecount",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TaskStatus macro
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -872,6 +939,7 @@ def create_parser(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<EpicStatus>>
             RecentChangesExtension(),  # <<RecentChanges(n)>>
+            PageCountExtension(),  # <<PageCount>>
         ]
     )
 
