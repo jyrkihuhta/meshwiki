@@ -144,6 +144,29 @@ class GitHubClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def merge_pr(self, pr_number: int, commit_title: str = "", merge_method: str = "squash") -> dict:
+        """Merge a pull request via the GitHub API.
+
+        Args:
+            pr_number: GitHub pull request number.
+            commit_title: Optional merge commit title. Defaults to GitHub's default.
+            merge_method: One of "merge", "squash", or "rebase". Defaults to "squash".
+
+        Returns:
+            Merge result dict (includes ``merged`` boolean).
+
+        Raises:
+            httpx.HTTPStatusError: On non-2xx responses.
+        """
+        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}/merge"
+        body: dict = {"merge_method": merge_method}
+        if commit_title:
+            body["commit_title"] = commit_title
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(url, headers=self._headers(), json=body)
+            resp.raise_for_status()
+            return resp.json()
+
     async def close_pr(self, pr_number: int) -> dict:
         """Close a pull request without merging.
 

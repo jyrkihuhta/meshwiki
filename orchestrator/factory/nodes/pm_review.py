@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 
 from ..agents.pm_agent import review_with_pm
-from ..integrations.github_client import GitHubClient
+from ..config import get_settings
+from ..integrations.github_client import GitHubClient, _extract_pr_number
 from ..integrations.meshwiki_client import MeshWikiClient
 from ..state import FactoryState, SubTask
 
@@ -62,6 +63,14 @@ async def pm_review_node(state: FactoryState) -> dict:
         feedback: str | None = result.get("feedback")
 
         if decision == "approved":
+            if get_settings().auto_merge and subtask.get("pr_url"):
+                pr_number = subtask.get("pr_number") or _extract_pr_number(subtask["pr_url"])
+                if pr_number:
+                    try:
+                        await github_client.merge_pr(pr_number)
+                        logger.info("pm_review: auto-merged PR #%d for subtask %s", pr_number, subtask["id"])
+                    except Exception as exc:
+                        logger.warning("pm_review: auto-merge failed for PR #%d: %s", pr_number, exc)
             updated_subtask = SubTask(
                 **{**subtask, "status": "merged", "review_feedback": feedback}
             )

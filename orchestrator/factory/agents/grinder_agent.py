@@ -341,9 +341,10 @@ class GrinderToolExecutor:
         return result.stdout or "No matches"
 
     def _git_create_branch(self, branch_name: str) -> str:
-        """Create and checkout a new branch from origin/main."""
+        """Create and checkout a new branch from the configured base branch."""
+        base = get_settings().pr_base_branch
         result = subprocess.run(
-            ["git", "checkout", "-b", branch_name, "origin/main"],
+            ["git", "checkout", "-b", branch_name, f"origin/{base}"],
             capture_output=True,
             text=True,
             cwd=self.repo_root,
@@ -428,8 +429,9 @@ class GrinderToolExecutor:
 
     def _create_pr(self, title: str, body: str, branch_name: str) -> str:
         """Create a GitHub pull request and return the PR URL."""
+        base = get_settings().pr_base_branch
         result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", body],
+            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
             capture_output=True,
             text=True,
             cwd=self.repo_root,
@@ -492,6 +494,7 @@ async def grind_subtask_e2b(
     except Exception as exc:
         logger.error("e2b grinder: failed to fetch wiki page: %s", exc)
 
+    base_branch = settings.pr_base_branch
     task_prompt = (
         f"You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine). "
         f"Implement the following task and open a GitHub PR when done.\n\n"
@@ -499,13 +502,13 @@ async def grind_subtask_e2b(
         f"{page_content}\n\n"
         f"## Instructions\n"
         f"1. Explore the codebase to understand context\n"
-        f"2. Create a branch: factory/{subtask['id']}\n"
+        f"2. Create a branch from origin/{base_branch}: git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
         f"3. Implement the changes with tests\n"
         f"4. Run: .venv/bin/black src/ && .venv/bin/isort --profile black src/ && .venv/bin/ruff check src/\n"
         f"5. Run: python -m pytest src/tests/ -x -q\n"
         f"6. Fix any lint/test failures\n"
         f"7. Commit and push the branch\n"
-        f"8. Create a PR with: gh pr create --title '[Factory] ...' --body '...'\n"
+        f"8. Create a PR targeting {base_branch}: gh pr create --base {base_branch} --title '[Factory] ...' --body '...'\n"
         f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
         f"9. Print the PR URL on the last line of your output"
     )
@@ -581,11 +584,11 @@ async def grind_subtask_e2b(
             on_stderr=_on_stderr,
         )
 
-        # Clone repo
+        # Clone repo (shallow clone of the base branch so grinders start from the latest work)
         repo = settings.github_repo
         clone_url = f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
         result = await sbx.commands.run(
-            f"git clone {clone_url} /tmp/repo",
+            f"git clone --branch {base_branch} {clone_url} /tmp/repo",
             timeout=0,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,

@@ -404,6 +404,32 @@ jobs:
           envsubst '$VPS_DOMAIN' < deploy/vps/Caddyfile | ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/Caddyfile"
           ssh "${VPS_USER}@${VPS_HOST}" "docker exec meshwiki-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true"
 
+      - name: Write orchestrator-staging env to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          FACTORY_WEBHOOK_SECRET: ${{ secrets.FACTORY_WEBHOOK_SECRET }}
+          FACTORY_MESHWIKI_API_KEY: ${{ secrets.FACTORY_MESHWIKI_API_KEY }}
+          FACTORY_ANTHROPIC_API_KEY: ${{ secrets.FACTORY_ANTHROPIC_API_KEY }}
+          FACTORY_E2B_API_KEY: ${{ secrets.FACTORY_E2B_API_KEY }}
+          FACTORY_GITHUB_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN }}
+          FACTORY_MINIMAX_API_KEY: ${{ secrets.FACTORY_MINIMAX_API_KEY }}
+        run: |
+          printf '%s\n' \
+            "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
+            "FACTORY_MESHWIKI_URL=http://meshwiki-staging:8000" \
+            "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
+            "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}" \
+            "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
+            "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
+            "FACTORY_GITHUB_REPO=${{ github.repository }}" \
+            "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
+            "FACTORY_HOST=0.0.0.0" \
+            "FACTORY_PORT=8002" \
+            "FACTORY_PR_BASE_BRANCH=staging" \
+            "FACTORY_AUTO_MERGE=true" | \
+          ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/orchestrator-staging.env"
+
       - name: Update staging source on VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -428,7 +454,7 @@ jobs:
             cp /opt/meshwiki/staging/deploy/vps/staging.env.example /opt/meshwiki/staging.env
           fi
           cd /opt/meshwiki
-          docker compose up -d meshwiki-staging
+          docker compose up -d meshwiki-staging orchestrator-staging
           ENDDEPLOY
 
       - name: Smoke test staging
