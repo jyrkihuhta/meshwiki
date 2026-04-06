@@ -393,3 +393,114 @@ class TestPageExistsSync:
         with patch("meshwiki.main.get_engine", return_value=None):
             assert meshwiki.main.page_exists_sync("HomePage") is True
             assert meshwiki.main.page_exists_sync("NonExistent") is False
+
+
+# ============================================================
+# BackLinks macro tests
+# ============================================================
+
+
+class TestBackLinksParser:
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    def test_render_backlinks_with_links(self, wiki_dir):
+        from meshwiki.core.parser import _render_backlinks
+
+        init_engine(wiki_dir, watch=False)
+        html = _render_backlinks("HomePage")
+        assert '<ul class="backlinks">' in html
+        assert '<a href="/page/About" class="wiki-link">About</a>' in html
+        assert '<a href="/page/Contact" class="wiki-link">Contact</a>' in html
+
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    def test_render_backlinks_no_links(self, wiki_dir):
+        from meshwiki.core.parser import _render_backlinks
+
+        init_engine(wiki_dir, watch=False)
+        html = _render_backlinks("About")
+        assert html == ""
+
+    def test_render_backlinks_without_engine(self):
+        from meshwiki.core.parser import _render_backlinks
+
+        shutdown_engine()
+        html = _render_backlinks("HomePage")
+        assert html == ""
+
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    def test_backlinks_macro_in_content(self, wiki_dir):
+        from meshwiki.core.parser import parse_wiki_content
+
+        init_engine(wiki_dir, watch=False)
+        content = "# My Page\n\n<<BackLinks>>\n"
+        html = parse_wiki_content(content, page_name="HomePage")
+        assert '<ul class="backlinks">' in html
+        assert "About" in html
+        assert "Contact" in html
+
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    def test_backlinks_macro_no_backlinks(self, wiki_dir):
+        from meshwiki.core.parser import parse_wiki_content
+
+        init_engine(wiki_dir, watch=False)
+        content = "# My Page\n\n<<BackLinks>>\n"
+        html = parse_wiki_content(content, page_name="About")
+        assert "backlinks" not in html
+
+
+class TestBackLinksViaApi:
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    @pytest.mark.asyncio
+    async def test_page_with_backlinks_macro(self, wiki_dir):
+        import os
+
+        from httpx import ASGITransport, AsyncClient
+
+        os.environ["MESHWIKI_DATA_DIR"] = str(wiki_dir)
+
+        import importlib
+
+        import meshwiki.config
+
+        importlib.reload(meshwiki.config)
+        import meshwiki.main
+
+        importlib.reload(meshwiki.main)
+
+        init_engine(wiki_dir, watch=False)
+
+        transport = ASGITransport(app=meshwiki.main.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/page/HomePage?raw=1")
+            assert response.status_code == 200
+            body = response.text
+            assert '<ul class="backlinks">' in body
+            assert "About" in body
+            assert "Contact" in body
+
+    @pytest.mark.asyncio
+    async def test_backlinks_macro_without_engine(self, wiki_dir):
+        import os
+
+        from httpx import ASGITransport, AsyncClient
+
+        os.environ["MESHWIKI_DATA_DIR"] = str(wiki_dir)
+
+        import importlib
+
+        import meshwiki.config
+
+        importlib.reload(meshwiki.config)
+        import meshwiki.main
+
+        importlib.reload(meshwiki.main)
+
+        shutdown_engine()
+
+        with patch("meshwiki.main.get_engine", return_value=None):
+            transport = ASGITransport(app=meshwiki.main.app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                response = await client.get("/page/HomePage?raw=1")
+                assert response.status_code == 200
+                assert "backlinks" not in response.text

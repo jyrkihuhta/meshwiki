@@ -737,6 +737,89 @@ class TaskStatusExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BackLinks macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+BACKLINKS_PATTERN = re.compile(r"<<BackLinks>>")
+
+
+def _render_backlinks(page_name: str) -> str:
+    """Render the <<BackLinks>> macro as an HTML list of pages linking to this page."""
+    from meshwiki.core.graph import get_engine
+
+    engine = get_engine()
+    if engine is None:
+        return ""
+
+    try:
+        backlinks = engine.get_backlinks(page_name)
+    except Exception:
+        return ""
+
+    if not backlinks:
+        return ""
+
+    lines = ['<ul class="backlinks">']
+    for link_target in backlinks:
+        url_name = link_target.replace(" ", "_")
+        lines.append(
+            f'<li><a href="/page/{url_name}" class="wiki-link">'
+            f"{html_escape(link_target)}</a></li>"
+        )
+    lines.append("</ul>")
+    return "\n".join(lines)
+
+
+class BackLinksPreprocessor(Preprocessor):
+    """Replace <<BackLinks>> with rendered HTML, skipping code blocks."""
+
+    def __init__(self, md: Markdown, page_name: str | None) -> None:
+        super().__init__(md)
+        self.page_name = page_name or ""
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<BackLinks>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00BLCBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(_m: re.Match) -> str:
+            html = _render_backlinks(self.page_name)
+            return self.md.htmlStash.store(html)
+
+        text = BACKLINKS_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00BLCBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class BackLinksExtension(Extension):
+    """Markdown extension for <<BackLinks>> macro."""
+
+    def __init__(self, page_name: str | None = None, **kwargs):
+        self.page_name = page_name
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            BackLinksPreprocessor(md, self.page_name),
+            "backlinks",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EpicStatus macro
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -933,6 +1016,7 @@ def create_parser(
             ),  # <<EpicStatus>>
             RecentChangesExtension(),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
+            BackLinksExtension(page_name=page_name),  # <<BackLinks>>
         ]
     )
 
