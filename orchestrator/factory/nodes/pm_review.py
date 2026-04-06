@@ -56,8 +56,20 @@ async def pm_review_node(state: FactoryState) -> dict:
             logger.error(
                 "pm_review: review failed for subtask %s: %s", subtask["id"], exc
             )
-            updated_subtask = SubTask(**{**subtask, "review_feedback": str(exc)})
+            # Mark as failed so route_after_pm_review escalates rather than
+            # silently auto-approving unreviewed code.
+            updated_subtask = SubTask(
+                **{**subtask, "status": "failed", "review_feedback": str(exc)}
+            )
             updated_subtasks.append(updated_subtask)
+            try:
+                await meshwiki_client.transition_task(subtask["wiki_page"], "failed")
+            except Exception as transition_exc:
+                logger.warning(
+                    "pm_review: failed to transition %s to failed: %s",
+                    subtask["wiki_page"],
+                    transition_exc,
+                )
             continue
 
         decision: str = result.get("decision", "changes_requested")

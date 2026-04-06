@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -169,6 +170,38 @@ PM_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+async def _messages_create_with_retry(
+    client: anthropic.AsyncAnthropic,
+    *,
+    max_overload_attempts: int = 5,
+    **kwargs: Any,
+) -> Any:
+    """Call client.messages.create with extended retry for 529 overloaded errors.
+
+    The SDK's built-in retry uses short waits (~0.4s, 0.8s) which aren't
+    sufficient for real Anthropic overload events. This wrapper retries up to
+    ``max_overload_attempts`` times with 30-second exponential backoff (30s,
+    60s, 120s, 240s, 480s) so overnight runs can survive transient overloads.
+    All other errors are re-raised immediately.
+    """
+    for attempt in range(max_overload_attempts):
+        try:
+            return await client.messages.create(**kwargs)
+        except anthropic.APIStatusError as exc:
+            if exc.status_code == 529 and attempt < max_overload_attempts - 1:
+                wait = 30 * (2**attempt)
+                logger.warning(
+                    "pm_agent: Anthropic API overloaded (529), retrying in %ds "
+                    "(attempt %d/%d)",
+                    wait,
+                    attempt + 1,
+                    max_overload_attempts,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
 def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask:
     """Build a SubTask TypedDict from PM tool call input.
 
@@ -251,7 +284,8 @@ async def decompose_with_pm(
     tool_calls_remaining = 20
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
+        response = await _messages_create_with_retry(
+            client,
             model="claude-sonnet-4-6",
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
