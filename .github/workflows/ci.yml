@@ -435,9 +435,12 @@ jobs:
             if grep -q FACTORY_ANTHROPIC_API_KEY /opt/meshwiki/orchestrator-staging.env.new; then
               mv /opt/meshwiki/orchestrator-staging.env.new /opt/meshwiki/orchestrator-staging.env
             else
-              grep -v '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator-staging.env > /opt/meshwiki/orchestrator-staging.env.tmp 2>/dev/null || true
-              cat /opt/meshwiki/orchestrator-staging.env.new >> /opt/meshwiki/orchestrator-staging.env.tmp
-              mv /opt/meshwiki/orchestrator-staging.env.tmp /opt/meshwiki/orchestrator-staging.env
+              SAVED_KEY=\$(grep '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator-staging.env 2>/dev/null || true)
+              if [ -n \"\$SAVED_KEY\" ]; then
+                { cat /opt/meshwiki/orchestrator-staging.env.new; echo \"\$SAVED_KEY\"; } > /opt/meshwiki/orchestrator-staging.env
+              else
+                mv /opt/meshwiki/orchestrator-staging.env.new /opt/meshwiki/orchestrator-staging.env
+              fi
               rm -f /opt/meshwiki/orchestrator-staging.env.new
             fi
           "
@@ -570,9 +573,12 @@ jobs:
             if grep -q FACTORY_ANTHROPIC_API_KEY /opt/meshwiki/orchestrator.env.new; then
               mv /opt/meshwiki/orchestrator.env.new /opt/meshwiki/orchestrator.env
             else
-              grep -v '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator.env > /opt/meshwiki/orchestrator.env.tmp 2>/dev/null || true
-              cat /opt/meshwiki/orchestrator.env.new >> /opt/meshwiki/orchestrator.env.tmp
-              mv /opt/meshwiki/orchestrator.env.tmp /opt/meshwiki/orchestrator.env
+              SAVED_KEY=\$(grep '^FACTORY_ANTHROPIC_API_KEY=' /opt/meshwiki/orchestrator.env 2>/dev/null || true)
+              if [ -n \"\$SAVED_KEY\" ]; then
+                { cat /opt/meshwiki/orchestrator.env.new; echo \"\$SAVED_KEY\"; } > /opt/meshwiki/orchestrator.env
+              else
+                mv /opt/meshwiki/orchestrator.env.new /opt/meshwiki/orchestrator.env
+              fi
               rm -f /opt/meshwiki/orchestrator.env.new
             fi
           "
