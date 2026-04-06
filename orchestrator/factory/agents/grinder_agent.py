@@ -341,9 +341,10 @@ class GrinderToolExecutor:
         return result.stdout or "No matches"
 
     def _git_create_branch(self, branch_name: str) -> str:
-        """Create and checkout a new branch from origin/main."""
+        """Create and checkout a new branch from the configured base branch."""
+        base = get_settings().pr_base_branch
         result = subprocess.run(
-            ["git", "checkout", "-b", branch_name, "origin/main"],
+            ["git", "checkout", "-b", branch_name, f"origin/{base}"],
             capture_output=True,
             text=True,
             cwd=self.repo_root,
@@ -428,8 +429,9 @@ class GrinderToolExecutor:
 
     def _create_pr(self, title: str, body: str, branch_name: str) -> str:
         """Create a GitHub pull request and return the PR URL."""
+        base = get_settings().pr_base_branch
         result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", body],
+            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
             capture_output=True,
             text=True,
             cwd=self.repo_root,
@@ -473,12 +475,13 @@ async def grind_subtask_e2b(
     settings = get_settings()
     subtask = dict(subtask)
 
-    # Transition to in_progress
+    # Transition to in_progress (best-effort — 422 is expected when the task was
+    # already transitioned externally, e.g. skip_decomposition flow)
     try:
         await meshwiki_client.transition_task(subtask["wiki_page"], "in_progress")
     except Exception as exc:
-        logger.error(
-            "e2b grinder: failed to transition %s to in_progress: %s",
+        logger.debug(
+            "e2b grinder: task %s already in_progress or transition failed: %s",
             subtask["wiki_page"],
             exc,
         )
@@ -492,6 +495,7 @@ async def grind_subtask_e2b(
     except Exception as exc:
         logger.error("e2b grinder: failed to fetch wiki page: %s", exc)
 
+    base_branch = settings.pr_base_branch
     task_prompt = (
         f"You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine). "
         f"Implement the following task and open a GitHub PR when done.\n\n"
@@ -499,15 +503,18 @@ async def grind_subtask_e2b(
         f"{page_content}\n\n"
         f"## Instructions\n"
         f"1. Explore the codebase to understand context\n"
-        f"2. Create a branch: factory/{subtask['id']}\n"
+        f"2. Create a branch from origin/{base_branch}: git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
         f"3. Implement the changes with tests\n"
         f"4. Run: .venv/bin/black src/ && .venv/bin/isort --profile black src/ && .venv/bin/ruff check src/\n"
         f"5. Run: python -m pytest src/tests/ -x -q\n"
         f"6. Fix any lint/test failures\n"
-        f"7. Commit and push the branch\n"
-        f"8. Create a PR with: gh pr create --title '[Factory] ...' --body '...'\n"
+        f"7. Commit your changes\n"
+        f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
+        f"   git fetch origin && git rebase origin/{base_branch}\n"
+        f"   Resolve any conflicts, then: git push --force-with-lease\n"
+        f"9. Create a PR targeting {base_branch}: gh pr create --base {base_branch} --title '[Factory] ...' --body '...'\n"
         f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
-        f"9. Print the PR URL on the last line of your output"
+        f"10. Print the PR URL on the last line of your output"
     )
 
     pr_url: str | None = None
@@ -523,6 +530,7 @@ async def grind_subtask_e2b(
     sbx = None
     try:
         sbx = await AsyncSandbox.create(
+            "meshwiki-grinder",  # pre-baked template: Node.js 20 + Kilo + gh + Python tools
             timeout=3600,  # sandbox lives up to 1 hour; default 5 min is too short
             envs={
                 "MINIMAX_API_KEY": settings.minimax_api_key,
@@ -559,8 +567,9 @@ async def grind_subtask_e2b(
             await meshwiki_client.relay_terminal(wiki_page, text)
 
         # ── Bootstrap ─────────────────────────────────────────────────────────
+        # Node.js 20, Kilo CLI, gh CLI, and common Python tools are pre-baked
+        # into the meshwiki-grinder template — only git config is needed here.
 
-        # Configure git identity and credential helper
         await sbx.commands.run(
             'git config --global user.email "factory@meshwiki" && '
             'git config --global user.name "Factory Grinder" && '
@@ -570,22 +579,11 @@ async def grind_subtask_e2b(
             on_stderr=_on_stderr,
         )
 
-        # Bootstrap Node.js 20 + Kilo CLI (timeout=0 prevents premature kill)
-        logger.info("e2b grinder: bootstrapping Node.js + Kilo CLI...")
-        await sbx.commands.run(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && "
-            "sudo apt-get install -y nodejs && "
-            "sudo npm install -g @kilocode/cli",
-            timeout=0,
-            on_stdout=_on_stdout,
-            on_stderr=_on_stderr,
-        )
-
-        # Clone repo
+        # Clone repo (shallow clone of the base branch so grinders start from the latest work)
         repo = settings.github_repo
         clone_url = f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
         result = await sbx.commands.run(
-            f"git clone {clone_url} /tmp/repo",
+            f"git clone --branch {base_branch} {clone_url} /tmp/repo",
             timeout=0,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,

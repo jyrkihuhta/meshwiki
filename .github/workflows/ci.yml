@@ -2,19 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
     branches: [main]
 
 jobs:
   # Detect which parts of the codebase changed.
   # On push to main everything is treated as changed (always build+deploy).
+  # On push to staging, use actual path filters (same as PRs).
   changes:
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ github.event_name == 'push' || steps.filter.outputs.rust == 'true' }}
-      app: ${{ github.event_name == 'push' || steps.filter.outputs.app == 'true' }}
-      orchestrator: ${{ github.event_name == 'push' || steps.filter.outputs.orchestrator == 'true' }}
+      rust: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || steps.filter.outputs.rust == 'true' }}
+      app: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || steps.filter.outputs.app == 'true' }}
+      orchestrator: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || steps.filter.outputs.orchestrator == 'true' }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
@@ -113,6 +114,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs: [changes, test-python, test-rust]
     if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
       needs.changes.outputs.app == 'true' &&
       needs.test-python.result == 'success' &&
       (needs.test-rust.result == 'success' || needs.test-rust.result == 'skipped')
@@ -173,6 +175,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs: [changes, test-orchestrator]
     if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
       needs.changes.outputs.orchestrator == 'true' &&
       needs.test-orchestrator.result == 'success'
     permissions:
@@ -366,6 +369,112 @@ jobs:
             exit 1
           fi
           echo "All required jobs passed or were skipped"
+
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: [test-python, test-orchestrator]
+    if: |
+      always() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/staging' &&
+      needs.test-python.result == 'success' &&
+      (needs.test-orchestrator.result == 'success' || needs.test-orchestrator.result == 'skipped')
+    continue-on-error: true
+    concurrency:
+      group: staging-deploy
+      cancel-in-progress: true
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy config files to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
+        run: |
+          scp deploy/vps/docker-compose.prod.yml "${VPS_USER}@${VPS_HOST}:/opt/meshwiki/docker-compose.yml"
+          envsubst '$VPS_DOMAIN' < deploy/vps/Caddyfile | ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/Caddyfile"
+          ssh "${VPS_USER}@${VPS_HOST}" "docker exec meshwiki-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true"
+
+      - name: Write orchestrator-staging env to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          FACTORY_WEBHOOK_SECRET: ${{ secrets.FACTORY_WEBHOOK_SECRET }}
+          FACTORY_MESHWIKI_API_KEY: ${{ secrets.FACTORY_MESHWIKI_API_KEY }}
+          FACTORY_ANTHROPIC_API_KEY: ${{ secrets.FACTORY_ANTHROPIC_API_KEY }}
+          FACTORY_E2B_API_KEY: ${{ secrets.FACTORY_E2B_API_KEY }}
+          FACTORY_GITHUB_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN }}
+          FACTORY_MINIMAX_API_KEY: ${{ secrets.FACTORY_MINIMAX_API_KEY }}
+        run: |
+          printf '%s\n' \
+            "FACTORY_WEBHOOK_SECRET=${FACTORY_WEBHOOK_SECRET}" \
+            "FACTORY_MESHWIKI_URL=http://meshwiki-staging:8000" \
+            "FACTORY_MESHWIKI_API_KEY=${FACTORY_MESHWIKI_API_KEY}" \
+            "FACTORY_ANTHROPIC_API_KEY=${FACTORY_ANTHROPIC_API_KEY}" \
+            "FACTORY_E2B_API_KEY=${FACTORY_E2B_API_KEY}" \
+            "FACTORY_GITHUB_TOKEN=${FACTORY_GITHUB_TOKEN}" \
+            "FACTORY_GITHUB_REPO=${{ github.repository }}" \
+            "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
+            "FACTORY_HOST=0.0.0.0" \
+            "FACTORY_PORT=8002" \
+            "FACTORY_PR_BASE_BRANCH=staging" \
+            "FACTORY_AUTO_MERGE=true" | \
+          ssh "${VPS_USER}@${VPS_HOST}" "cat > /opt/meshwiki/orchestrator-staging.env"
+
+      - name: Update staging source on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh "${VPS_USER}@${VPS_HOST}" << 'ENDDEPLOY'
+          set -euo pipefail
+          if [ -d /opt/meshwiki/staging/.git ]; then
+            cd /opt/meshwiki/staging
+            git fetch origin staging
+            git checkout staging
+            git reset --hard origin/staging
+          else
+            git clone --branch staging --depth 1 https://github.com/${{ github.repository }}.git /opt/meshwiki/staging
+          fi
+          # Ensure staging data dir exists (owned by UID 1001 = container app user)
+          if [ ! -d /opt/meshwiki/data/staging-pages ]; then
+            docker run --rm -v /opt/meshwiki/data:/data --user 1001:1001 alpine mkdir -p /data/staging-pages
+          fi
+          # Ensure staging.env exists (copy from example if missing)
+          if [ ! -f /opt/meshwiki/staging.env ]; then
+            cp /opt/meshwiki/staging/deploy/vps/staging.env.example /opt/meshwiki/staging.env
+          fi
+          cd /opt/meshwiki
+          docker compose pull meshwiki-staging orchestrator-staging || true
+          docker compose up -d meshwiki-staging || true
+          docker compose up -d --no-deps orchestrator-staging || true
+          ENDDEPLOY
+
+      - name: Smoke test staging
+        env:
+          VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
+        run: |
+          echo "Waiting for staging to become healthy..."
+          for i in $(seq 1 18); do
+            if curl -sf --max-time 10 "https://staging.${VPS_DOMAIN}/health/live" > /dev/null 2>&1; then
+              echo "Staging smoke test passed (attempt $i)"
+              exit 0
+            fi
+            echo "  Attempt $i/18: not ready, waiting 10s..."
+            sleep 10
+          done
+          echo "ERROR: staging smoke test failed after 3 minutes"
+          exit 1
 
   deploy:
     name: Deploy to production

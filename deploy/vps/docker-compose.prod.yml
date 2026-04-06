@@ -19,14 +19,12 @@ services:
       retries: 3
 
   meshwiki-staging:
-    image: ghcr.io/jyrkihuhta/meshwiki:${MESHWIKI_VERSION:-latest}
+    image: ghcr.io/jyrkihuhta/meshwiki:latest
     restart: unless-stopped
     volumes:
-      - /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
       - /opt/meshwiki/data/staging-pages:/data/pages
+      - /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
     env_file: /opt/meshwiki/staging.env
-    expose:
-      - "8000"
     command:
       - uvicorn
       - meshwiki.main:app
@@ -37,6 +35,8 @@ services:
       - --reload
       - --reload-dir
       - /app/meshwiki
+    expose:
+      - "8000"
     healthcheck:
       test:
         - CMD
@@ -45,15 +45,15 @@ services:
         - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"
       interval: 30s
       timeout: 10s
-      start_period: 10s
+      start_period: 15s
       retries: 3
 
   orchestrator:
     image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:${ORCHESTRATOR_VERSION:-latest}
     restart: unless-stopped
-    env_file: /opt/meshwiki/orchestrator.env
     volumes:
       - orchestrator_data:/data
+    env_file: /opt/meshwiki/orchestrator.env
     expose:
       - "8001"
     healthcheck:
@@ -68,6 +68,28 @@ services:
       retries: 3
     depends_on:
       meshwiki:
+        condition: service_healthy
+
+  orchestrator-staging:
+    image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:latest
+    restart: unless-stopped
+    volumes:
+      - orchestrator_staging_data:/data
+    env_file: /opt/meshwiki/orchestrator-staging.env
+    expose:
+      - "8002"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    depends_on:
+      meshwiki-staging:
         condition: service_healthy
 
   caddy:
@@ -88,3 +110,4 @@ volumes:
   caddy_data:
   caddy_config:
   orchestrator_data:
+  orchestrator_staging_data:

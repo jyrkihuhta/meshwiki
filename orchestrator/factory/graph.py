@@ -56,12 +56,15 @@ def route_after_grinding(state: FactoryState) -> str:
 
 def route_after_pm_review(state: FactoryState) -> str:
     """Route after PM reviews grinder-produced code."""
+    from .config import get_settings
     needs_rework = [s for s in state["subtasks"] if s["status"] == "changes_requested"]
     exhausted = [s for s in needs_rework if s["attempt"] >= s["max_attempts"]]
     if exhausted:
         return "escalate"
     if needs_rework:
         return "changes_requested"
+    if get_settings().auto_merge:
+        return "skip_human_review"
     return "all_approved"
 
 
@@ -146,6 +149,7 @@ def build_graph(checkpointer):
         route_after_pm_review,
         {
             "all_approved": "human_review_code",
+            "skip_human_review": "merge_check",
             "changes_requested": "assign_grinders",
             "escalate": "escalate",
         },

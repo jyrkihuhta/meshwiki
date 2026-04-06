@@ -161,7 +161,7 @@
         .force("link", d3.forceLink(links).id(function (d) { return d.id; }).distance(function (d) { return d.type === "parent" ? 60 : 120; }))
         .force("charge", d3.forceManyBody().strength(-300))
         .force("center", d3.forceCenter(width / 2, height / 2))
-        .force("collision", d3.forceCollide().radius(30))
+        .force("collision", d3.forceCollide().radius(function (d) { return getNodeRadius(d) + 8; }))
         .on("tick", ticked);
 
     var zoom = d3.zoom()
@@ -578,7 +578,9 @@
         return params.get("focus");
     }
 
-    function render() {
+    var initialRenderDone = false;
+
+    function render(incremental) {
         var linkColor = getThemeColor("--color-text-muted", "#999");
         var textColor = getThemeColor("--color-text", "#333");
         var nodeStroke = getThemeColor("--color-bg", "#fff");
@@ -648,7 +650,15 @@
 
         simulation.nodes(nodes);
         simulation.force("link").links(links);
-        simulation.alpha(0.3).restart();
+        if (!initialRenderDone) {
+            simulation.alpha(0.8).restart();
+            initialRenderDone = true;
+        } else if (incremental) {
+            // Incremental WebSocket event — barely perturb the settled layout
+            if (simulation.alpha() < 0.05) simulation.alpha(0.05).restart();
+        } else {
+            simulation.alpha(0.3).restart();
+        }
 
         var urlFocus = getUrlFocusParam();
         if (urlFocus && nodes.find(function (n) { return n.id === urlFocus; })) {
@@ -689,12 +699,10 @@
         nodeGroup.selectAll("g.node")
             .filter(function (d) { return d.id === name; })
             .select("circle")
-            .transition().duration(200)
-            .attr("r", MAX_RADIUS)
+            .transition().duration(150)
             .attr("stroke", "#f59e0b")
             .attr("stroke-width", 3)
-            .transition().duration(600)
-            .attr("r", function (d) { return getNodeRadius(d); })
+            .transition().duration(850)
             .attr("stroke", nodeStroke)
             .attr("stroke-width", 1.5);
     }
@@ -733,13 +741,13 @@
             case "page_created":
                 if (!nodes.find(function (n) { return n.id === msg.page; })) {
                     nodes.push({ id: msg.page });
-                    render();
+                    render(true);
                     flashNode(msg.page);
                 }
                 break;
 
             case "page_updated":
-                flashNode(msg.page);
+                // Content change only — graph structure is unchanged, no visual update needed.
                 break;
 
             case "page_deleted":
@@ -752,7 +760,7 @@
                             links.splice(i, 1);
                         }
                     }
-                    render();
+                    render(true);
                 }
                 break;
 
@@ -764,7 +772,7 @@
                     nodes.push({ id: msg.to });
                 }
                 links.push({ source: msg.from, target: msg.to });
-                render();
+                render(true);
                 break;
 
             case "link_removed":
@@ -775,7 +783,7 @@
                         break;
                     }
                 }
-                render();
+                render(true);
                 break;
         }
     }

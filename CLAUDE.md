@@ -266,6 +266,7 @@ Before committing:
 25. **D3 must load from CSP-whitelisted CDN** - The CSP header (`SecurityHeadersMiddleware`) only allows scripts from `cdn.jsdelivr.net` and `cdnjs.cloudflare.com`. Use `https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js`; `d3js.org` is blocked, causing a silent ReferenceError that crashes graph.js before WebSocket connects.
 26. **Caddy reload not triggered by deploy** - `docker compose up -d` does not reload Caddy when only the mounted Caddyfile changes. The deploy script now runs `docker exec meshwiki-caddy-1 caddy reload` after writing the config. Without this, Caddyfile changes require a manual reload or container restart.
 27. **Graph API parent edges** - `/api/graph` returns links with `type: "parent"` for implicit subpage hierarchy (page `A/B` → edge from `A` if `A` exists). These render as dashed lines in graph.js. Regular wiki links have no `type` field.
+28. **Preprocessors are synchronous** - Markdown preprocessors run inside FastAPI's already-running event loop. Never use `asyncio.run()` in a preprocessor — it raises `RuntimeError: This event loop is already running`. Use `get_engine()` for synchronous data access (see `MetaTableExtension`), or accept data as a constructor parameter passed in from the async route handler.
 
 ## Completed Milestones (1–10)
 

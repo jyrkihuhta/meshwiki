@@ -69,6 +69,76 @@ The autonomous agent software development factory:
 - [x] `finalize` node completes `MeshWikiClient.transition_task(name, "done")` with `cost_usd`
 - [x] `escalate` node completes retry logic: increments `attempt`, resets to `pending` for retriable subtasks
 - [x] `orchestrator/tests/test_pipeline.py` — integration smoke tests (4 tests) exercising full graph with mocked I/O
+- [x] SQLite checkpointer (`AsyncSqliteSaver`) — persistent graph state via `orchestrator_data` Docker volume
+
+### Staging Integration (S1) — In Progress
+
+Fast-iteration environment at `staging.wiki.penni.fi`. Same production Docker image, source code volume-mounted from `staging` git branch, uvicorn `--reload` for instant code reloads.
+
+**Architecture:**
+```
+staging branch push → CI → git pull on VPS → uvicorn detects changes → reload in ~2s
+                                                      ↑
+                            /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
+```
+
+**Done:**
+- [x] DNS: `staging.wiki.penni.fi` → 135.181.38.57
+- [x] `staging` branch created on origin
+- [x] `deploy/vps/Caddyfile` — `staging.${VPS_DOMAIN}` reverse proxy block
+- [x] `deploy/vps/docker-compose.prod.yml` — `meshwiki-staging` service with volume mount + `--reload`
+- [x] `deploy/vps/staging.env.example` — template for staging env vars
+- [x] `.github/workflows/ci.yml` — `staging` branch trigger + `deploy-staging` job
+
+**Remaining:**
+- [ ] First `staging` branch push to trigger CI and bring up container
+- [ ] Grinder `github_client.py` — `base` param so PRs target `staging` branch
+- [ ] Auto-merge after PM approval for staging flow (skip `human_review_code` interrupt)
+- [ ] E2B Tier 1: custom template with Node.js 20 + Kilo pre-installed; add `FACTORY_E2B_TEMPLATE_ID` to config + grinder
+
+**Integration Branch Pattern:**
+Grinders clone from and PR into `staging`. Same-file work serialized (file-overlap check); different-file work runs in parallel. Human gate only at `staging → main`.
+
+**E2B Bootstrap Speed Tiers:**
+| Tier | Method | Time | Status |
+|------|--------|------|--------|
+| 1 | Custom template (Node.js + Kilo pre-baked) | ~25s | Available now |
+| 2 | Volume repo mirror (read-only sandbox mount) | ~5s | Private beta |
+| 3 | Pause/resume warm pool | <2s | Future |
+
+## Factory v2 Plan (F8–F11)
+
+### F8: Fix v1 Gaps
+
+**Cost tracking** — `factory/cost.py`: `estimate_cost(model, tokens_in, tokens_out)` + `CostAccumulator`. PM node reads `response.usage`; grinder tracks sandbox time × `e2b_cost_per_hour`. Write back to `state["cost_usd"]`.
+
+**Concurrency control** — `config.py`: `max_concurrent_sandboxes: int = 3`. `assign.py`: cap dispatches. `grind_node`: populate/clear `active_grinders`.
+
+**httpx client pooling** — shared `AsyncClient` in webhook server lifespan; injected into `MeshWikiClient` and `GitHubClient` constructors.
+
+**Configurable PM model** — `config.py`: `pm_model: str = "claude-sonnet-4-6"`. `pm_agent.py` uses it.
+
+**Grinder review feedback** — `grinder_agent.py`: append `subtask["review_feedback"]` to `/tmp/task.md` on rework iterations.
+
+### F9: HBR + Scheduler
+
+**`factory/hbr.py`** — `HbrManager`: `active_sandboxes`, `daily_cost_usd`, `daily_budget_usd` (from config), midnight reset. `assign.py` checks `can_allocate_sandbox()`. `GET /hbr/status` endpoint.
+
+**`factory/scheduler.py`** — 60s heartbeat: resets budget at midnight UTC, scans `status: approved + assignee: factory` task pages not yet running, triggers graph if resources available.
+
+### F10: Live D3.js Factory Visualization
+
+**`core/factory_ws_manager.py`** — push-based broadcast + activity ring buffer (maxlen=500).
+
+**`core/task_machine.py`** — broadcast `task_transition` events after each `transition_task()`.
+
+**`api/tasks.py`** — `GET /api/factory/graph` (nodes + parent/assignment links), `GET /api/factory/activity`.
+
+**`templates/factory_live.html`** + **`static/js/factory.js`** (~500 lines) — D3 force graph; tasks as circles colored by status; agents as diamonds; click → detail panel with terminal embed; WebSocket events animate transitions.
+
+### F11: Stale PR Bot
+
+**`factory/bots/stale_pr_bot.py`** — scans open `factory/*` PRs; finds failing CI >30 min; creates fix-it task pages (skip_decomposition=true); max 2 attempts per PR. Scheduler calls `scan()` every 5 min when `stale_pr_bot_enabled=True`.
 
 ## Architecture
 
@@ -342,3 +412,7 @@ First autonomous bot using the factory. Monitors CI failures on factory-created 
 - **Graph engine optional** — `core/graph.py` may be unavailable; PR-to-task lookup must fall back to scanning `list_pages_with_metadata()` if graph engine is not loaded.
 - **Frontmatter strings** — `pr_number` is stored as a string (for graph filter compatibility), not an int.
 - **Factory Dashboard is a wiki page** — `Factory_Dashboard.md` uses `<<MetaTable>>` macros; it's created manually, no code needed.
+- **`orchestrator_data` volume** — must exist before orchestrator starts or `AsyncSqliteSaver` can't create `/data/factory.db`. Created automatically by `docker compose up -d` (not `up -d meshwiki-staging`).
+- **Staging uses latest image, not sha-tagged** — `meshwiki-staging` always pulls `:latest`. Production uses `${MESHWIKI_VERSION}` (sha-tagged) for deterministic rollbacks.
+- **`docker compose restart` vs `up -d`** — `restart` keeps old container config and doesn't reload env_file. Always use `up -d` to pick up env changes.
+- **Staging source path** — app code inside container is at `/app/meshwiki/` (Dockerfile: `COPY src/meshwiki/ ./meshwiki/`). Volume mount: `/opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro`.
