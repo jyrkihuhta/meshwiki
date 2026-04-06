@@ -21,12 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 async def _resume_interrupted_tasks(graph, saver, settings) -> None:
-    """On startup, resume any tasks that were in_progress when the orchestrator died.
+    """On startup, resume any tasks that were active when the orchestrator died.
 
     Strategy:
-    1. Ask MeshWiki for all tasks with status=in_progress and assignee=factory.
+    1. Ask MeshWiki for all tasks with status=in_progress or status=review
+       that are assigned to factory (both statuses represent active graph runs).
     2. For each, check if the SQLite checkpointer has a saved state.
-    3. If yes, call ainvoke({}) with the same thread_id — LangGraph resumes
+    3. If yes, call ainvoke(None) with the same thread_id — LangGraph resumes
        from the last node boundary rather than restarting from scratch.
     """
     client = MeshWikiClient(settings.meshwiki_url, settings.meshwiki_api_key)
@@ -37,7 +38,11 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
         except Exception as exc:
             logger.warning("factory: could not fetch %s tasks on startup: %s", status, exc)
             continue
-        all_factory_tasks.extend(t for t in tasks if t.get("assignee") == "factory")
+        all_factory_tasks.extend(
+            t for t in tasks
+            if t.get("metadata", {}).get("assignee") == "factory"
+            or t.get("assignee") == "factory"  # flat format (defensive)
+        )
 
     if not all_factory_tasks:
         return
