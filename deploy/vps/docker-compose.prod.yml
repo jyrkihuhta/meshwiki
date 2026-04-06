@@ -70,6 +70,28 @@ services:
       meshwiki:
         condition: service_healthy
 
+  orchestrator-staging:
+    image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:${ORCHESTRATOR_VERSION:-latest}
+    restart: unless-stopped
+    env_file: /opt/meshwiki/orchestrator-staging.env
+    volumes:
+      - orchestrator_staging_data:/data
+    expose:
+      - "8002"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    depends_on:
+      meshwiki-staging:
+        condition: service_healthy
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -88,3 +110,4 @@ volumes:
   caddy_data:
   caddy_config:
   orchestrator_data:
+  orchestrator_staging_data:
