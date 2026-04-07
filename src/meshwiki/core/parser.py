@@ -3,7 +3,7 @@
 import json
 import re
 from datetime import datetime, timezone
-from html import escape as html_escape
+from html import escape as html_escape  # used in CalloutBlockPreprocessor
 from typing import Callable
 from xml.etree.ElementTree import Element
 
