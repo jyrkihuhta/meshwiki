@@ -2043,6 +2043,7 @@ article.page > .breadcrumb {
 .callout__icon { font-size: 1.2rem; flex-shrink: 0; }
 .callout__body { flex: 1; white-space: pre-wrap; }
 
+/* Light mode */
 .callout--info {
   --callout-info-bg: #e8f4fd;
   --callout-info-border: #2196f3;
@@ -2084,6 +2085,7 @@ article.page > .breadcrumb {
   color: var(--callout-note-color);
 }
 
+/* Dark mode */
 [data-theme="dark"] .callout--info {
   --callout-info-bg: #0d2137;
   --callout-info-border: #42a5f5;
@@ -2110,6 +2112,7 @@ article.page > .breadcrumb {
   --callout-note-color: #e0e0e0;
 }
 
+/* Mobile */
 @media (max-width: 768px) {
   .callout { font-size: 0.9rem; padding: 0.75rem 0.9rem; }
 }

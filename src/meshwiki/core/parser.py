@@ -1588,6 +1588,69 @@ class EpicStatusExtension(Extension):
         )
 
 
+CALLOUT_TYPES = ["info", "warning", "tip", "error", "note"]
+
+CALLOUT_ICONS: dict[str, str] = {
+    "info": "ℹ️",
+    "warning": "⚠️",
+    "tip": "💡",
+    "error": "❌",
+    "note": "📝",
+}
+
+
+class CalloutBlockPreprocessor(Preprocessor):
+    """Preprocessor that replaces fenced code blocks with callout type with HTML callout boxes."""
+
+    FENCE_RE = re.compile(r"^(```|~~~)\s*(\w+)\s*$")
+
+    def run(self, lines: list[str]) -> list[str]:
+        result: list[str] = []
+        i = 0
+        while i < len(lines):
+            m = self.FENCE_RE.match(lines[i])
+            if not m or m.group(2) not in CALLOUT_TYPES:
+                result.append(lines[i])
+                i += 1
+                continue
+
+            fence_char = m.group(1)
+            callout_type = m.group(2)
+            body_lines: list[str] = []
+            j = i + 1
+            while j < len(lines):
+                if lines[j].startswith(fence_char) and lines[j].strip() in (
+                    fence_char,
+                ):
+                    break
+                body_lines.append(lines[j])
+                j += 1
+
+            if j >= len(lines):
+                result.append(lines[i])
+                i += 1
+                continue
+
+            escaped = html_escape("\n".join(body_lines))
+            icon = CALLOUT_ICONS[callout_type]
+            html = f'<div class="callout callout--{callout_type}"><span class="callout__icon">{icon}</span><span class="callout__body">{escaped}</span></div>'
+            result.append(self.md.htmlStash.store(html))
+            i = j + 1
+
+        return result
+
+
+class CalloutExtension(Extension):
+    """Markdown extension for callout blocks using fenced code syntax."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            CalloutBlockPreprocessor(md),
+            "callout",
+            27,
+        )
+
+
 def create_parser(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
@@ -1631,6 +1694,7 @@ def create_parser(
             EpicStatusExtension(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<EpicStatus>>
+            CalloutExtension(),  # ```info``` etc. callout blocks
             RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
