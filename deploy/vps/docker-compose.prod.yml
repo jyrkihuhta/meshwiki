@@ -75,6 +75,7 @@ services:
     restart: unless-stopped
     env_file: /opt/meshwiki/orchestrator-staging.env
     volumes:
+      - /opt/meshwiki/staging/orchestrator/factory:/app/factory:ro
       - orchestrator_staging_data:/data
     expose:
       - "8002"
