@@ -128,4 +128,4 @@ async def decompose_node(state: FactoryState) -> dict:
             "decompose: failed to transition parent task %s: %s", parent_task, exc
         )
 
-    return {"subtasks": subtasks, "graph_status": "awaiting_approval"}
+    return {"subtasks": subtasks, "graph_status": "dispatching"}

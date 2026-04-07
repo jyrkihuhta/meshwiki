@@ -123,13 +123,8 @@ def build_graph(checkpointer):
         route_after_intake,
         {"decompose": "decompose", "skip_decompose": "assign_grinders"},
     )
-    graph.add_edge("decompose", "human_review_plan")
-
-    graph.add_conditional_edges(
-        "human_review_plan",
-        route_after_plan_review,
-        {"approved": "assign_grinders", "rejected": "decompose"},
-    )
+    # Human plan review is disabled — dispatch grinders immediately after decompose.
+    graph.add_edge("decompose", "assign_grinders")
 
     graph.add_conditional_edges("assign_grinders", route_grinders)
     graph.add_edge("grind", "collect_results")
@@ -176,5 +171,5 @@ def build_graph(checkpointer):
 
     return graph.compile(
         checkpointer=checkpointer,
-        interrupt_before=["human_review_plan", "human_review_code"],
+        interrupt_before=["human_review_code"],
     )

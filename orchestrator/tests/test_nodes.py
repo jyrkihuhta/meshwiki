@@ -138,7 +138,7 @@ async def test_decompose_node() -> None:
     ):
         result = await decompose_node(state)
 
-    assert result["graph_status"] == "awaiting_approval"
+    assert result["graph_status"] == "dispatching"
     assert len(result["subtasks"]) == 1
     assert result["subtasks"][0]["title"] == "Build something"
 
@@ -172,7 +172,7 @@ async def test_decompose_node_no_subtasks() -> None:
     ):
         result = await decompose_node(state)
 
-    assert result["graph_status"] == "awaiting_approval"
+    assert result["graph_status"] == "dispatching"
     assert result["subtasks"] == []
     # Only the parent task transition should have been called
     mock_meshwiki.create_page.assert_not_awaited()
