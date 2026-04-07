@@ -11,3 +11,7 @@ ${VPS_DOMAIN} {
 staging.${VPS_DOMAIN} {
     reverse_proxy meshwiki-staging:8000
 }
+
+molly.penni.fi {
+    reverse_proxy molly:8780
+}
