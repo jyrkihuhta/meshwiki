@@ -377,7 +377,7 @@ async def view_page(request: Request, name: str):
     # Get backlinks and frontmatter metadata from graph engine first so the
     # TaskStatus macro can use them during parsing.
     backlinks: list[str] = []
-    frontmatter: dict[str, list[str]] = {}
+    frontmatter: dict = {}
     engine = get_engine()
     if engine is not None:
         try:
@@ -389,8 +389,20 @@ async def view_page(request: Request, name: str):
         except Exception:
             pass
 
+    # page_metadata is passed to the parser for macro context.  It starts from
+    # the engine result but falls back to storage-parsed model_extra when the
+    # engine hasn't indexed this page yet (new page, or no graph_core).
+    # `frontmatter` is kept engine-only so the Properties card only appears
+    # when the engine is available.
+    _storage_extra = (
+        dict(page.metadata.model_extra)
+        if hasattr(page.metadata, "model_extra") and page.metadata.model_extra
+        else {}
+    )
+    page_metadata: dict = frontmatter if frontmatter else _storage_extra
+
     # For epic pages, fetch child tasks so <<EpicStatus>> can render them.
-    page_type = frontmatter.get("type", "")
+    page_type = page_metadata.get("type", "")
     if isinstance(page_type, list):
         page_type = page_type[0] if page_type else ""
     if page_type == "epic":
@@ -400,27 +412,22 @@ async def view_page(request: Request, name: str):
             if p.metadata is None:
                 continue
             meta = p.metadata.model_dump()
-            parent_epic = (
-                meta.get("parent_epic") or p.metadata.model_extra.get("parent_epic")
-                if hasattr(p.metadata, "model_extra")
-                else None
+            extra = p.metadata.model_extra if hasattr(p.metadata, "model_extra") else {}
+            # Tasks link to an epic via parent_task (factory standard) or parent_epic.
+            parent_ref = (
+                meta.get("parent_task")
+                or extra.get("parent_task")
+                or meta.get("parent_epic")
+                or extra.get("parent_epic")
             )
-            if isinstance(parent_epic, list):
-                parent_epic = parent_epic[0] if parent_epic else None
-            if parent_epic == name or p.name.startswith(name + "/"):
-                status = (
-                    meta.get("status")
-                    or (
-                        p.metadata.model_extra.get("status")
-                        if hasattr(p.metadata, "model_extra")
-                        else None
-                    )
-                    or "planned"
-                )
+            if isinstance(parent_ref, list):
+                parent_ref = parent_ref[0] if parent_ref else None
+            if parent_ref == name or p.name.startswith(name + "/"):
+                status = meta.get("status") or extra.get("status") or "planned"
                 if isinstance(status, list):
                     status = status[0] if status else "planned"
                 child_tasks.append({"name": p.name, "title": p.title, "status": status})
-        frontmatter["_child_tasks"] = child_tasks
+        page_metadata["_child_tasks"] = child_tasks
 
     # Fetch recent pages for <<RecentChanges>> macro.
     all_pages = await storage.list_pages_with_metadata()
@@ -444,7 +451,7 @@ async def view_page(request: Request, name: str):
         page.content,
         page_exists=page_exists_sync,
         page_name=name,
-        page_metadata=frontmatter,
+        page_metadata=page_metadata,
         recent_pages=recent_pages,
         all_pages=all_pages,
         page_contents=page_contents,

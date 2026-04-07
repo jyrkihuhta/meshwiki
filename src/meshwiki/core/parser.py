@@ -1368,20 +1368,10 @@ class NewPageExtension(Extension):
 # EpicStatus macro
 # ─────────────────────────────────────────────────────────────────────────────
 
-EPICSTATUS_PATTERN = re.compile(r"<<EpicStatus>>")
+EPICSTATUS_PATTERN = re.compile(r"<<EpicStatus(?:\(\s*\))?>>")
 
 # Terminal states count as "complete" for progress calculation.
 _COMPLETE_STATES = {"merged", "done"}
-_EPIC_BADGE_CLASS = {
-    "planned": "gray",
-    "in_progress": "amber",
-    "review": "purple",
-    "merged": "green",
-    "done": "green",
-    "failed": "red",
-    "rejected": "red",
-    "blocked": "orange",
-}
 
 
 def _render_epic_status(page_name: str, page_metadata: dict) -> str:
@@ -1415,7 +1405,7 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
         lines = ["flowchart TD"]
         # Epic root node
         safe_title = title.replace('"', "'")
-        lines.append(f'    epic["{html_escape(safe_title)}"]:::epic_node')
+        lines.append(f'    epic["{safe_title}"]:::epic_node')
 
         for i, task in enumerate(child_tasks):
             node_id = f"t{i}"
@@ -1428,7 +1418,7 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
                 if status in _COMPLETE_STATES
                 else ("⚡" if status == "in_progress" else "○")
             )
-            lines.append(f'    {node_id}["{icon} {html_escape(label)}"]:::{status}')
+            lines.append(f'    {node_id}["{icon} {label}"]:::{status}')
             lines.append(f"    epic --> {node_id}")
 
         # classDefs
