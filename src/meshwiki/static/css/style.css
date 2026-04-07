@@ -2025,3 +2025,94 @@ article.page > .breadcrumb {
     line-height: 1.4;
 }
 .new-page-button:hover { background: var(--color-bg-secondary, #f5f5f5); }
+
+/* === Callout Blocks === */
+.callout {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.9rem 1.1rem;
+  border-radius: 6px;
+  border-left: 4px solid;
+  margin: 1rem 0;
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.callout__icon { font-size: 1.2rem; flex-shrink: 0; }
+.callout__body { flex: 1; white-space: pre-wrap; }
+
+/* Light mode */
+.callout--info {
+  --callout-info-bg: #e8f4fd;
+  --callout-info-border: #2196f3;
+  --callout-info-color: #0d47a1;
+  background: var(--callout-info-bg);
+  border-color: var(--callout-info-border);
+  color: var(--callout-info-color);
+}
+.callout--warning {
+  --callout-warning-bg: #fff8e1;
+  --callout-warning-border: #ffc107;
+  --callout-warning-color: #7b5e00;
+  background: var(--callout-warning-bg);
+  border-color: var(--callout-warning-border);
+  color: var(--callout-warning-color);
+}
+.callout--tip {
+  --callout-tip-bg: #e8f5e9;
+  --callout-tip-border: #4caf50;
+  --callout-tip-color: #1b5e20;
+  background: var(--callout-tip-bg);
+  border-color: var(--callout-tip-border);
+  color: var(--callout-tip-color);
+}
+.callout--error {
+  --callout-error-bg: #fdecea;
+  --callout-error-border: #f44336;
+  --callout-error-color: #b71c1c;
+  background: var(--callout-error-bg);
+  border-color: var(--callout-error-border);
+  color: var(--callout-error-color);
+}
+.callout--note {
+  --callout-note-bg: #f5f5f5;
+  --callout-note-border: #9e9e9e;
+  --callout-note-color: #424242;
+  background: var(--callout-note-bg);
+  border-color: var(--callout-note-border);
+  color: var(--callout-note-color);
+}
+
+/* Dark mode */
+[data-theme="dark"] .callout--info {
+  --callout-info-bg: #0d2137;
+  --callout-info-border: #42a5f5;
+  --callout-info-color: #90caf9;
+}
+[data-theme="dark"] .callout--warning {
+  --callout-warning-bg: #2a2000;
+  --callout-warning-border: #ffca28;
+  --callout-warning-color: #ffe082;
+}
+[data-theme="dark"] .callout--tip {
+  --callout-tip-bg: #0a2e0a;
+  --callout-tip-border: #66bb6a;
+  --callout-tip-color: #a5d6a7;
+}
+[data-theme="dark"] .callout--error {
+  --callout-error-bg: #2c0a0a;
+  --callout-error-border: #ef5350;
+  --callout-error-color: #ef9a9a;
+}
+[data-theme="dark"] .callout--note {
+  --callout-note-bg: #1e1e1e;
+  --callout-note-border: #bdbdbd;
+  --callout-note-color: #e0e0e0;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  .callout { font-size: 0.9rem; padding: 0.75rem 0.9rem; }
+}
