@@ -637,9 +637,9 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
                 phase_text = "🔍 PM reviewing..."
         phase_html = f'<div class="task-status-phase">{phase_text}</div>'
 
-    # ── Section D: live terminal (in_progress / review) ──────────────────────
+    # ── Section D: live terminal (in_progress / review / failed) ─────────────
     terminal_html = ""
-    if status in ("in_progress", "review"):
+    if status in ("in_progress", "review", "failed"):
         safe_id = re.sub(r"[^a-zA-Z0-9-]", "-", page_name)
         page_name_js = (
             json.dumps(page_name).replace("<", "\\u003c").replace(">", "\\u003e")
