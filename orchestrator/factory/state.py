@@ -48,6 +48,7 @@ class SubTask(TypedDict):
     token_budget: int  # max tokens for the grinder session
     tokens_used: int
     review_feedback: str | None  # PM feedback for rejected subtasks
+    code_skeleton: str | None  # starter code template provided by PM during decomposition
 
 
 class FactoryState(TypedDict):

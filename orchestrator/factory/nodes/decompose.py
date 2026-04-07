@@ -40,6 +40,14 @@ def _build_subtask_page(subtask: SubTask, parent_task: str) -> str:
 
     estimation_label = "m"
 
+    code_skeleton = subtask.get("code_skeleton", "")
+    skeleton_section = (
+        f"\n## Code Skeleton\n\nAdapt the following existing implementation:\n\n"
+        f"```python\n{code_skeleton}\n```\n"
+        if code_skeleton
+        else ""
+    )
+
     return (
         f"---\n"
         f'title: "{subtask["title"]}"\n'
@@ -59,7 +67,7 @@ def _build_subtask_page(subtask: SubTask, parent_task: str) -> str:
         f"## Description\n"
         f"\n"
         f"{description}\n"
-        f"\n"
+        f"{skeleton_section}\n"
         f"## Acceptance Criteria\n"
         f"\n"
         f"{criteria_block}\n"

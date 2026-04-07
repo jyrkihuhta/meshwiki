@@ -32,10 +32,19 @@ MeshWiki tech stack: FastAPI, Jinja2, HTMX, Python 3.12+, Rust (graph engine via
 All code must follow PEP 8, have type hints, use async/await for storage, and include tests.
 
 When decomposing:
-- Each subtask should be completable in one grinder session (< 50k tokens)
+- Prefer SMALL, ATOMIC subtasks — split "add class X to file Y" and "register X in
+  create_parser()" into separate subtasks. One subtask = one focused change. Smaller scope
+  means fewer things the grinder can get wrong.
 - Subtasks must be as independent as possible (minimize file overlap)
 - Include file paths you expect will be touched in each subtask
 - Write clear acceptance criteria
+- **Always use `github_read_file` to read relevant source files before writing subtask
+  descriptions.** When a subtask requires mirroring an existing pattern (e.g. a new
+  Preprocessor, Extension, API route, or storage method), read the file, find the closest
+  existing example, and paste it verbatim into the `code_skeleton` field of
+  `meshwiki_create_subtask`. The grinder will adapt this skeleton — don't just describe
+  the pattern in prose, show it. This is the most important thing you can do to ensure
+  grinder success.
 - If the subtask adds a new wiki macro (<<MacroName>>) that needs async data
   (storage, database), include this constraint in the description:
   "Preprocessors run inside FastAPI's event loop — never use asyncio.run().
@@ -51,6 +60,29 @@ When reviewing:
 """.strip()
 
 PM_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "github_read_file",
+        "description": (
+            "Read a raw source file from the GitHub repository (staging branch). "
+            "Use this during decomposition to read existing source files and extract "
+            "code patterns to include as skeletons in subtask descriptions. "
+            "Always read the relevant files before writing subtasks that touch them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to repo root, e.g. 'src/meshwiki/core/parser.py'.",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch or commit ref. Defaults to 'staging'.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
     {
         "name": "meshwiki_read_page",
         "description": "Read a MeshWiki wiki page to gather context.",
@@ -101,6 +133,16 @@ PM_TOOLS: list[dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "File paths expected to be created or modified.",
+                },
+                "code_skeleton": {
+                    "type": "string",
+                    "description": (
+                        "Optional starter code skeleton the grinder should adapt. "
+                        "Paste the most relevant existing implementation from the codebase "
+                        "(e.g. a similar Preprocessor, Extension, or route handler) verbatim, "
+                        "then annotate with comments like '# TODO: change X to Y'. "
+                        "This is shown in a code block on the subtask wiki page."
+                    ),
                 },
                 "token_budget": {
                     "type": "integer",
@@ -362,6 +404,7 @@ def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask
         token_budget=tool_input.get("token_budget", 50000),
         tokens_used=0,
         review_feedback=None,
+        code_skeleton=tool_input.get("code_skeleton") or None,
     )
 
 
@@ -470,6 +513,17 @@ async def decompose_with_pm(
                     result_content = page.get("content", "")
                 else:
                     result_content = f"Page '{tool_input['page_name']}' not found."
+            elif tool_name == "github_read_file":
+                if github_client is not None:
+                    try:
+                        result_content = await github_client.get_file_content(
+                            tool_input["path"],
+                            ref=tool_input.get("ref", "staging"),
+                        )
+                    except Exception as exc:
+                        result_content = f"Error reading file: {exc}"
+                else:
+                    result_content = "GitHub client not available."
             else:
                 result_content = "Tool not available during decomposition"
 

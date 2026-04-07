@@ -167,6 +167,31 @@ class GitHubClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_file_content(self, path: str, ref: str = "staging") -> str:
+        """Fetch raw content of a file from the repository.
+
+        Args:
+            path: File path relative to repo root, e.g. ``src/meshwiki/core/parser.py``.
+            ref: Branch, tag, or commit SHA. Defaults to ``"staging"``.
+
+        Returns:
+            Decoded file content as a UTF-8 string.
+
+        Raises:
+            httpx.HTTPStatusError: On non-2xx responses.
+            ValueError: If the API response is not a file object.
+        """
+        import base64
+
+        url = f"{_BASE_URL}/repos/{self._repo}/contents/{path}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=self._headers(), params={"ref": ref})
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("type") != "file":
+            raise ValueError(f"Not a file: {path!r} (type={data.get('type')})")
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+
     async def close_pr(self, pr_number: int) -> dict:
         """Close a pull request without merging.
 
