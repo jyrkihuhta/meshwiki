@@ -17,6 +17,10 @@ class PageCreate(BaseModel):
     content: str
 
 
+class PageRename(BaseModel):
+    new_name: str
+
+
 class PageResponse(BaseModel):
     name: str
     content: str
@@ -95,6 +99,19 @@ async def update_page(
 ) -> PageResponse:
     """Create or update a page."""
     page = await storage.save_page(name, body.content)
+    return _page_response(page)
+
+
+@router.post("/pages/{name:path}/rename", response_model=PageResponse)
+async def rename_page(
+    name: str,
+    body: PageRename,
+    storage: FileStorage = Depends(get_storage),
+) -> PageResponse:
+    """Move a page to a new name/location."""
+    page = await storage.rename_page(name, body.new_name)
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
     return _page_response(page)
 
 

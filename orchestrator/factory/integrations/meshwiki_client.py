@@ -118,6 +118,22 @@ class MeshWikiClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def rename_page(self, old_name: str, new_name: str) -> None:
+        """Move a wiki page to a new name/location.
+
+        Args:
+            old_name: Current page name.
+            new_name: New page name (may include new path segments).
+        """
+        url = f"{self._base_url}/api/v1/pages/{old_name}/rename"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                headers=self._headers(),
+                json={"new_name": new_name},
+            )
+            resp.raise_for_status()
+
     async def append_to_page(self, page_name: str, content_to_append: str) -> None:
         """
         Append content_to_append to the body of the named wiki page.

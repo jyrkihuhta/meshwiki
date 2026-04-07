@@ -28,17 +28,30 @@ async def finalize_node(state: FactoryState) -> dict:
         state.get("cost_usd", 0.0),
     )
 
+    task_page = state["task_wiki_page"]
+
     try:
         await client.transition_task(
-            state["task_wiki_page"],
+            task_page,
             "done",
             extra_fields={"cost_usd": str(round(state.get("cost_usd", 0), 4))},
         )
     except Exception as exc:
         logger.error(
             "finalize: failed to transition %s to done: %s",
-            state["task_wiki_page"],
+            task_page,
             exc,
         )
+
+    # Move completed task into a Done/ subfolder so it collapses in the sidebar
+    # e.g. Factory/Macros/NewPageMacro → Factory/Macros/Done/NewPageMacro
+    if "/Done/" not in task_page:
+        parts = task_page.split("/")
+        done_page = "/".join(parts[:-1] + ["Done", parts[-1]])
+        try:
+            await client.rename_page(task_page, done_page)
+            logger.info("finalize: moved %s → %s", task_page, done_page)
+        except Exception as exc:
+            logger.warning("finalize: failed to move task to Done folder: %s", exc)
 
     return {"graph_status": "completed"}

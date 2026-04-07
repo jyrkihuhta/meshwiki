@@ -200,3 +200,45 @@ async def test_delete_existing_page_returns_204(client):
 async def test_delete_nonexistent_page_returns_404(client):
     resp = await client.delete("/api/v1/pages/Ghost", headers=_AUTH)
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Rename page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rename_page_moves_to_new_name(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "Factory/Macros/MyTask",
+            "content": "---\nstatus: done\n---\nBody",
+        },
+        headers=_AUTH,
+    )
+    resp = await client.post(
+        "/api/v1/pages/Factory/Macros/MyTask/rename",
+        json={"new_name": "Factory/Macros/Done/MyTask"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Factory/Macros/Done/MyTask"
+
+    # Old location should be gone
+    old = await client.get("/api/v1/pages/Factory/Macros/MyTask", headers=_AUTH)
+    assert old.status_code == 404
+
+    # New location should exist
+    new = await client.get("/api/v1/pages/Factory/Macros/Done/MyTask", headers=_AUTH)
+    assert new.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rename_nonexistent_page_returns_404(client):
+    resp = await client.post(
+        "/api/v1/pages/Ghost/rename",
+        json={"new_name": "Done/Ghost"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 404

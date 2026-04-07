@@ -78,6 +78,15 @@ class Storage(ABC):
         """
         ...
 
+    @abstractmethod
+    async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
+        """Move a page to a new name/location.
+
+        Returns the page at its new location, or None if the source page
+        does not exist.
+        """
+        ...
+
 
 class FileStorage(Storage):
     """File-based storage implementation.
@@ -333,3 +342,13 @@ class FileStorage(Storage):
             metadata=metadata,
             exists=True,
         )
+
+    async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
+        """Move a page to a new name/location."""
+        old_path = self._get_path(old_name)
+        if not old_path.exists():
+            return None
+        new_path = self._get_path(new_name)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.rename(new_path)
+        return await self.get_page(new_name)
