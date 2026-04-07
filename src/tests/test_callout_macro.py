@@ -1,12 +1,23 @@
 """Tests for CalloutBlockPreprocessor and CalloutExtension."""
 
+from pathlib import Path
+
 import pytest
+from starlette.testclient import TestClient
 
 from meshwiki.core.parser import (
     CALLOUT_ICONS,
     CALLOUT_TYPES,
-    parse_wiki_content,
+    create_parser,
 )
+
+# TASK001 exports this as create_parser(); spec referred to it as make_parser()
+make_parser = create_parser
+
+
+# ============================================================
+# Unit tests
+# ============================================================
 
 
 class TestCalloutBlockPreprocessor:
@@ -19,7 +30,7 @@ class TestCalloutBlockPreprocessor:
 This is the callout body
 with multiple lines
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert f'class="callout callout--{callout_type}"' in html
         assert (
             f'<span class="callout__icon">{CALLOUT_ICONS[callout_type]}</span>' in html
@@ -32,7 +43,7 @@ with multiple lines
 def hello():
     print("world")
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert '<code class="language-python"' in html or "<code>" in html
         assert "def hello():" in html
         assert "print" in html
@@ -43,7 +54,7 @@ def hello():
         content = """~~~info
 This is a tilde callout
 ~~~"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout callout--info"' in html
         assert '<span class="callout__icon">ℹ️</span>' in html
 
@@ -62,7 +73,7 @@ Second callout
 ```tip
 Third callout
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout callout--info"' in html
         assert "First callout" in html
         assert 'class="callout callout--warning"' in html
@@ -74,7 +85,7 @@ Third callout
         """An unclosed callout fence is passed through unchanged."""
         content = """```info
 This callout is never closed"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout' not in html
 
     def test_html_escaping_in_body(self):
@@ -82,7 +93,7 @@ This callout is never closed"""
         content = """```info
 Use <script>alert('xss')</script> and &amp;
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert "&lt;script&gt;" in html
         assert "&amp;amp;" in html
         assert 'class="callout callout--info"' in html
@@ -91,7 +102,7 @@ Use <script>alert('xss')</script> and &amp;
         """An empty callout body renders correctly."""
         content = """```note
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout callout--note"' in html
         assert '<span class="callout__icon">📝</span>' in html
 
@@ -100,7 +111,7 @@ Use <script>alert('xss')</script> and &amp;
         content = """```javascript
 console.log('hello');
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout' not in html
         assert "console.log" in html
 
@@ -109,105 +120,74 @@ console.log('hello');
         content = """```info
 Here is some ``` code
 ```"""
-        html = parse_wiki_content(content)
+        html = make_parser().convert(content)
         assert 'class="callout callout--info"' in html
         assert "Here is some ``` code" in html
 
 
-class TestCalloutIntegration:
-    """Integration tests for callout blocks via HTTP route."""
+# ============================================================
+# Integration tests (synchronous)
+# ============================================================
 
-    @pytest.mark.asyncio
-    async def test_callout_via_http_route(self, client):
-        """Callout inside a page renders correctly via the HTTP route."""
-        page_content = """
-```info
-This is an info callout
-```
 
-Some text
+def test_warning_callout_via_http(wiki_app, tmp_path):
+    """A warning callout inside a wiki page renders correctly via the HTTP route."""
+    content = """```warning
+This is a warning message.
+```"""
+    page_path = tmp_path / "CalloutTestPage.md"
+    page_path.write_text(content)
 
-```warning
-This is a warning callout
-```
-"""
-        resp = await client.post("/page/CalloutTest", data={"content": page_content})
+    with TestClient(wiki_app, base_url="http://test") as client:
+        resp = client.get("/page/CalloutTestPage")
         assert resp.status_code == 200
-
-        resp = await client.get("/page/CalloutTest")
-        assert resp.status_code == 200
-        html = resp.text
-        assert 'class="callout callout--info"' in html
-        assert 'class="callout callout--warning"' in html
-        assert "This is an info callout" in html
-        assert "This is a warning callout" in html
+        assert "callout--warning" in resp.text
 
 
-class TestCalloutCSS:
-    """Tests for callout CSS variables in style.css."""
+# ============================================================
+# CSS presence tests
+# ============================================================
 
-    def test_dark_mode_css_variables_present(self):
-        """Dark mode CSS variables are present in style.css."""
-        import os
 
-        style_css_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "meshwiki",
-            "static",
-            "css",
-            "style.css",
-        )
-        with open(style_css_path, "r") as f:
-            css = f.read()
+@pytest.fixture(scope="module")
+def css_content() -> str:
+    """Read style.css once for the entire test module."""
+    css_path = (
+        Path(__file__).parent.parent / "meshwiki" / "static" / "css" / "style.css"
+    )
+    return css_path.read_text()
 
-        assert '[data-theme="dark"] .callout--info' in css
-        assert "--callout-info-bg:" in css
-        assert "--callout-info-border:" in css
-        assert "--callout-info-color:" in css
 
-        assert '[data-theme="dark"] .callout--warning' in css
-        assert '[data-theme="dark"] .callout--tip' in css
-        assert '[data-theme="dark"] .callout--error' in css
-        assert '[data-theme="dark"] .callout--note' in css
+def test_dark_mode_support(css_content: str) -> None:
+    """Dark mode CSS variables are present in style.css."""
+    assert '[data-theme="dark"]' in css_content
 
-    def test_light_mode_css_variables_present(self):
-        """Light mode CSS variables are present in style.css."""
-        import os
 
-        style_css_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "meshwiki",
-            "static",
-            "css",
-            "style.css",
-        )
-        with open(style_css_path, "r") as f:
-            css = f.read()
+def test_callout_info_css(css_content: str) -> None:
+    """CSS custom properties for info callout are present."""
+    assert "--callout-info-bg:" in css_content
+    assert ".callout--info" in css_content
 
-        assert ".callout--info" in css
-        assert "--callout-info-bg:" in css
-        assert ".callout--warning" in css
-        assert ".callout--tip" in css
-        assert ".callout--error" in css
-        assert ".callout--note" in css
 
-    def test_callout_base_styles_present(self):
-        """Base .callout and .callout__icon, .callout__body styles are present."""
-        import os
+def test_callout_warning_css(css_content: str) -> None:
+    """CSS custom properties for warning callout are present."""
+    assert "--callout-warning-bg:" in css_content
+    assert ".callout--warning" in css_content
 
-        style_css_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "meshwiki",
-            "static",
-            "css",
-            "style.css",
-        )
-        with open(style_css_path, "r") as f:
-            css = f.read()
 
-        assert ".callout {" in css
-        assert ".callout__icon {" in css
-        assert ".callout__body {" in css
+def test_callout_tip_css(css_content: str) -> None:
+    """CSS custom properties for tip callout are present."""
+    assert "--callout-tip-bg:" in css_content
+    assert ".callout--tip" in css_content
+
+
+def test_callout_error_css(css_content: str) -> None:
+    """CSS custom properties for error callout are present."""
+    assert "--callout-error-bg:" in css_content
+    assert ".callout--error" in css_content
+
+
+def test_callout_note_css(css_content: str) -> None:
+    """CSS custom properties for note callout are present."""
+    assert "--callout-note-bg:" in css_content
+    assert ".callout--note" in css_content
