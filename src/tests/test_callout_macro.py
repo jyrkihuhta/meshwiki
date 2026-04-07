@@ -168,6 +168,50 @@ Here is some ``` code
 
 
 # ---------------------------------------------------------------------------
+# Integration tests via HTTP
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warning_callout_via_http(client) -> None:
+    """A wiki page with a warning callout renders the callout styling via HTTP."""
+    content = "```warning\nThis is a warning message.\n```"
+    resp = await client.post("/page/CalloutTestPage", data={"content": content})
+    assert resp.status_code == 200
+
+    resp = await client.get("/page/CalloutTestPage")
+    assert resp.status_code == 200
+    assert "callout--warning" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_multiple_callouts_via_http(client) -> None:
+    """Multiple callout types render correctly in a wiki page via HTTP."""
+    content = """```info
+First callout
+```
+
+Some text
+
+```warning
+Second callout
+```
+
+```tip
+Third callout
+```"""
+    resp = await client.post("/page/MultiCalloutPage", data={"content": content})
+    assert resp.status_code == 200
+
+    resp = await client.get("/page/MultiCalloutPage")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "callout--info" in html
+    assert "callout--warning" in html
+    assert "callout--tip" in html
+
+
+# ---------------------------------------------------------------------------
 # CSS presence tests
 # ---------------------------------------------------------------------------
 
