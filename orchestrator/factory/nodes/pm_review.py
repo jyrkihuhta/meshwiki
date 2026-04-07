@@ -88,6 +88,16 @@ async def pm_review_node(state: FactoryState) -> dict:
                             pr_number,
                             subtask["id"],
                         )
+                        try:
+                            await meshwiki_client.transition_task(
+                                subtask["wiki_page"], "merged"
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "pm_review: failed to transition %s to merged: %s",
+                                subtask["wiki_page"],
+                                exc,
+                            )
                     except Exception as exc:
                         logger.warning(
                             "pm_review: auto-merge failed for PR #%d: %s",

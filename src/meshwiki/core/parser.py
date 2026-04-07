@@ -958,6 +958,40 @@ def _render_backlinks(page_name: str) -> str:
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# BackLinks macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+BACKLINKS_PATTERN = re.compile(r"<<BackLinks>>")
+
+
+def _render_backlinks(page_name: str) -> str:
+    """Render the <<BackLinks>> macro as an HTML list of pages linking to this page."""
+    from meshwiki.core.graph import get_engine
+
+    engine = get_engine()
+    if engine is None:
+        return ""
+
+    try:
+        backlinks = engine.get_backlinks(page_name)
+    except Exception:
+        return ""
+
+    if not backlinks:
+        return ""
+
+    lines = ['<ul class="backlinks">']
+    for link_target in backlinks:
+        url_name = link_target.replace(" ", "_")
+        lines.append(
+            f'<li><a href="/page/{url_name}" class="wiki-link">'
+            f"{html_escape(link_target)}</a></li>"
+        )
+    lines.append("</ul>")
+    return "\n".join(lines)
+
+
 class BackLinksPreprocessor(Preprocessor):
     """Replace <<BackLinks>> with rendered HTML, skipping code blocks."""
 

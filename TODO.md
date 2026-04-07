@@ -115,6 +115,8 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [ ] Configurable PM model — `FACTORY_PM_MODEL` env var instead of hardcoded `"claude-sonnet-4-6"`
 - [ ] Review feedback in rework — append `subtask["review_feedback"]` to Kilo prompt on rework iterations
 - [ ] Bookkeeper bot — periodic job reconciling stale task states (stuck in_progress → failed, merged PRs → merged)
+- [ ] PM review feedback visible on wiki — `append_to_page` in `pm_review_node` isn't writing feedback to the task page; PM review decisions should be visible in the Agent Log section
+- [ ] PM review failure triggers spurious `task.assigned` restart — when pm_review_node marks subtask `failed` and transitions the wiki page, the `failed→in_progress` webhook fires `task.assigned` which starts a duplicate graph run; the transition in the exception handler should use a status that doesn't trigger a new graph run, or webhook_server should ignore `task.assigned` for threads already in progress
 - [ ] Signed grinder commits — GitHub App token or GPG key in E2B sandbox
 - [ ] Redecompose escalation — implement `"redecompose"` decision in `escalate_node`
 - [ ] Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
