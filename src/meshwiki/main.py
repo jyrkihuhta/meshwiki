@@ -45,6 +45,7 @@ from meshwiki.core.metrics import (
 )
 from meshwiki.core.models import Page
 from meshwiki.core.parser import (
+    FRONTMATTER_PATTERN,
     parse_wiki_content,
     parse_wiki_content_with_toc,
     word_count,
@@ -323,15 +324,21 @@ async def index(request: Request):
 
 
 @app.get("/page/{name:path}/edit", response_class=HTMLResponse)
-async def edit_page(request: Request, name: str):
+async def edit_page(request: Request, name: str, template: str = ""):
     """Edit page form."""
     _validate_page_name(name)
     page = await storage.get_page(name)
 
     if page is None:
-        # New page
         page = Page(name=name, content="", exists=False)
-        raw_content = ""
+        if template:
+            template_content = await storage.get_raw_content(template)
+            if template_content:
+                raw_content = FRONTMATTER_PATTERN.sub("", template_content)
+            else:
+                raw_content = ""
+        else:
+            raw_content = ""
     else:
         raw_content = await storage.get_raw_content(name) or ""
 

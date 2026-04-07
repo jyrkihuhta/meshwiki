@@ -170,3 +170,34 @@ class TestEditorTemplate:
         assert resp.status_code == 200
         assert "title: My Page" in resp.text
         assert "# Content" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_edit_with_template_prepopulates_content(self, client):
+        """GET /page/NewPage/edit?template=TemplateName pre-populates with template content."""
+        template_content = "---\ntitle: Task Template\ntags:\n  - task\n---\n\n# Task\n\nDescription here."
+        await meshwiki.main.storage.save_page("TaskTemplate", template_content)
+
+        resp = await client.get("/page/NewPage/edit?template=TaskTemplate")
+        assert resp.status_code == 200
+        assert "# Task" in resp.text
+        assert "Description here." in resp.text
+        assert "title: Task Template" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_edit_with_nonexistent_template_opens_empty(self, client):
+        """Template not found → editor opens empty (no error)."""
+        resp = await client.get("/page/NewPage/edit?template=NonexistentTemplate")
+        assert resp.status_code == 200
+        assert "<textarea" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_edit_with_existing_page_ignores_template(self, client):
+        """When page exists, template param is ignored."""
+        await meshwiki.main.storage.save_page("ExistingPage", "# Existing content")
+        template_content = "---\ntitle: Template\n---\n\n# Template content"
+        await meshwiki.main.storage.save_page("SomeTemplate", template_content)
+
+        resp = await client.get("/page/ExistingPage/edit?template=SomeTemplate")
+        assert resp.status_code == 200
+        assert "# Existing content" in resp.text
+        assert "# Template content" not in resp.text

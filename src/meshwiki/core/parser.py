@@ -1276,6 +1276,87 @@ class IncludeExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NewPage macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+NEWPAGE_PATTERN = re.compile(
+    r"<<NewPage[(]\s*([^,)]+?)\s*(?:,\s*\"([^\"]*)\")?\s*(?:,\s*([^,)]+?))?[)]>>",
+    re.DOTALL,
+)
+
+
+def _render_newpage_macro(
+    template_name: str, button_label: str, parent_page: str | None
+) -> str:
+    """Render the <<NewPage(...)>> macro as an inline form."""
+    if not button_label:
+        button_label = "New page"
+    escaped_template = html_escape(template_name)
+    escaped_label = html_escape(button_label)
+    escaped_parent = html_escape(parent_page or "")
+
+    if parent_page:
+        onclick = (
+            f"var input=this.previousElementSibling.value;"
+            f"if(input){{window.location.href='/page/{escaped_parent}/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
+        )
+    else:
+        onclick = (
+            f"var input=this.previousElementSibling.value;"
+            f"if(input){{window.location.href='/page/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
+        )
+
+    return (
+        f'<span class="new-page-macro">'
+        f'<input type="text" class="new-page-input" placeholder="Page name" />'
+        f'<button class="new-page-button" type="button" onclick="{onclick}">{escaped_label}</button>'
+        f"</span>"
+    )
+
+
+class NewPagePreprocessor(Preprocessor):
+    """Preprocessor that replaces <<NewPage(...)>> macros with an inline creation form."""
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<NewPage(" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00NPEBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            template_name = m.group(1).strip()
+            button_label = m.group(2) or ""
+            parent_page = m.group(3)
+            if parent_page:
+                parent_page = parent_page.strip()
+            html = _render_newpage_macro(template_name, button_label, parent_page)
+            return self.md.htmlStash.store(html)
+
+        text = NEWPAGE_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00NPEBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class NewPageExtension(Extension):
+    """Markdown extension for <<NewPage(...)>> macros."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(NewPagePreprocessor(md), "newpage", 28)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EpicStatus macro
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1486,6 +1567,7 @@ def create_parser(
                 page_contents=page_contents or {},
                 include_chain=include_chain or [],
             ),  # <<Include(...)>>
+            NewPageExtension(),  # <<NewPage(...)>>
         ]
     )
 

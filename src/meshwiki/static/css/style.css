@@ -1957,3 +1957,28 @@ article.page > .breadcrumb {
 .page-list-item:last-child { border-bottom: none; }
 .page-list-tags { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .page-list-empty, .page-list-unavailable { color: var(--color-text-muted, #888); font-style: italic; }
+
+/* NewPage macro */
+.new-page-macro { display: inline-flex; align-items: center; gap: 0.5rem; }
+.new-page-input {
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.9375rem;
+    border: 1px solid var(--color-border, #ccc);
+    background: var(--color-bg, #fff);
+    color: var(--color-text, #333);
+    min-width: 160px;
+}
+.new-page-button {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--color-border, #ccc);
+    background: var(--color-bg, #fff);
+    color: var(--color-text, #333);
+    line-height: 1.4;
+}
+.new-page-button:hover { background: var(--color-bg-secondary, #f5f5f5); }
