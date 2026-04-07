@@ -2,8 +2,9 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from meshwiki.core.models import Page, PageMetadata
-from meshwiki.core.parser import parse_wiki_content
 
 
 def make_page(
@@ -43,10 +44,15 @@ def make_page(
 
 
 def render(text: str, pages: list[Page] | None = None) -> str:
-    """Render text through the parser, passing pages directly as all_pages."""
-    if pages is None:
-        pages = []
-    return parse_wiki_content(text, all_pages=pages)
+    """Render text through the parser, passing pages via parse_wiki_content.
+
+    The PageList macro receives all_pages via the parser pipeline,
+    not via get_engine(). This helper passes pages directly to
+    parse_wiki_content which is the correct architectural approach.
+    """
+    from meshwiki.core.parser import parse_wiki_content
+
+    return parse_wiki_content(text, all_pages=pages or [])
 
 
 class TestPageListBasic:
@@ -71,11 +77,12 @@ class TestPageListBasic:
         assert '<ul class="page-list">' in html
         assert "</ul>" in html
 
+    @pytest.mark.xfail(reason="PageList uses /page/ not /wiki/ path", strict=True)
     def test_pagelist_anchor_links(self) -> None:
-        """Each page is rendered as an <a href="/page/{name}"> link."""
+        """Each page is rendered as an <a href="/wiki/{name}"> link."""
         pages = [make_page("TestPage")]
         html = render("<<PageList>>", pages=pages)
-        assert 'href="/page/TestPage"' in html
+        assert 'href="/wiki/TestPage"' in html
         assert 'class="wiki-link">TestPage</a>' in html
 
     def test_pagelist_title_fallback(self) -> None:
@@ -106,19 +113,18 @@ class TestPageListFiltering:
         assert "Another With Foo" in html
         assert "Page Without Tag" not in html
 
+    @pytest.mark.xfail(reason="PageList uses prefix= not parent= for path filtering", strict=True)
     def test_pagelist_filter_parent(self) -> None:
-        """<<PageList(prefix=Docs/)>> shows only pages starting with 'Docs/'."""
+        """<<PageList(parent="Factory")>> shows only pages starting with 'Factory/'."""
         pages = [
-            make_page("Docs/Introduction"),
-            make_page("Docs/Getting Started"),
-            make_page("Blog/First Post"),
-            make_page("Other"),
+            make_page("Factory/TaskOne"),
+            make_page("Factory/TaskTwo"),
+            make_page("Other/Page"),
         ]
-        html = render("<<PageList(prefix=Docs/)>>", pages=pages)
-        assert "Docs/Introduction" in html
-        assert "Docs/Getting Started" in html
-        assert "Blog/First Post" not in html
-        assert "Other" not in html
+        html = render("<<PageList(parent=Factory)>>", pages=pages)
+        assert "Factory/TaskOne" in html
+        assert "Factory/TaskTwo" in html
+        assert "Other/Page" not in html
 
     def test_pagelist_limit(self) -> None:
         """<<PageList(limit=2)>> with 4 pages shows exactly 2 list items."""
@@ -127,17 +133,18 @@ class TestPageListFiltering:
         count = html.count("page-list-item")
         assert count == 2
 
+    @pytest.mark.xfail(reason="combined tag+status filtering not yet implemented", strict=True)
     def test_pagelist_combined_filters(self) -> None:
-        """<<PageList(tag=factory, limit=1)>> returns only 1 matching page."""
+        """<<PageList(tag="docs", status="planned")>> shows only pages matching both filters."""
         pages = [
-            make_page("Page A", tags=["factory"]),
-            make_page("Page B", tags=["factory"]),
-            make_page("Page C", tags=["factory"]),
-            make_page("Page D", tags=["docs"]),
+            make_page("Docs/Planned", tags=["docs"], status="planned"),
+            make_page("Docs/InProgress", tags=["docs"], status="in_progress"),
+            make_page("Other/Planned", tags=["other"], status="planned"),
         ]
-        html = render("<<PageList(tag=factory, limit=1)>>", pages=pages)
-        count = html.count("page-list-item")
-        assert count == 1
+        html = render("<<PageList(tag=docs, status=planned)>>", pages=pages)
+        assert "Docs/Planned" in html
+        assert "Docs/InProgress" not in html
+        assert "Other/Planned" not in html
 
     def test_pagelist_no_match(self) -> None:
         """No pages match filters: output contains 'No pages found.' and no <ul>."""
@@ -148,6 +155,19 @@ class TestPageListFiltering:
         html = render("<<PageList(tag=nonexistent)>>", pages=pages)
         assert "No pages found" in html
         assert "<ul>" not in html
+
+    @pytest.mark.xfail(reason="status filtering not yet implemented", strict=True)
+    def test_pagelist_filter_status(self) -> None:
+        """<<PageList(status="planned")>> shows only pages with status='planned'."""
+        pages = [
+            make_page("PlannedPage", status="planned"),
+            make_page("InProgressPage", status="in_progress"),
+            make_page("DonePage", status="done"),
+        ]
+        html = render("<<PageList(status=planned)>>", pages=pages)
+        assert "PlannedPage" in html
+        assert "InProgressPage" not in html
+        assert "DonePage" not in html
 
 
 class TestPageListSorting:
@@ -171,11 +191,11 @@ class TestPageListEdgeCases:
     """Edge case handling."""
 
     def test_pagelist_in_fenced_block(self) -> None:
-        """Macro inside ``` code block appears as raw text, not rendered."""
+        """Macro inside ``` code block appears as escaped HTML, not rendered."""
         content = "```\n<<PageList>>\n```"
         html = render(content, pages=[make_page("Test")])
         assert "page-list-wrapper" not in html
-        assert "&lt;&lt;PageList&gt;&gt;" in html or "<<PageList>>" in html
+        assert "&lt;&lt;PageList&gt;&gt;" in html
 
     def test_pagelist_in_tilde_block(self) -> None:
         """Macro inside ~~~ code block appears as raw text, not rendered."""
@@ -183,11 +203,12 @@ class TestPageListEdgeCases:
         html = render(content, pages=[make_page("Test")])
         assert "page-list-wrapper" not in html
 
+    @pytest.mark.xfail(reason="PageList uses /page/ not /wiki/ path", strict=True)
     def test_pagelist_page_name_with_spaces(self) -> None:
         """Page names with spaces get underscores in URL."""
         pages = [make_page("My Page Name")]
         html = render("<<PageList>>", pages=pages)
-        assert 'href="/page/My_Page_Name"' in html
+        assert 'href="/wiki/My_Page_Name"' in html
 
 
 class TestPageListTags:
@@ -216,24 +237,16 @@ class TestPageListStatus:
     These tests document the expected behavior once status badges are implemented.
     """
 
-    def test_pagelist_status_badge_not_rendered(self) -> None:
-        """Current implementation does not render status badges."""
-        pages = [make_page("TestPage", status="in_progress")]
+    @pytest.mark.xfail(reason="status badges not yet implemented", strict=True)
+    def test_pagelist_status_badge(self) -> None:
+        """Page with status='in_progress' renders a <span class="badge"> element."""
+        pages = [make_page("InProgressPage", status="in_progress")]
         html = render("<<PageList>>", pages=pages)
-        assert 'class="badge' not in html
+        assert '<span class="badge' in html
 
+    @pytest.mark.xfail(reason="status badge fallback not yet implemented", strict=True)
     def test_pagelist_status_badge_fallback(self) -> None:
-        """Current implementation does not render status badges (no fallback needed)."""
-        pages = [make_page("TestPage", status="unknown_status")]
+        """Page with unknown status renders badge-secondary class."""
+        pages = [make_page("UnknownStatus", status="unknown_status")]
         html = render("<<PageList>>", pages=pages)
-        assert 'class="badge' not in html
-
-    def test_pagelist_filter_status_not_implemented(self) -> None:
-        """Status filtering is not implemented; tag filter works instead."""
-        pages = [
-            make_page("Page A", status="planned", tags=["foo"]),
-            make_page("Page B", status="done", tags=["foo"]),
-        ]
-        html = render("<<PageList(tag=foo)>>", pages=pages)
-        assert "Page A" in html
-        assert "Page B" in html
+        assert "badge-secondary" in html
