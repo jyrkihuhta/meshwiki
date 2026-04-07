@@ -215,7 +215,10 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
     """Build a hierarchical tree from flat page list.
 
     Each node: {"name": str, "title": str, "children": list[dict], "level": int}
-    Supports up to 3 levels of nesting.
+
+    Pages whose direct parent doesn't exist as a page (e.g. tasks moved into a
+    Done/ subfolder that has no wiki page) are attached to the nearest ancestor
+    that does exist, rather than being dumped at the tree root.
     """
     tree: list[dict] = []
     nodes: dict[str, dict] = {}
@@ -223,9 +226,6 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
     for page in sorted(pages, key=lambda p: p.name.lower()):
         parts = page.name.split("/")
         level = len(parts) - 1
-
-        if level > 2:
-            level = 2
 
         node = {
             "name": page.name,
@@ -238,9 +238,15 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
         if level == 0:
             tree.append(node)
         else:
-            parent_name = "/".join(parts[:-1])
-            if parent_name in nodes:
-                nodes[parent_name]["children"].append(node)
+            # Walk up ancestor chain until we find an existing parent node.
+            ancestor = None
+            for i in range(len(parts) - 1, 0, -1):
+                candidate = "/".join(parts[:i])
+                if candidate in nodes:
+                    ancestor = nodes[candidate]
+                    break
+            if ancestor is not None:
+                ancestor["children"].append(node)
             else:
                 tree.append(node)
 

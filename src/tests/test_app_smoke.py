@@ -11,6 +11,56 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from meshwiki.core.models import Page, PageMetadata
+from meshwiki.main import build_page_tree_sync
+
+# ---------------------------------------------------------------------------
+# build_page_tree_sync unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_pages(*names: str) -> list[Page]:
+    return [Page(name=n, content="", metadata=PageMetadata()) for n in names]
+
+
+def test_build_page_tree_flat():
+    pages = _make_pages("Alpha", "Beta", "Gamma")
+    tree = build_page_tree_sync(pages)
+    assert [n["name"] for n in tree] == ["Alpha", "Beta", "Gamma"]
+
+
+def test_build_page_tree_nested():
+    pages = _make_pages("Factory", "Factory/Macros", "Factory/Macros/Include")
+    tree = build_page_tree_sync(pages)
+    assert len(tree) == 1
+    macros = tree[0]["children"][0]
+    assert macros["name"] == "Factory/Macros"
+    assert macros["children"][0]["name"] == "Factory/Macros/Include"
+
+
+def test_build_page_tree_done_folder_attaches_to_nearest_ancestor():
+    """Tasks under Done/ (no wiki page) attach to the nearest existing ancestor."""
+    pages = _make_pages(
+        "Factory",
+        "Factory/Macros",
+        "Factory/Macros/Done/Task1",
+        "Factory/Macros/Done/Task2",
+    )
+    tree = build_page_tree_sync(pages)
+    assert len(tree) == 1
+    macros = tree[0]["children"][0]
+    assert macros["name"] == "Factory/Macros"
+    child_names = [c["name"] for c in macros["children"]]
+    assert "Factory/Macros/Done/Task1" in child_names
+    assert "Factory/Macros/Done/Task2" in child_names
+
+
+def test_build_page_tree_orphan_falls_back_to_root():
+    """Pages with no existing ancestor appear at tree root."""
+    pages = _make_pages("Orphan/Child")
+    tree = build_page_tree_sync(pages)
+    assert tree[0]["name"] == "Orphan/Child"
+
 
 @pytest.fixture()
 def wiki_app(tmp_path):
