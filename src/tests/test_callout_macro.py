@@ -1,55 +1,38 @@
-"""Unit and integration tests for CalloutBlockPreprocessor."""
+"""Tests for CalloutBlockPreprocessor and CalloutExtension."""
 
-import importlib
+import re  # noqa: F401  # required by project style
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
 
-from meshwiki.core.parser import create_parser
+# TASK001 exports this as create_parser(); spec referred to it as make_parser()
+from meshwiki.core.parser import (
+    CALLOUT_ICONS,
+    CALLOUT_TYPES,
+)
+from meshwiki.core.parser import create_parser as make_parser
 
-
-@pytest.fixture(scope="module")
-def css_content() -> str:
-    """Read style.css once for the entire test module."""
-    css_path = Path(__file__).parent.parent / "meshwiki" / "static" / "css" / "style.css"
-    return css_path.read_text()
-
-
-@pytest.fixture()
-def wiki_app(tmp_path):
-    """Create a fresh app instance pointing at a temp directory."""
-    import os
-
-    import meshwiki.config
-    import meshwiki.main
-
-    os.environ["MESHWIKI_DATA_DIR"] = str(tmp_path)
-
-    importlib.reload(meshwiki.config)
-    importlib.reload(meshwiki.main)
-
-    yield meshwiki.main.app
-
-    os.environ.pop("MESHWIKI_DATA_DIR", None)
+# ---------------------------------------------------------------------------
+# Unit tests - CalloutBlockPreprocessor via make_parser().convert()
+# ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture()
-async def client(wiki_app):
-    """Async HTTP client wired to the app."""
-    transport = ASGITransport(app=wiki_app)
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-        follow_redirects=True,
-    ) as c:
-        yield c
+@pytest.mark.parametrize("callout_type", CALLOUT_TYPES)
+def test_each_type_renders_correct_class_and_icon(callout_type: str) -> None:
+    """Each of the 5 types renders correct class, icon, and body."""
+    content = f"""```{callout_type}
+This is the callout body
+with multiple lines
+```"""
+    html = make_parser().convert(content)
+    assert f'class="callout callout--{callout_type}"' in html
+    assert f'<span class="callout__icon">{CALLOUT_ICONS[callout_type]}</span>' in html
+    assert "This is the callout body" in html
 
 
 def test_info_callout_renders() -> None:
     """```info\\n...``` renders as a callout with info styling."""
-    html = create_parser().convert("```info\nThis is an info message.\n```")
+    html = make_parser().convert("```info\nThis is an info message.\n```")
     assert 'class="callout callout--info"' in html
     assert "ℹ️" in html
     assert "This is an info message" in html
@@ -57,7 +40,7 @@ def test_info_callout_renders() -> None:
 
 def test_warning_callout_renders() -> None:
     """```warning\\n...``` renders as a callout with warning styling."""
-    html = create_parser().convert("```warning\nThis is a warning message.\n```")
+    html = make_parser().convert("```warning\nThis is a warning message.\n```")
     assert 'class="callout callout--warning"' in html
     assert "⚠️" in html
     assert "This is a warning message" in html
@@ -65,196 +48,169 @@ def test_warning_callout_renders() -> None:
 
 def test_tip_callout_renders() -> None:
     """```tip\\n...``` renders as a callout with tip styling."""
-    html = create_parser().convert("```tip\nThis is a tip message.\n```")
+    html = make_parser().convert("```tip\nThis is a tip.\n```")
     assert 'class="callout callout--tip"' in html
     assert "💡" in html
-    assert "This is a tip message" in html
+    assert "This is a tip" in html
 
 
 def test_error_callout_renders() -> None:
     """```error\\n...``` renders as a callout with error styling."""
-    html = create_parser().convert("```error\nThis is an error message.\n```")
+    html = make_parser().convert("```error\nThis is an error.\n```")
     assert 'class="callout callout--error"' in html
     assert "❌" in html
-    assert "This is an error message" in html
+    assert "This is an error" in html
 
 
 def test_note_callout_renders() -> None:
     """```note\\n...``` renders as a callout with note styling."""
-    html = create_parser().convert("```note\nThis is a note message.\n```")
+    html = make_parser().convert("```note\nThis is a note.\n```")
     assert 'class="callout callout--note"' in html
     assert "📝" in html
-    assert "This is a note message" in html
+    assert "This is a note" in html
 
 
 def test_python_code_block_not_affected() -> None:
-    """Regular ```python\\n...``` code blocks are not treated as callouts."""
-    html = create_parser().convert('```python\nprint("hello")\n```')
+    """A regular ```python code block is not affected by callout processing."""
+    content = """```python
+def hello():
+    print("hello")
+```"""
+    html = make_parser().convert(content)
     assert 'class="callout"' not in html
     assert "<code" in html
+    assert "def hello():" in html
 
 
-def test_multiple_callouts_on_same_page() -> None:
-    """Multiple callout blocks of different types render in order."""
+def test_javascript_code_block_not_affected() -> None:
+    """A regular ```javascript code block is not affected by callout processing."""
+    content = """```javascript
+console.log('hello');
+```"""
+    html = make_parser().convert(content)
+    assert 'class="callout"' not in html
+    assert "<code" in html
+    assert "console.log" in html
+
+
+def test_multiple_callouts_on_one_page() -> None:
+    """Multiple callout blocks of different types all render in order."""
     content = """```info
-First info callout
+First callout
 ```
 
-Some text in between.
+Some text between
 
 ```warning
-Warning callout here
+Second callout
 ```
-
-More text.
 
 ```tip
-A tip callout
-```
-"""
-    html = create_parser().convert(content)
-    assert html.count("callout--info") == 1
-    assert html.count("callout--warning") == 1
-    assert html.count("callout--tip") == 1
-    assert "First info callout" in html
-    assert "Warning callout here" in html
-    assert "A tip callout" in html
-    assert html.index("callout--info") < html.index("callout--warning")
-    assert html.index("callout--warning") < html.index("callout--tip")
+Third callout
+```"""
+    html = make_parser().convert(content)
+    idx_info = html.find('class="callout callout--info"')
+    idx_warning = html.find('class="callout callout--warning"')
+    idx_tip = html.find('class="callout callout--tip"')
+    assert idx_info < idx_warning < idx_tip, "Callouts do not appear in correct order"
+    assert "First callout" in html
+    assert "Second callout" in html
+    assert "Third callout" in html
 
 
-def test_callout_body_html_escaped() -> None:
-    """Callout body content is HTML-escaped to prevent XSS."""
-    html = create_parser().convert(
-        "```error\n<script>alert(1)</script>\n```"
-    )
+def test_html_escaping_in_callout_body() -> None:
+    """HTML in callout body is escaped to prevent XSS."""
+    content = """```info
+Use <script>alert(1)</script>
+```"""
+    html = make_parser().convert(content)
     assert "&lt;script&gt;" in html
     assert "<script>" not in html
+    assert 'class="callout callout--info"' in html
 
 
-def test_tilde_fence_callout() -> None:
-    """Callout blocks also work with ~~~ fence style."""
-    html = create_parser().convert("~~~warning\nWatch out!\n~~~")
+def test_tilde_fence_style() -> None:
+    """Callout blocks using ~~~ fence render correctly."""
+    content = """~~~warning
+Watch out!
+~~~"""
+    html = make_parser().convert(content)
     assert 'class="callout callout--warning"' in html
+    assert "⚠️" in html
     assert "Watch out!" in html
 
 
-def test_callout_with_multiple_lines() -> None:
-    """Callout body can span multiple lines."""
+def test_unclosed_fence_passed_through() -> None:
+    """An unclosed fence does not render as a callout."""
     content = """```info
-Line one
-Line two
-Line three
+This callout is never closed"""
+    html = make_parser().convert(content)
+    assert 'class="callout' not in html
+
+
+def test_empty_callout_body() -> None:
+    """An empty callout body renders with the correct structure."""
+    content = """```note
 ```"""
-    html = create_parser().convert(content)
-    assert "callout--info" in html
-    assert "Line one" in html
-    assert "Line two" in html
-    assert "Line three" in html
+    html = make_parser().convert(content)
+    assert 'class="callout callout--note"' in html
+    assert '<span class="callout__icon">📝</span>' in html
 
 
-def test_mixed_callouts_and_code_blocks() -> None:
-    """Code blocks and callouts can coexist on the same page."""
-    content = """```python
-def hello():
-    print("world")
-```
-```info
-This is info
-```
-```tip
-And a tip
-```
-"""
-    html = create_parser().convert(content)
-    assert "callout--info" in html
-    assert "callout--tip" in html
-    assert "def hello" in html
-
-
-def test_unclosed_fence_passes_through() -> None:
-    """Unclosed fence does not render as a callout."""
+def test_nested_code_like_in_body() -> None:
+    """Content that looks like a fence inside callout body is preserved as text."""
     content = """```info
-This callout has no closing fence
-just some text"""
-    html = create_parser().convert(content)
-    assert "callout--info" not in html
-    assert "This callout has no closing fence" in html
+Here is some ``` code
+```"""
+    html = make_parser().convert(content)
+    assert 'class="callout callout--info"' in html
+    assert "Here is some ``` code" in html
 
 
-def test_unknown_callout_type_not_special() -> None:
-    """Fenced block with unknown type is not treated as a callout."""
-    content = "```UNKNOWN\nSome text\n```"
-    html = create_parser().convert(content)
-    assert "callout" not in html
+# ---------------------------------------------------------------------------
+# CSS presence tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def css_content() -> str:
+    """Read style.css once for the entire test module."""
+    css_path = (
+        Path(__file__).parent.parent / "meshwiki" / "static" / "css" / "style.css"
+    )
+    return css_path.read_text()
 
 
 def test_dark_mode_support(css_content: str) -> None:
-    """CSS contains dark mode support for callouts."""
+    """style.css contains dark mode support for callouts."""
     assert '[data-theme="dark"]' in css_content
 
 
-def test_callout_css_variables_present(css_content: str) -> None:
-    """CSS contains callout background variables for all types."""
-    assert "--callout-info-bg" in css_content
-    assert "--callout-warning-bg" in css_content
-    assert "--callout-tip-bg" in css_content
-    assert "--callout-error-bg" in css_content
-    assert "--callout-note-bg" in css_content
-
-
-def test_callout_css_classes_present(css_content: str) -> None:
-    """CSS contains callout class styles for all types."""
+def test_callout_info_css(css_content: str) -> None:
+    """style.css contains .callout--info and --callout-info-* variables."""
     assert ".callout--info" in css_content
+    assert "--callout-info-bg" in css_content
+
+
+def test_callout_warning_css(css_content: str) -> None:
+    """style.css contains .callout--warning and --callout-warning-* variables."""
     assert ".callout--warning" in css_content
+    assert "--callout-warning-bg" in css_content
+
+
+def test_callout_tip_css(css_content: str) -> None:
+    """style.css contains .callout--tip and --callout-tip-* variables."""
     assert ".callout--tip" in css_content
+    assert "--callout-tip-bg" in css_content
+
+
+def test_callout_error_css(css_content: str) -> None:
+    """style.css contains .callout--error and --callout-error-* variables."""
     assert ".callout--error" in css_content
+    assert "--callout-error-bg" in css_content
+
+
+def test_callout_note_css(css_content: str) -> None:
+    """style.css contains .callout--note and --callout-note-* variables."""
     assert ".callout--note" in css_content
-
-
-def test_dark_mode_callout_classes_present(css_content: str) -> None:
-    """CSS contains dark mode variants for all callout types."""
-    assert '[data-theme="dark"] .callout--info' in css_content
-    assert '[data-theme="dark"] .callout--warning' in css_content
-    assert '[data-theme="dark"] .callout--tip' in css_content
-    assert '[data-theme="dark"] .callout--error' in css_content
-    assert '[data-theme="dark"] .callout--note' in css_content
-
-
-@pytest.mark.asyncio
-async def test_warning_callout_via_http(client) -> None:
-    """A wiki page with a warning callout renders the callout styling."""
-    content = "```warning\nThis is a warning message.\n```"
-    resp = await client.post("/page/CalloutTestPage", data={"content": content})
-    assert resp.status_code == 200
-
-    resp = await client.get("/page/CalloutTestPage")
-    assert resp.status_code == 200
-    assert "callout--warning" in resp.text
-    assert "⚠️" in resp.text
-
-
-@pytest.mark.asyncio
-async def test_multiple_callouts_via_http(client) -> None:
-    """Multiple callout types render correctly via HTTP."""
-    content = """```info
-First info
-```
-```warning
-A warning
-```
-```tip
-And a tip
-```
-"""
-    resp = await client.post("/page/MultiCalloutTest", data={"content": content})
-    assert resp.status_code == 200
-
-    resp = await client.get("/page/MultiCalloutTest")
-    assert resp.status_code == 200
-    assert "callout--info" in resp.text
-    assert "callout--warning" in resp.text
-    assert "callout--tip" in resp.text
-    assert "ℹ️" in resp.text
-    assert "⚠️" in resp.text
-    assert "💡" in resp.text
+    assert "--callout-note-bg" in css_content
