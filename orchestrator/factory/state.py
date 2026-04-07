@@ -8,6 +8,18 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
+def _merge_subtasks(current: list, update: list) -> list:
+    """Merge subtask lists by ID — update wins per-ID.
+
+    Required so parallel grinder nodes can each write back the full subtasks
+    list without LangGraph raising INVALID_CONCURRENT_GRAPH_UPDATE.
+    """
+    merged: dict = {s["id"]: s for s in (current or [])}
+    for s in update or []:
+        merged[s["id"]] = s
+    return list(merged.values())
+
+
 class SubTask(TypedDict):
     """Represents a single unit of work assigned to a grinder agent."""
 
@@ -48,7 +60,7 @@ class FactoryState(TypedDict):
     requirements: str  # full page content (markdown)
 
     # Decomposition
-    subtasks: list[SubTask]
+    subtasks: Annotated[list[SubTask], _merge_subtasks]
     decomposition_approved: bool
 
     # Execution
