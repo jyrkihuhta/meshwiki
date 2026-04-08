@@ -613,7 +613,7 @@ async def grind_subtask_e2b(
             f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
         )
         result = await sbx.commands.run(
-            f"git clone --branch {base_branch} {clone_url} /tmp/repo",
+            f"git clone --depth 1 --branch {base_branch} {clone_url} /tmp/repo",
             timeout=0,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
@@ -623,7 +623,7 @@ async def grind_subtask_e2b(
 
         # Install Python deps
         await sbx.commands.run(
-            "cd /tmp/repo && pip install -e '.[dev]' -q",
+            "cd /tmp/repo && pip install -e '.[dev]' -q --no-cache-dir",
             timeout=0,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
