@@ -77,6 +77,24 @@ async def task_intake_node(state: FactoryState) -> dict:
             "error": f"unsupported page type: {page_type}",
         }
 
+    # Guardrail: reject subtask pages to prevent duplicate top-level graph runs.
+    # When escalation retries a failed subtask it transitions the page back to
+    # in_progress, firing task.assigned — which would start a second graph run
+    # alongside the parent graph that already manages the subtask internally.
+    if metadata.get("parent_task"):
+        logger.warning(
+            "task_intake: page %s is a subtask (parent_task=%r) — "
+            "subtask pages must not be run as top-level factory tasks; aborting",
+            task_wiki_page,
+            metadata.get("parent_task"),
+        )
+        return {
+            "title": task_wiki_page,
+            "requirements": "",
+            "graph_status": "failed",
+            "error": "subtask pages must not be run as top-level factory tasks",
+        }
+
     title: str = metadata.get("title", task_wiki_page)
     requirements: str = page.get("content", "")
 

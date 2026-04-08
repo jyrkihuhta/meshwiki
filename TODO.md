@@ -127,6 +127,12 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [ ] Signed grinder commits — GitHub App token or GPG key in E2B sandbox
 - [ ] Redecompose escalation — implement `"redecompose"` decision in `escalate_node`
 - [ ] Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
+- [ ] Per-subtask PM review — currently PM review waits for ALL grinders to finish before reviewing any; restructure so each grind instance fans out to its own `pm_review` via `Send()`, unblocking fast subtasks from slow rework cycles
+- [ ] Stable page identity via UUID — terminal session keys, WebSocket lookups, and graph thread IDs all use the fragile human-readable page name (spaces/underscores/special chars cause mismatch bugs). Root cause: wiki URLs encode spaces as underscores, but page names can also contain real underscores (e.g. `get_engine()`), making the two indistinguishable in a URL. Add a `uuid` frontmatter field generated on page creation; use it as the canonical key everywhere internally, keeping the page name only for display/URL routing
+- [ ] E2B sandbox disk optimisation — shallow clone (`git clone --depth 1`) to avoid pulling full git history; `pip install --no-cache-dir` to avoid accumulating pip cache; these reduce the risk of SIGBUS from disk exhaustion late in the run (`grinder_agent.py` lines 616, 625)
+- [ ] Orchestrator dep install in grinder — tasks touching `orchestrator/` fail tests with `ModuleNotFoundError` because the grinder only runs `pip install -e '.[dev]'` from the repo root (meshwiki deps only). Either add `cd orchestrator && pip install -e '.[dev]'` to the bootstrap, or detect from task files which install step is needed
+- [ ] Pre-bake Python deps into E2B template — `pip install -e '.[dev]'` runs from scratch every grind session; baking deps into the `meshwiki-grinder` E2B template snapshot would make this near-instant and eliminate a large chunk of per-run disk/time overhead (requires rebuilding the template via `e2b template build`)
+- [ ] Fan-in state merge bug — when parallel grinders finish at different times, `collect_results` sees a merged subtasks list that drops the failed status of earlier-finishing subtasks; investigate LangGraph reducer annotation on `subtasks` / `failed_subtask_ids` fields in `FactoryState` and add an `Annotated` reducer so all branch updates are correctly combined
 
 **Key files:** `orchestrator/factory/cost.py` (new), `orchestrator/factory/nodes/assign.py`, `orchestrator/factory/agents/pm_agent.py`, `orchestrator/factory/agents/grinder_agent.py`, `orchestrator/factory/integrations/`
 
@@ -174,6 +180,7 @@ Document the extension system and add useful built-in macros.
 - [x] `<<NewPage(Template, "Label", Parent)>>` macro — inline form to create page from template
 - [ ] Live MetaTable refresh — wire WebSocket `page_updated` events to trigger HTMX re-fetch of MetaTable sections without full page reload
 - [ ] Macro escape syntax — preprocessors skip inline backtick spans and honor `\<<MacroName>>` as a literal `<<MacroName>>` (currently any bare `<<Macro>>` in prose triggers the preprocessor)
+- [ ] `<<TaskStatus>>` rework edge — if a task has been returned from `review` back to `in_progress` at least once, show the back-edge in the Mermaid state diagram with the retry count as an edge label (e.g. `review -->|×2| in_progress`); read attempt count from `subtask["attempt"]` or a dedicated `rework_count` field in frontmatter
 **Key files:** `core/parser.py` (new extensions), `docs/custom-macros.md`
 
 ### Milestone 12: Authentication
