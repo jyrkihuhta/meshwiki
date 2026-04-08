@@ -566,6 +566,10 @@ async def grind_subtask_e2b(
                 "KILO_API_KEY": settings.minimax_api_key,
                 "GITHUB_TOKEN": settings.github_token,
                 "GH_TOKEN": settings.github_token,
+                # Enable full colour output so Kilo renders its TUI properly
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "FORCE_COLOR": "1",
             },
         )
         logger.info("e2b grinder: sandbox created for subtask %s", subtask["id"])
