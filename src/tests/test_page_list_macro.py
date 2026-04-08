@@ -1,6 +1,9 @@
 """Unit tests for the <<PageList>> macro."""
 
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from meshwiki.core.models import Page, PageMetadata
 from meshwiki.core.parser import parse_wiki_content
@@ -28,11 +31,24 @@ def make_page(
     )
 
 
-def render(text: str, pages: list[Page] | None = None) -> str:
-    """Render text through the parser, passing pages directly as all_pages."""
-    if pages is None:
-        pages = []
-    return parse_wiki_content(text, all_pages=pages)
+def make_engine(pages: list) -> MagicMock:
+    """Return a MagicMock engine whose list_pages_with_metadata() returns pages."""
+    engine = MagicMock()
+    engine.list_pages_with_metadata.return_value = pages
+    return engine
+
+
+def render(text: str, pages: list, **kwargs) -> str:
+    """Render wiki text with a mocked engine supplying pages.
+
+    Patch target is 'meshwiki.core.parser.get_engine' — the site where
+    PageListPreprocessor imports/calls it (patch where used, not defined).
+    Uses create=True because on some branches get_engine is not yet imported
+    at that location.
+    """
+    engine = make_engine(pages)
+    with patch("meshwiki.core.parser.get_engine", return_value=engine, create=True):
+        return parse_wiki_content(text, **kwargs)
 
 
 class TestPageListBasic:
@@ -179,3 +195,15 @@ class TestPageListTags:
         pages = [make_page("NoTagsPage", tags=[])]
         html = render("<<PageList>>", pages=pages)
         assert "page-list-tags" not in html
+
+
+class TestPageListEngineUnavailable:
+    """Tests for graceful degradation when the graph engine is unavailable."""
+
+    def test_page_list_engine_unavailable(self):
+        """When get_engine() returns None, PageList should not raise."""
+        with patch(
+            "meshwiki.core.parser.get_engine", return_value=None, create=True
+        ):
+            html = parse_wiki_content("<<PageList>>")
+        assert html is not None
