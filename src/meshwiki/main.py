@@ -725,7 +725,12 @@ async def ws_terminal(websocket: WebSocket, name: str):
     from meshwiki.core.terminal_sessions import get_session, subscribe, unsubscribe
 
     await websocket.accept()
-    name = name.replace("_", " ")
+    # The URL encodes spaces as underscores (wiki convention), but page names
+    # may also contain underscores that are part of the name (e.g. get_engine()).
+    # Try the decoded name verbatim first; only fall back to replacing all
+    # underscores with spaces if no session is found under the original name.
+    if get_session(name) is None:
+        name = name.replace("_", " ")
     session = get_session(name)
     if session is None:
         await websocket.send_text(
