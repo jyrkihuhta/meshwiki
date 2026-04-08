@@ -12,6 +12,8 @@ from markdown.extensions import Extension
 from markdown.inlinepatterns import InlineProcessor, SimpleTagInlineProcessor
 from markdown.preprocessors import Preprocessor
 
+from meshwiki.core.graph import get_engine
+
 # Pattern for wiki links: [[PageName]] or [[PageName|Display Text]]
 WIKI_LINK_PATTERN = r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]"
 
@@ -886,11 +888,16 @@ def _render_page_list(args_str: str | None, all_pages: list) -> str:
 class PageListPreprocessor(Preprocessor):
     """Preprocessor that replaces <<PageList(...)>> macros with an HTML list."""
 
-    def __init__(self, md: Markdown, all_pages: list | None = None):
+    def __init__(self, md: Markdown):
         super().__init__(md)
-        self.all_pages = all_pages or []
 
     def run(self, lines: list[str]) -> list[str]:
+        engine = get_engine()
+        if engine is None:
+            return lines
+
+        pages = engine.list_pages_with_metadata()
+
         text = "\n".join(lines)
         if "<<PageList" not in text:
             return lines
@@ -907,7 +914,7 @@ class PageListPreprocessor(Preprocessor):
 
         def replace_match(m: re.Match) -> str:
             args_str = m.group(1)
-            html = _render_page_list(args_str, self.all_pages)
+            html = _render_page_list(args_str, pages)
             return self.md.htmlStash.store(html)
 
         text = PAGELIST_PATTERN.sub(replace_match, text)
@@ -921,13 +928,9 @@ class PageListPreprocessor(Preprocessor):
 class PageListExtension(Extension):
     """Markdown extension for <<PageList(...)>> macros."""
 
-    def __init__(self, all_pages: list | None = None, **kwargs):
-        self.all_pages = all_pages or []
-        super().__init__(**kwargs)
-
     def extendMarkdown(self, md: Markdown) -> None:
         md.preprocessors.register(
-            PageListPreprocessor(md, self.all_pages),
+            PageListPreprocessor(md),
             "pagelist",
             28,
         )
@@ -1594,7 +1597,6 @@ def create_parser(
     page_name: str | None = None,
     page_metadata: dict | None = None,
     recent_pages: list | None = None,
-    all_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
 ) -> Markdown:
@@ -1606,7 +1608,6 @@ def create_parser(
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
-        all_pages: List of all Page objects for PageList macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
 
@@ -1636,7 +1637,7 @@ def create_parser(
             RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
-            PageListExtension(all_pages=all_pages),  # <<PageList(...)>>
+            PageListExtension(),  # <<PageList(...)>>
             IncludeExtension(
                 page_contents=page_contents or {},
                 include_chain=include_chain or [],
@@ -1653,7 +1654,6 @@ def parse_wiki_content(
     page_name: str | None = None,
     page_metadata: dict | None = None,
     recent_pages: list | None = None,
-    all_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
 ) -> str:
@@ -1665,7 +1665,6 @@ def parse_wiki_content(
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
-        all_pages: List of all Page objects for PageList macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
 
@@ -1677,7 +1676,6 @@ def parse_wiki_content(
         page_name=page_name,
         page_metadata=page_metadata,
         recent_pages=recent_pages,
-        all_pages=all_pages,
         page_contents=page_contents,
         include_chain=include_chain or [],
     )
@@ -1690,7 +1688,6 @@ def parse_wiki_content_with_toc(
     page_name: str | None = None,
     page_metadata: dict | None = None,
     recent_pages: list | None = None,
-    all_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
 ) -> tuple[str, str]:
@@ -1702,7 +1699,6 @@ def parse_wiki_content_with_toc(
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
-        all_pages: List of all Page objects for PageList macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
 
@@ -1714,7 +1710,6 @@ def parse_wiki_content_with_toc(
         page_name=page_name,
         page_metadata=page_metadata,
         recent_pages=recent_pages,
-        all_pages=all_pages,
         page_contents=page_contents,
         include_chain=include_chain or [],
     )

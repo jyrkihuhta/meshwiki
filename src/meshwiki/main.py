@@ -419,9 +419,9 @@ async def view_page(request: Request, name: str):
     if isinstance(page_type, list):
         page_type = page_type[0] if page_type else ""
     if page_type == "epic":
-        all_pages = await storage.list_pages_with_metadata()
+        all_pages_for_epic = await storage.list_pages_with_metadata()
         child_tasks = []
-        for p in all_pages:
+        for p in all_pages_for_epic:
             if p.metadata is None:
                 continue
             meta = p.metadata.model_dump()
@@ -443,9 +443,9 @@ async def view_page(request: Request, name: str):
         page_metadata["_child_tasks"] = child_tasks
 
     # Fetch recent pages for <<RecentChanges>> macro.
-    all_pages = await storage.list_pages_with_metadata()
+    all_pages_for_recent = await storage.list_pages_with_metadata()
     recent_pages = sorted(
-        [p for p in all_pages if p.metadata.modified],
+        [p for p in all_pages_for_recent if p.metadata.modified],
         key=lambda p: p.metadata.modified,
         reverse=True,
     )
@@ -466,7 +466,6 @@ async def view_page(request: Request, name: str):
         page_name=name,
         page_metadata=page_metadata,
         recent_pages=recent_pages,
-        all_pages=all_pages,
         page_contents=page_contents,
     )
 
