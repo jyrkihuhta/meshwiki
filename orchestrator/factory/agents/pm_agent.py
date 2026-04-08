@@ -32,9 +32,14 @@ MeshWiki tech stack: FastAPI, Jinja2, HTMX, Python 3.12+, Rust (graph engine via
 All code must follow PEP 8, have type hints, use async/await for storage, and include tests.
 
 When decomposing:
-- Prefer SMALL, ATOMIC subtasks — split "add class X to file Y" and "register X in
-  create_parser()" into separate subtasks. One subtask = one focused change. Smaller scope
-  means fewer things the grinder can get wrong.
+- Subtasks must be FLAT — never create subtasks of subtasks. Every subtask's
+  `wiki_page` must be a direct child of the parent task page, e.g.
+  "Factory/MyEpic/TASK001 - Do the thing". Never use a path like
+  "Factory/MyEpic/TASK001/TASK001a - Sub-thing". There is no nesting.
+- Prefer SMALL, ATOMIC subtasks. One subtask = one focused file change. Smaller
+  scope means fewer things the grinder can get wrong.
+- The task requirements specify how many subtasks to create — follow that exactly.
+  Do not split further unless the requirements explicitly ask for it.
 - Subtasks must be as independent as possible (minimize file overlap)
 - Include file paths you expect will be touched in each subtask
 - Write clear acceptance criteria

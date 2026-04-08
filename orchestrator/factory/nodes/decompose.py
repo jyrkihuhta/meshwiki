@@ -106,6 +106,31 @@ async def decompose_node(state: FactoryState) -> dict:
 
     parent_task = state.get("task_wiki_page", "")
 
+    # Guard: reject any subtask whose wiki_page is more than one level below
+    # the parent task — the PM must not create nested subtasks.
+    valid_subtasks = []
+    for subtask in subtasks:
+        page = subtask["wiki_page"]
+        expected_prefix = parent_task + "/"
+        relative = page[len(expected_prefix):] if page.startswith(expected_prefix) else page
+        if "/" in relative:
+            logger.error(
+                "decompose: rejecting nested subtask %s (parent=%s) — "
+                "subtask wiki_page must be a direct child of the parent task",
+                page,
+                parent_task,
+            )
+            continue
+        valid_subtasks.append(subtask)
+
+    if len(valid_subtasks) != len(subtasks):
+        logger.warning(
+            "decompose: dropped %d nested subtask(s) out of %d",
+            len(subtasks) - len(valid_subtasks),
+            len(subtasks),
+        )
+    subtasks = valid_subtasks
+
     for subtask in subtasks:
         page_content = _build_subtask_page(subtask, parent_task)
         try:
