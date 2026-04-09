@@ -137,7 +137,7 @@
         if (toast) {
             url.searchParams.delete('toast');
             window.history.replaceState({}, '', url);
-            var messages = {saved: 'Page saved', deleted: 'Page deleted'};
+            var messages = {saved: 'Page saved', deleted: 'Page deleted', restored: 'Page restored'};
             showToast(messages[toast] || toast, 'success');
         }
     })();

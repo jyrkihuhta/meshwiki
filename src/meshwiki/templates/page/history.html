@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}History: {{ page_name }} - {{ app_title }}{% endblock %}
+
+{% block content %}
+<div class="page-history">
+    <div class="page-header-wrapper">
+        <header class="page-header">
+            <div class="page-header-left">
+                <nav class="breadcrumb" aria-label="breadcrumb">
+                    <a href="/">Home</a>
+                    /
+                    <a href="/page/{{ page_name.replace(' ', '_') }}">{{ page_name }}</a>
+                    /
+                    <span>History</span>
+                </nav>
+                <h1>History: {{ page_name }}</h1>
+            </div>
+            <div class="page-actions">
+                <a href="/page/{{ page_name.replace(' ', '_') }}" class="btn">Back to page</a>
+            </div>
+        </header>
+    </div>
+
+    {% if revisions %}
+    <div class="page-list-table-wrap">
+        <table class="page-list-table history-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Note</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for rev in revisions %}
+                <tr>
+                    <td class="history-rev">{{ rev.revision }}</td>
+                    <td class="page-list-date">
+                        <time datetime="{{ rev.timestamp.isoformat() }}"
+                              title="{{ rev.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}">{{ rev.timestamp | timeago }}</time>
+                    </td>
+                    <td>
+                        <span class="history-badge history-badge--{{ rev.operation }}">{{ rev.operation_label }}</span>
+                    </td>
+                    <td class="history-message">{{ rev.message }}</td>
+                    <td class="history-actions">
+                        <a href="/page/{{ page_name.replace(' ', '_') }}/history/{{ rev.revision }}" class="btn btn-small">View</a>
+                        {% if not loop.first %}
+                        <a href="/page/{{ page_name.replace(' ', '_') }}/diff/{{ rev.revision - 1 }}..{{ rev.revision }}" class="btn btn-small">Diff</a>
+                        {% endif %}
+                        {% if loop.first and total > 1 %}
+                        <a href="/page/{{ page_name.replace(' ', '_') }}/diff/{{ rev.revision - 1 }}..{{ rev.revision }}" class="btn btn-small">Diff</a>
+                        {% endif %}
+                        {% if loop.index > 1 or (loop.first and loop.last) %}
+                        {% else %}
+                        {% endif %}
+                        <form method="post"
+                              action="/page/{{ page_name.replace(' ', '_') }}/restore/{{ rev.revision }}"
+                              onsubmit="return confirm('Restore &quot;{{ page_name }}&quot; to revision {{ rev.revision }}?');"
+                              style="display:inline">
+                            <button type="submit" class="btn btn-small btn-primary">Restore</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if total > per_page %}
+    <nav class="pagination">
+        {% if page > 1 %}
+        <a href="?page={{ page - 1 }}" class="btn btn-small">&laquo; Newer</a>
+        {% endif %}
+        <span class="pagination-info">{{ (page - 1) * per_page + 1 }}–{{ [page * per_page, total] | min }} of {{ total }}</span>
+        {% if page * per_page < total %}
+        <a href="?page={{ page + 1 }}" class="btn btn-small">Older &raquo;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+
+    {% else %}
+    <p class="empty-state">No revision history available. History tracking begins with the next edit.</p>
+    {% endif %}
+</div>
+{% endblock %}

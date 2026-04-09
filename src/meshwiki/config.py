@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     auth_password: str = ""
     session_secret: str = "dev-secret-change-in-production"
 
+    # Version history
+    history_enabled: bool = True
+
     # Agent factory
     factory_enabled: bool = False
     factory_api_key: str = ""

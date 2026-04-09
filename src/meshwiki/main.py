@@ -33,7 +33,11 @@ from meshwiki.auth import (
     verify_password,
 )
 from meshwiki.config import settings
-from meshwiki.core.dependencies import set_storage
+from meshwiki.core.dependencies import (
+    get_revision_store,
+    set_revision_store,
+    set_storage,
+)
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
 from meshwiki.core.logging import configure_logging, get_logger
 from meshwiki.core.metrics import (
@@ -50,6 +54,7 @@ from meshwiki.core.parser import (
     parse_wiki_content_with_toc,
     word_count,
 )
+from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.ws_manager import manager
 
@@ -194,8 +199,15 @@ templates.env.filters["timeago"] = timeago_filter
 templates.env.globals["word_count"] = word_count
 
 # Initialize storage
-storage = FileStorage(settings.data_dir)
+_revision_store = (
+    RevisionStore(settings.data_dir / ".revisions.db")
+    if settings.history_enabled
+    else None
+)
+storage = FileStorage(settings.data_dir, revision_store=_revision_store)
 set_storage(storage)
+if _revision_store is not None:
+    set_revision_store(_revision_store)
 
 # Mount factory API if enabled
 if settings.factory_enabled:
@@ -372,6 +384,133 @@ async def raw_page(name: str):
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
     return {"content": page.content}
+
+
+@app.get("/page/{name:path}/history", response_class=HTMLResponse)
+async def page_history(request: Request, name: str, page: int = 1):
+    """Show revision history for a page."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    per_page = 25
+    offset = (page - 1) * per_page
+    revisions = store.list_revisions(name, limit=per_page, offset=offset)
+    total = store.revision_count(name)
+    return templates.TemplateResponse(
+        request,
+        "page/history.html",
+        get_context(
+            page_name=name,
+            revisions=revisions,
+            total=total,
+            page=page,
+            per_page=per_page,
+            page_tree=await get_page_tree(),
+        ),
+    )
+
+
+@app.get("/page/{name:path}/history/{rev:int}", response_class=HTMLResponse)
+async def page_revision(request: Request, name: str, rev: int):
+    """Show a specific past revision of a page."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    revision = store.get_revision(name, rev)
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    html_content = parse_wiki_content(revision.content)
+
+    total = store.revision_count(name)
+    prev_rev = rev - 1 if rev > 1 else None
+    next_rev = rev + 1 if rev < total else None
+
+    return templates.TemplateResponse(
+        request,
+        "page/revision.html",
+        get_context(
+            page_name=name,
+            revision=revision,
+            html_content=html_content,
+            prev_rev=prev_rev,
+            next_rev=next_rev,
+            page_tree=await get_page_tree(),
+        ),
+    )
+
+
+@app.post("/page/{name:path}/restore/{rev:int}")
+async def restore_page(name: str, rev: int):
+    """Restore a page to a specific revision."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    old_revision = store.get_revision(name, rev)
+    if old_revision is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    await storage.save_page(name, old_revision.content)
+    latest = store.get_latest_revision(name)
+    if latest is not None:
+        with store._conn:
+            store._conn.execute(
+                "UPDATE revisions SET operation = 'restore', message = ? WHERE id = ?",
+                (f"Restored from revision {rev}", latest.id),
+            )
+    log.info("page_restored", page=name, revision=rev)
+    return RedirectResponse(
+        url=f"/page/{name.replace(' ', '_')}?toast=restored", status_code=302
+    )
+
+
+@app.get("/page/{name:path}/diff/{rev_range}", response_class=HTMLResponse)
+async def page_diff(request: Request, name: str, rev_range: str):
+    """Show diff between two revisions.  Format: 'A..B' or single rev N (diffs N-1..N)."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+
+    if ".." in rev_range:
+        parts = rev_range.split("..", 1)
+        try:
+            rev_a, rev_b = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid revision range")
+    else:
+        try:
+            rev_b = int(rev_range)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid revision number")
+        rev_a = rev_b - 1
+
+    if rev_a < 1:
+        raise HTTPException(
+            status_code=400, detail="No earlier revision to compare against"
+        )
+
+    revision_a = store.get_revision(name, rev_a)
+    revision_b = store.get_revision(name, rev_b)
+    if revision_a is None or revision_b is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    diff = store.diff_revisions(name, rev_a, rev_b)
+    return templates.TemplateResponse(
+        request,
+        "page/diff.html",
+        get_context(
+            page_name=name,
+            rev_a=rev_a,
+            rev_b=rev_b,
+            revision_a=revision_a,
+            revision_b=revision_b,
+            diff=diff,
+            page_tree=await get_page_tree(),
+        ),
+    )
 
 
 @app.get("/page/{name:path}", response_class=HTMLResponse)

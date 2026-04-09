@@ -26,6 +26,7 @@
             </div>
             <div class="page-actions">
                 <a href="/page/{{ page.name.replace(' ', '_') }}/edit" class="btn">Edit</a>
+                <a href="/page/{{ page.name.replace(' ', '_') }}/history" class="btn">History</a>
                 <form method="post" action="/page/{{ page.name.replace(' ', '_') }}/delete"
                       onsubmit="return confirm('Delete &quot;{{ page.title }}&quot;? This cannot be undone.');"
                       style="display:inline">

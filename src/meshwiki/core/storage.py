@@ -4,10 +4,14 @@ import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from meshwiki.core.models import Page, PageMetadata
+
+if TYPE_CHECKING:
+    from meshwiki.core.revision_store import RevisionStore
 
 
 class Storage(ABC):
@@ -100,9 +104,10 @@ class FileStorage(Storage):
         re.DOTALL,
     )
 
-    def __init__(self, base_path: Path):
+    def __init__(self, base_path: Path, revision_store: "RevisionStore | None" = None):
         self.base_path = base_path
         self.base_path.mkdir(parents=True, exist_ok=True)
+        self._revisions = revision_store
 
     def _get_path(self, name: str) -> Path:
         """Get full path for a page.
@@ -190,7 +195,14 @@ class FileStorage(Storage):
 
         # Write with frontmatter
         frontmatter = self._create_frontmatter(metadata)
-        path.write_text(frontmatter + body, encoding="utf-8")
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        if self._revisions is not None:
+            operation = (
+                "create" if self._revisions.revision_count(name) == 0 else "edit"
+            )
+            self._revisions.record(name, raw, operation=operation)
 
         return Page(
             name=name,
@@ -212,6 +224,8 @@ class FileStorage(Storage):
                     parent = parent.parent
                 else:
                     break
+            if self._revisions is not None:
+                self._revisions.delete_page_history(name)
             return True
         return False
 
@@ -334,7 +348,13 @@ class FileStorage(Storage):
 
         # Write back
         frontmatter = self._create_frontmatter(metadata)
-        path.write_text(frontmatter + body, encoding="utf-8")
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        if self._revisions is not None:
+            self._revisions.record(
+                name, raw, operation="frontmatter_update", message=f"Updated {field}"
+            )
 
         return Page(
             name=name,
@@ -351,4 +371,6 @@ class FileStorage(Storage):
         new_path = self._get_path(new_name)
         new_path.parent.mkdir(parents=True, exist_ok=True)
         old_path.rename(new_path)
+        if self._revisions is not None:
+            self._revisions.rename_history(old_name, new_name)
         return await self.get_page(new_name)

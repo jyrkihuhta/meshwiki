@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from meshwiki.api.auth import require_api_key
-from meshwiki.core.dependencies import get_storage
+from meshwiki.core.dependencies import get_revision_store, get_storage
+from meshwiki.core.models import Revision
+from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -124,3 +126,29 @@ async def delete_page(
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
+
+
+@router.get("/pages/{name:path}/history", response_model=list[Revision])
+async def list_page_history(
+    name: str,
+    limit: int = 50,
+    offset: int = 0,
+    store: RevisionStore = Depends(get_revision_store),
+) -> list[Revision]:
+    """List revision history for a page, newest first."""
+    return store.list_revisions(name, limit=limit, offset=offset)
+
+
+@router.get("/pages/{name:path}/history/{rev}", response_model=Revision)
+async def get_page_revision(
+    name: str,
+    rev: int,
+    store: RevisionStore = Depends(get_revision_store),
+) -> Revision:
+    """Fetch a specific revision of a page."""
+    revision = store.get_revision(name, rev)
+    if revision is None:
+        raise HTTPException(
+            status_code=404, detail=f"Revision {rev} not found for {name!r}"
+        )
+    return revision

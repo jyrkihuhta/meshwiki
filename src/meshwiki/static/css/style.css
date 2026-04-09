@@ -2116,3 +2116,186 @@ article.page > .breadcrumb {
 @media (max-width: 768px) {
   .callout { font-size: 0.9rem; padding: 0.75rem 0.9rem; }
 }
+
+/* ========== Version History ========== */
+
+.page-history,
+.page-diff {
+  max-width: 960px;
+}
+
+.history-table .history-rev {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  width: 3rem;
+  text-align: right;
+}
+
+.history-table .history-message {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  max-width: 280px;
+}
+
+.history-table .history-actions {
+  white-space: nowrap;
+}
+
+.history-badge {
+  display: inline-block;
+  padding: 0.15em 0.5em;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.history-badge--create  { background: #d4edda; color: #155724; }
+.history-badge--edit    { background: var(--color-bg-secondary); color: var(--color-text-secondary); }
+.history-badge--restore { background: #cce5ff; color: #004085; }
+.history-badge--rename  { background: #fff3cd; color: #856404; }
+.history-badge--frontmatter_update { background: var(--color-bg-secondary); color: var(--color-text-secondary); }
+
+[data-theme="dark"] .history-badge--create  { background: #0a2e0a; color: #a5d6a7; }
+[data-theme="dark"] .history-badge--restore { background: #0a1929; color: #90caf9; }
+[data-theme="dark"] .history-badge--rename  { background: #2e2000; color: #ffe082; }
+
+.btn-small {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.pagination-info {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+/* Revision view */
+.revision-label {
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+.revision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+.revision-nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+
+/* Diff view */
+.diff-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+.diff-arrow { color: var(--color-text-secondary); }
+
+.diff-view {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+}
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono, 'ui-monospace', 'SFMono-Regular', monospace);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.diff-col-lineno { width: 3rem; }
+.diff-col-content { width: auto; }
+
+.diff-lineno {
+  width: 3rem;
+  text-align: right;
+  padding: 0 0.5rem;
+  color: var(--color-text-secondary);
+  user-select: none;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+}
+
+.diff-content {
+  padding: 0 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-sigil {
+  display: inline-block;
+  width: 1ch;
+  margin-right: 0.25ch;
+  user-select: none;
+}
+
+.diff-line--equal .diff-lineno,
+.diff-line--equal .diff-content {
+  background: var(--color-bg);
+}
+
+.diff-line--insert .diff-lineno,
+.diff-line--insert .diff-content {
+  background: #e6ffec;
+  color: #1a4731;
+}
+
+.diff-line--insert .diff-sigil { color: #2da44e; font-weight: bold; }
+
+.diff-line--delete .diff-lineno,
+.diff-line--delete .diff-content {
+  background: #ffebe9;
+  color: #6e2e29;
+}
+
+.diff-line--delete .diff-sigil { color: #cf222e; font-weight: bold; }
+
+[data-theme="dark"] .diff-line--insert .diff-lineno,
+[data-theme="dark"] .diff-line--insert .diff-content {
+  background: #0a2e0a;
+  color: #a5d6a7;
+}
+
+[data-theme="dark"] .diff-line--insert .diff-sigil { color: #66bb6a; }
+
+[data-theme="dark"] .diff-line--delete .diff-lineno,
+[data-theme="dark"] .diff-line--delete .diff-content {
+  background: #2c0a0a;
+  color: #ef9a9a;
+}
+
+[data-theme="dark"] .diff-line--delete .diff-sigil { color: #ef5350; }
+
+@media (max-width: 768px) {
+  .diff-table { font-size: 0.75rem; }
+  .diff-col-lineno { width: 2rem; }
+}
