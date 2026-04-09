@@ -471,7 +471,7 @@ async def decompose_with_pm(
     while tool_calls_remaining > 0:
         response = await _messages_create_with_retry(
             client,
-            model="claude-sonnet-4-6",
+            model=get_settings().pm_decompose_model,
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
