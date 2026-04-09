@@ -344,3 +344,92 @@ modified: '2026-01-02'
 This is body text with five words.
 """
         assert word_count(content) == 7
+
+
+# ============================================================
+# Macro escape syntax
+# ============================================================
+
+
+class TestMacroEscape:
+    def test_escaped_pagelist_renders_literal(self):
+        html = parse_wiki_content("Use \\<<PageList>> to show pages.")
+        assert "macro-literal" in html
+        assert "&lt;&lt;PageList&gt;&gt;" in html or "<<PageList>>" in html
+
+    def test_escaped_taglist_renders_literal(self):
+        html = parse_wiki_content("Use \\<<TagList>> to show tags.")
+        assert "macro-literal" in html
+        assert "&lt;&lt;TagList&gt;&gt;" in html or "<<TagList>>" in html
+
+    def test_escaped_recentchanges_renders_literal(self):
+        html = parse_wiki_content("Use \\<<RecentChanges>> here.")
+        assert "macro-literal" in html
+
+    def test_escaped_lastmodified_renders_literal(self):
+        html = parse_wiki_content("Modified: \\<<LastModified>>")
+        assert "macro-literal" in html
+
+    def test_escaped_taskstatus_renders_literal(self):
+        html = parse_wiki_content("Status macro: \\<<TaskStatus>>")
+        assert "macro-literal" in html
+
+    def test_escaped_pagecount_renders_literal(self):
+        html = parse_wiki_content("Count: \\<<PageCount>>")
+        assert "macro-literal" in html
+
+    def test_escaped_backlinks_renders_literal(self):
+        html = parse_wiki_content("Links: \\<<BackLinks>>")
+        assert "macro-literal" in html
+
+    def test_escaped_includemacro_renders_literal(self):
+        html = parse_wiki_content("Include: \\<<Include(Page)>>")
+        assert "macro-literal" in html
+
+    def test_escaped_metatable_renders_literal(self):
+        html = parse_wiki_content("Meta: \\<<MetaTable()>>")
+        assert "macro-literal" in html
+
+    def test_escaped_newpage_renders_literal(self):
+        html = parse_wiki_content("New: \\<<NewPage>>")
+        assert "macro-literal" in html
+
+    def test_unescaped_pagelist_not_expanded_without_engine(self):
+        html = parse_wiki_content("<<PageList>>")
+        assert "macro-literal" not in html
+        assert "&lt;&lt;PageList&gt;&gt;" not in html
+
+    def test_unescaped_taglist_renders(self):
+        html = parse_wiki_content("<<TagList>>")
+        assert "macro-literal" not in html
+
+    def test_double_backslash_escapes_backslash(self):
+        html = parse_wiki_content("A literal backslash: \\\\<<PageList>>")
+        assert "macro-literal" in html
+        assert "\\" in html
+
+    def test_escaped_macro_in_code_block_not_expanded(self):
+        content = "```\n\\<<PageList>>\n```"
+        html = parse_wiki_content(content)
+        assert "macro-literal" not in html
+
+    def test_escaped_macro_in_tilde_code_not_expanded(self):
+        content = "~~~\n\\<<PageList>>\n~~~"
+        html = parse_wiki_content(content)
+        assert "macro-literal" not in html
+
+    def test_multiple_escaped_macros(self):
+        html = parse_wiki_content("\\<<PageList>> and \\<<TagList>>")
+        assert html.count("macro-literal") == 2
+
+    def test_mixed_escaped_and_unescaped(self):
+        html = parse_wiki_content("\\<<PageList>> or <<PageList>>")
+        assert html.count("macro-literal") == 1
+
+    def test_escaped_macro_with_args(self):
+        html = parse_wiki_content("\\<<PageList(tag=test)>>")
+        assert "macro-literal" in html
+
+    def test_escaped_epicstatus_renders_literal(self):
+        html = parse_wiki_content("\\<<EpicStatus>>")
+        assert "macro-literal" in html

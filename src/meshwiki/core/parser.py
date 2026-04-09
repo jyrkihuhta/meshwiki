@@ -15,6 +15,44 @@ from markdown.preprocessors import Preprocessor
 
 from meshwiki.core.graph import get_engine
 
+_ESCAPED_MACRO_RE = re.compile(r"\\<<([A-Za-z][^>]*)>>")
+
+
+class MacroEscapePreprocessor(Preprocessor):
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00ESCCODE{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def _replace(m: re.Match) -> str:
+            literal = f"<<{m.group(1)}>>"
+            return f'<span class="macro-literal">{html_escape(literal)}</span>'
+
+        text = _ESCAPED_MACRO_RE.sub(_replace, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00ESCCODE{i}\x00", block)
+
+        return text.split("\n")
+
+
+class MacroEscapeExtension(Extension):
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            MacroEscapePreprocessor(md),
+            "macro_escape",
+            200,
+        )
+
+
 # Pattern for wiki links: [[PageName]] or [[PageName|Display Text]]
 WIKI_LINK_PATTERN = r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]"
 
@@ -1776,6 +1814,7 @@ def create_parser(
             # PyMdown extensions
             "pymdownx.tasklist",  # Task lists with checkboxes
             # Custom extensions
+            MacroEscapeExtension(),  # \<<Macro>> escape — must run first (priority 200)
             StrikethroughExtension(),  # ~~strikethrough~~
             WikiLinkExtension(page_exists=page_exists),  # [[WikiLinks]]
             MetaTableExtension(),  # <<MetaTable(...)>>
