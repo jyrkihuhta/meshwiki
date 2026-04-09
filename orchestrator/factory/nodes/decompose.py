@@ -53,6 +53,7 @@ def _build_subtask_page(subtask: SubTask, parent_task: str) -> str:
         f'title: "{subtask["title"]}"\n'
         f"type: task\n"
         f"status: planned\n"
+        f"assignee: factory\n"
         f"skip_decomposition: true\n"
         f'parent_task: "{parent_task}"\n'
         f'estimation: "{estimation_label}"\n'
@@ -143,15 +144,7 @@ async def decompose_node(state: FactoryState) -> dict:
                 exc,
             )
 
-        try:
-            await meshwiki_client.transition_task(subtask["wiki_page"], "planned")
-            logger.info("decompose: transitioned %s to planned", subtask["wiki_page"])
-        except Exception as exc:
-            logger.error(
-                "decompose: failed to transition %s: %s",
-                subtask["wiki_page"],
-                exc,
-            )
+        # Page is created with status: planned already — no transition needed.
 
     try:
         await meshwiki_client.transition_task(parent_task, "decomposed")

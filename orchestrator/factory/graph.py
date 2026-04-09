@@ -51,7 +51,15 @@ def route_after_grinding(state: FactoryState) -> str:
     """Route after all grinder instances complete."""
     failed = [s for s in state["subtasks"] if s["status"] == "failed"]
     succeeded = [s for s in state["subtasks"] if s["status"] == "review"]
+    pending = [
+        s
+        for s in state["subtasks"]
+        if s["status"] in ("pending", "changes_requested")
+    ]
     if not failed:
+        if pending:
+            # Some subtasks were deferred (file conflict serialization) — loop back
+            return "more_pending"
         return "all_succeeded"
     if not succeeded:
         return "all_failed"
@@ -138,6 +146,7 @@ def build_graph(checkpointer):
         route_after_grinding,
         {
             "all_succeeded": "pm_review",
+            "more_pending": "assign_grinders",
             "some_failed": "escalate",
             "all_failed": "escalate",
         },
