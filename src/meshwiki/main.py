@@ -467,6 +467,7 @@ async def view_page(request: Request, name: str):
         page_metadata=page_metadata,
         recent_pages=recent_pages,
         page_contents=page_contents,
+        page_modified=page.metadata.modified,
     )
 
     return templates.TemplateResponse(
