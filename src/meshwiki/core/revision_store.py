@@ -48,6 +48,7 @@ class RevisionStore:
     """
 
     def __init__(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(db_path),
             check_same_thread=False,
