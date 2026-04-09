@@ -379,6 +379,66 @@ class RecentChangesExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LastModified macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+LASTMODIFIED_PATTERN = re.compile(r"<<LastModified>>")
+
+
+class LastModifiedPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<LastModified>> with relative time."""
+
+    def __init__(self, md: Markdown, modified: datetime | None):
+        super().__init__(md)
+        self.modified = modified
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<LastModified>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00LMBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(_m: re.Match) -> str:
+            if self.modified:
+                rel = _timeago(self.modified)
+                html = f'<span class="last-modified">Last modified {rel}</span>'
+            else:
+                html = '<span class="last-modified">—</span>'
+            return self.md.htmlStash.store(html)
+
+        text = LASTMODIFIED_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00LMBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class LastModifiedExtension(Extension):
+    """Markdown extension for <<LastModified>> macro."""
+
+    def __init__(self, modified: datetime | None = None, **kwargs):
+        self.modified = modified
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            LastModifiedPreprocessor(md, self.modified),
+            "lastmodified",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PageCount macro
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1599,6 +1659,7 @@ def create_parser(
     recent_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
 ) -> Markdown:
     """Create a Markdown parser with wiki link support.
 
@@ -1610,6 +1671,7 @@ def create_parser(
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
+        page_modified: Last modified datetime of the page (for LastModified macro).
 
     Returns:
         Configured Markdown parser instance.
@@ -1643,6 +1705,7 @@ def create_parser(
                 include_chain=include_chain or [],
             ),  # <<Include(...)>>
             NewPageExtension(),  # <<NewPage(...)>>
+            LastModifiedExtension(modified=page_modified),  # <<LastModified>>
             CalloutExtension(),  # ```info / ```warning / ```tip / ```error / ```note
         ]
     )
@@ -1656,6 +1719,7 @@ def parse_wiki_content(
     recent_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
 ) -> str:
     """Parse wiki content (Markdown + wiki links) to HTML.
 
@@ -1667,6 +1731,7 @@ def parse_wiki_content(
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
+        page_modified: Last modified datetime of the page (for LastModified macro).
 
     Returns:
         HTML string.
@@ -1678,6 +1743,7 @@ def parse_wiki_content(
         recent_pages=recent_pages,
         page_contents=page_contents,
         include_chain=include_chain or [],
+        page_modified=page_modified,
     )
     return parser.convert(content)
 
@@ -1690,6 +1756,7 @@ def parse_wiki_content_with_toc(
     recent_pages: list | None = None,
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
 ) -> tuple[str, str]:
     """Parse wiki content and return HTML with table of contents.
 
@@ -1701,6 +1768,7 @@ def parse_wiki_content_with_toc(
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
+        page_modified: Last modified datetime of the page (for LastModified macro).
 
     Returns:
         Tuple of (html_content, toc_html).
@@ -1712,6 +1780,7 @@ def parse_wiki_content_with_toc(
         recent_pages=recent_pages,
         page_contents=page_contents,
         include_chain=include_chain or [],
+        page_modified=page_modified,
     )
     html = parser.convert(content)
     toc_html = getattr(parser, "toc", "")
