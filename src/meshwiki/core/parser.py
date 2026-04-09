@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from html import escape as html_escape  # used in CalloutBlockPreprocessor
 from typing import Callable
@@ -374,6 +375,72 @@ class RecentChangesExtension(Extension):
         md.preprocessors.register(
             RecentChangesPreprocessor(md, self.recent_pages),
             "recentchanges",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TagList macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+TAGLIST_PATTERN = re.compile(r"<<TagList>>")
+
+
+class TagListPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<TagList>> with a sorted tag list."""
+
+    def __init__(self, md: Markdown, pages: list):
+        super().__init__(md)
+        self.pages = pages or []
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<TagList>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00TLBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        counter: Counter[str] = Counter()
+        for page in self.pages:
+            for tag in page.metadata.tags or []:
+                counter[tag] += 1
+
+        if not counter:
+            html = ""
+        else:
+            items = "".join(
+                f'<li><a href="/search?tag={html_escape(tag)}">{html_escape(tag)} ({count})</a></li>'
+                for tag, count in counter.most_common()
+            )
+            html = f'<ul class="tag-list">{items}</ul>'
+
+        text = text.replace("<<TagList>>", html)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00TLBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class TagListExtension(Extension):
+    """Markdown extension for <<TagList>> macro."""
+
+    def __init__(self, pages: list | None = None, **kwargs):
+        self.pages = pages or []
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            TagListPreprocessor(md, self.pages),
+            "taglist",
             29,
         )
 
@@ -1660,6 +1727,7 @@ def create_parser(
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
     page_modified: datetime | None = None,
+    pages: list | None = None,
 ) -> Markdown:
     """Create a Markdown parser with wiki link support.
 
@@ -1672,6 +1740,7 @@ def create_parser(
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
         page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
 
     Returns:
         Configured Markdown parser instance.
@@ -1698,6 +1767,7 @@ def create_parser(
             CalloutExtension(),  # ```info``` etc. callout blocks
             RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
+            TagListExtension(pages=pages),  # <<TagList>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
             PageListExtension(),  # <<PageList(...)>>
             IncludeExtension(
@@ -1720,6 +1790,7 @@ def parse_wiki_content(
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
     page_modified: datetime | None = None,
+    pages: list | None = None,
 ) -> str:
     """Parse wiki content (Markdown + wiki links) to HTML.
 
@@ -1732,6 +1803,7 @@ def parse_wiki_content(
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
         page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
 
     Returns:
         HTML string.
@@ -1744,6 +1816,7 @@ def parse_wiki_content(
         page_contents=page_contents,
         include_chain=include_chain or [],
         page_modified=page_modified,
+        pages=pages,
     )
     return parser.convert(content)
 
@@ -1757,6 +1830,7 @@ def parse_wiki_content_with_toc(
     page_contents: dict[str, str] | None = None,
     include_chain: list[str] | None = None,
     page_modified: datetime | None = None,
+    pages: list | None = None,
 ) -> tuple[str, str]:
     """Parse wiki content and return HTML with table of contents.
 
@@ -1769,6 +1843,7 @@ def parse_wiki_content_with_toc(
         page_contents: Dict mapping page names to raw content for Include macro.
         include_chain: List of page names in the current include chain (for circular detection).
         page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
 
     Returns:
         Tuple of (html_content, toc_html).
@@ -1781,6 +1856,7 @@ def parse_wiki_content_with_toc(
         page_contents=page_contents,
         include_chain=include_chain or [],
         page_modified=page_modified,
+        pages=pages,
     )
     html = parser.convert(content)
     toc_html = getattr(parser, "toc", "")
