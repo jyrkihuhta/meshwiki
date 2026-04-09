@@ -574,7 +574,8 @@ async def review_with_pm(
         Dict with ``decision`` ("approved" | "changes_requested") and
         optional ``feedback`` string.
     """
-    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
+    settings = get_settings()
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
 
     pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
         subtask.get("pr_url", "")
@@ -591,10 +592,26 @@ async def review_with_pm(
 
     branch_name = subtask.get("branch_name") or ""
 
+    # Cap diff size to avoid burning tokens on huge diffs
+    diff_lines = diff.splitlines()
+    max_lines = settings.pm_review_max_diff_lines
+    diff_truncated = False
+    if len(diff_lines) > max_lines:
+        diff = "\n".join(diff_lines[:max_lines])
+        diff_truncated = True
+
+    truncation_notice = (
+        f"\n\n*(Diff truncated at {max_lines} lines. "
+        "Use `github_read_file` to inspect full files if needed.)*"
+        if diff_truncated
+        else ""
+    )
+
     user_message = (
         f"## Subtask: {subtask['title']}\n\n"
         f"**Acceptance Criteria (from wiki page):**\n{acceptance_criteria}\n\n"
-        f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```\n\n"
+        f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```"
+        f"{truncation_notice}\n\n"
         "**Important:** The diff above shows only changes relative to the PR base branch "
         "(staging), not relative to main. Changes that were already on staging will NOT "
         "appear in the diff even if they are part of the full implementation. Before "
@@ -606,6 +623,49 @@ async def review_with_pm(
         "or `pm_request_changes` with specific feedback if it does not."
     )
 
+    # ── Triage pass (cheap model) ─────────────────────────────────────────────
+    # Run a fast single-shot review with the triage model. If it approves,
+    # skip the full agentic review entirely. If it requests changes, fall
+    # through to the full Sonnet review so the grinder gets detailed feedback.
+    triage_model = settings.pm_triage_model
+    if triage_model:
+        triage_prompt = (
+            f"## Subtask: {subtask['title']}\n\n"
+            f"**Acceptance Criteria:**\n{acceptance_criteria}\n\n"
+            f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```"
+            f"{truncation_notice}\n\n"
+            "Quick triage: does this PR meet its acceptance criteria? "
+            "Reply with exactly one of:\n"
+            "- APPROVED — implementation is correct and complete\n"
+            "- CHANGES_REQUESTED — briefly state what is missing or wrong\n\n"
+            "Be lenient on style; flag only functional gaps or missing acceptance criteria."
+        )
+        try:
+            triage_response = await client.messages.create(
+                model=triage_model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": triage_prompt}],
+            )
+            triage_text = "".join(
+                b.text for b in triage_response.content if hasattr(b, "text")
+            ).strip()
+            logger.info(
+                "review_with_pm: triage (%s) verdict for %s: %s",
+                triage_model,
+                subtask["id"],
+                triage_text[:120],
+            )
+            if triage_text.upper().startswith("APPROVED"):
+                return {"decision": "approved", "feedback": triage_text}
+            # Triage flagged issues — fall through to full review with Sonnet
+            # so the grinder gets actionable, detailed feedback.
+            logger.info(
+                "review_with_pm: triage requested changes — escalating to full review (%s)",
+                settings.pm_review_model,
+            )
+        except Exception as exc:
+            logger.warning("review_with_pm: triage pass failed (%s) — skipping", exc)
+
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
 
     decision: str | None = None
@@ -614,7 +674,7 @@ async def review_with_pm(
 
     while tool_calls_remaining > 0:
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
+            model=settings.pm_review_model,
             max_tokens=4096,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
