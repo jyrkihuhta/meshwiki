@@ -987,7 +987,9 @@ def _render_page_list(args_str: str | None, all_pages: list) -> str:
     if "tag" in args:
         tag_lower = args["tag"].lower()
         pages = [
-            p for p in pages if any(t.lower() == tag_lower for t in p.metadata.tags)
+            p
+            for p in pages
+            if any(t.lower() == tag_lower for t in p.metadata.get("tags", []))
         ]
 
     if "prefix" in args:
@@ -1014,10 +1016,11 @@ def _render_page_list(args_str: str | None, all_pages: list) -> str:
     for page in pages:
         url_name = page.name.replace(" ", "_")
         tags_html = ""
-        if page.metadata.tags:
+        page_tags = page.metadata.get("tags", [])
+        if page_tags:
             tag_links = [
                 f'<a href="/search?tag={html_escape(t)}" class="tag-pill">{html_escape(t)}</a>'
-                for t in page.metadata.tags
+                for t in page_tags
             ]
             tags_html = f'<span class="page-list-tags">{"".join(tag_links)}</span>'
         lines.append(
