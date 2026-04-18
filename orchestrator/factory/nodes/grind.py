@@ -16,14 +16,15 @@ async def grind_node(state: FactoryState) -> dict:
 
     Looks up the subtask identified by ``_current_subtask_id`` in state,
     invokes the grinder agentic loop, and returns a partial state update
-    with the updated subtasks list.
+    with the updated subtasks list and active_grinders.
 
     Args:
         state: Current FactoryState, must contain ``_current_subtask_id``.
 
     Returns:
         Partial state update with ``subtasks`` list where the current
-        subtask is replaced by the updated version from the grinder.
+        subtask is replaced by the updated version from the grinder,
+        and ``active_grinders`` with the subtask ID removed.
     """
     subtask_id = state.get("_current_subtask_id")
     subtask = next(
@@ -34,65 +35,80 @@ async def grind_node(state: FactoryState) -> dict:
         logger.error("grind_node: subtask %r not found in state", subtask_id)
         return {}
 
-    # Guard: rework with no feedback wastes a full sandbox run.
-    # Fail fast so escalate_node can handle it rather than grinding blindly.
-    if subtask.get("attempt", 0) > 0 and not subtask.get("review_feedback"):
-        logger.warning(
-            "grind_node: subtask %s is a rework (attempt %d) but review_feedback is empty — failing fast",
-            subtask_id,
-            subtask.get("attempt", 0),
-        )
-        error_log = list(subtask.get("error_log") or []) + [
-            "PM requested changes but provided no feedback — cannot rework"
-        ]
-        updated = {**subtask, "status": "failed", "error_log": error_log}
-        meshwiki_client = MeshWikiClient()
-        try:
-            await meshwiki_client.transition_task(subtask["wiki_page"], "failed")
-        except Exception as exc:
-            logger.error(
-                "grind_node: failed to transition %s to failed: %s",
-                subtask["wiki_page"],
-                exc,
-            )
-        subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
-        return {"subtasks": subtasks}
-
+    active = list(state.get("active_grinders", []))
+    if subtask_id not in active:
+        active.append(subtask_id)
     logger.info(
-        "grind_node: running grinder for subtask %s (task %s)",
+        "grind_node: running grinder for subtask %s (task %s), active count: %d",
         subtask_id,
         state.get("task_wiki_page", "<unknown>"),
+        len(active),
     )
 
-    meshwiki_client = MeshWikiClient()
-    result = await grind_subtask(state, subtask, meshwiki_client)
-    updated = result["subtask"]
-    incremental_cost = result.get("incremental_cost_usd", 0.0)
+    async with MeshWikiClient() as meshwiki_client:
+        if subtask.get("attempt", 0) > 0 and not subtask.get("review_feedback"):
+            logger.warning(
+                "grind_node: subtask %s is a rework (attempt %d) but review_feedback is empty — failing fast",
+                subtask_id,
+                subtask.get("attempt", 0),
+            )
+            error_log = list(subtask.get("error_log") or []) + [
+                "PM requested changes but provided no feedback — cannot rework"
+            ]
+            updated = {**subtask, "status": "failed", "error_log": error_log}
+            try:
+                await meshwiki_client.transition_task(subtask["wiki_page"], "failed")
+            except Exception as exc:
+                logger.error(
+                    "grind_node: failed to transition %s to failed: %s",
+                    subtask["wiki_page"],
+                    exc,
+                )
+            subtasks = [
+                updated if s["id"] == subtask_id else s for s in state["subtasks"]
+            ]
+            if subtask_id in active:
+                active.remove(subtask_id)
+            return {"subtasks": subtasks, "active_grinders": active}
 
-    # Transition the wiki task page to reflect the grinder outcome
-    final_status = updated.get("status", "failed")
-    extra_fields: dict = {}
-    if updated.get("pr_url"):
-        extra_fields["pr_url"] = updated["pr_url"]
-    if updated.get("branch_name"):
-        extra_fields["branch"] = updated["branch_name"]
-    try:
-        await meshwiki_client.transition_task(
-            updated["wiki_page"], final_status, extra_fields or None
-        )
-        logger.info(
-            "grind_node: transitioned %s to %s (pr=%s)",
-            updated["wiki_page"],
-            final_status,
-            updated.get("pr_url"),
-        )
-    except Exception as exc:
-        logger.error(
-            "grind_node: failed to transition %s to %s: %s",
-            updated["wiki_page"],
-            final_status,
-            exc,
-        )
+        result = await grind_subtask(state, subtask, meshwiki_client)
+        updated = result["subtask"]
+        incremental_cost = result.get("incremental_cost_usd", 0.0)
+
+        final_status = updated.get("status", "failed")
+        extra_fields: dict = {}
+        if updated.get("pr_url"):
+            extra_fields["pr_url"] = updated["pr_url"]
+        if updated.get("branch_name"):
+            extra_fields["branch"] = updated["branch_name"]
+        try:
+            await meshwiki_client.transition_task(
+                updated["wiki_page"], final_status, extra_fields or None
+            )
+            logger.info(
+                "grind_node: transitioned %s to %s (pr=%s)",
+                updated["wiki_page"],
+                final_status,
+                updated.get("pr_url"),
+            )
+        except Exception as exc:
+            logger.error(
+                "grind_node: failed to transition %s to %s: %s",
+                updated["wiki_page"],
+                final_status,
+                exc,
+            )
 
     subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
-    return {"subtasks": subtasks, "incremental_costs_usd": [incremental_cost]}
+    if subtask_id in active:
+        active.remove(subtask_id)
+    logger.info(
+        "grind_node: completed subtask %s, active count: %d",
+        subtask_id,
+        len(active),
+    )
+    return {
+        "subtasks": subtasks,
+        "active_grinders": active,
+        "incremental_costs_usd": [incremental_cost],
+    }

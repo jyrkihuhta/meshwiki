@@ -31,59 +31,55 @@ async def escalate_node(state: FactoryState) -> dict:
         Partial state update with updated ``subtasks``, ``graph_status``, and
         ``escalation_decision``.
     """
-    client = MeshWikiClient()
+    async with MeshWikiClient() as client:
+        failed_ids = state.get("failed_subtask_ids", [])
+        failed_subtasks = [s for s in state["subtasks"] if s["id"] in failed_ids]
 
-    failed_ids = state.get("failed_subtask_ids", [])
-    failed_subtasks = [s for s in state["subtasks"] if s["id"] in failed_ids]
+        logger.warning(
+            "escalate: escalating task %s (failed subtasks: %s)",
+            state.get("task_wiki_page", "<unknown>"),
+            failed_ids,
+        )
 
-    logger.warning(
-        "escalate: escalating task %s (failed subtasks: %s)",
-        state.get("task_wiki_page", "<unknown>"),
-        failed_ids,
-    )
+        retriable = [s for s in failed_subtasks if s["attempt"] < s["max_attempts"] - 1]
 
-    # Check which failed subtasks still have retries remaining
-    retriable = [s for s in failed_subtasks if s["attempt"] < s["max_attempts"] - 1]
-
-    # Append escalation note to the task wiki page
-    try:
-        page = await client.get_page(state["task_wiki_page"])
-        if page:
-            content = page.get("content", "")
-            note = f"\n\n## Escalation\n\nFailed subtasks: {', '.join(failed_ids)}\n"
-            if retriable:
-                note += f"Retrying: {', '.join(s['id'] for s in retriable)}\n"
-            await client.create_page(state["task_wiki_page"], content + note)
-    except Exception as exc:
-        logger.error("escalate: failed to update task page: %s", exc)
-
-    # Transition retriable subtask wiki pages back to in_progress so that
-    # grind_node can later transition them to review (failed->review is invalid).
-    for s in retriable:
         try:
-            await client.transition_task(s["wiki_page"], "in_progress")
-            logger.info(
-                "escalate: transitioned %s back to in_progress for retry", s["id"]
-            )
+            page = await client.get_page(state["task_wiki_page"])
+            if page:
+                content = page.get("content", "")
+                note = (
+                    f"\n\n## Escalation\n\nFailed subtasks: {', '.join(failed_ids)}\n"
+                )
+                if retriable:
+                    note += f"Retrying: {', '.join(s['id'] for s in retriable)}\n"
+                await client.create_page(state["task_wiki_page"], content + note)
         except Exception as exc:
-            logger.warning(
-                "escalate: could not transition %s to in_progress: %s", s["id"], exc
-            )
+            logger.error("escalate: failed to update task page: %s", exc)
 
-    # Increment attempt count on retriable failed subtasks and reset status
-    retriable_ids = {s["id"] for s in retriable}
-    subtasks = []
-    for s in state["subtasks"]:
-        if s["id"] in retriable_ids:
-            subtasks.append({**s, "attempt": s["attempt"] + 1, "status": "pending"})
-        else:
-            subtasks.append(s)
+        for s in retriable:
+            try:
+                await client.transition_task(s["wiki_page"], "in_progress")
+                logger.info(
+                    "escalate: transitioned %s back to in_progress for retry", s["id"]
+                )
+            except Exception as exc:
+                logger.warning(
+                    "escalate: could not transition %s to in_progress: %s", s["id"], exc
+                )
 
-    decision = "retry" if retriable else "abandon"
-    logger.info("escalate: decision=%s", decision)
+        retriable_ids = {s["id"] for s in retriable}
+        subtasks = []
+        for s in state["subtasks"]:
+            if s["id"] in retriable_ids:
+                subtasks.append({**s, "attempt": s["attempt"] + 1, "status": "pending"})
+            else:
+                subtasks.append(s)
 
-    return {
-        "subtasks": subtasks,
-        "graph_status": "escalated",
-        "escalation_decision": decision,
-    }
+        decision = "retry" if retriable else "abandon"
+        logger.info("escalate: decision=%s", decision)
+
+        return {
+            "subtasks": subtasks,
+            "graph_status": "escalated",
+            "escalation_decision": decision,
+        }

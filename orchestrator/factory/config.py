@@ -1,8 +1,13 @@
 """Configuration for the factory orchestrator service."""
 
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+FACTORY_MAX_CONCURRENT_SANDBOXES: int = int(
+    os.getenv("FACTORY_MAX_CONCURRENT_SANDBOXES", "3")
+)
 
 
 class Settings(BaseSettings):

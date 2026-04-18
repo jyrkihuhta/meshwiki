@@ -99,64 +99,63 @@ async def decompose_node(state: FactoryState) -> dict:
         "decompose: decomposing task %s", state.get("task_wiki_page", "<unknown>")
     )
 
-    meshwiki_client = MeshWikiClient()
-    # github_client is not needed for decomposition
-    github_client = None
+    async with MeshWikiClient() as meshwiki_client:
+        result = await decompose_with_pm(state, meshwiki_client, None)
+        subtasks = result["subtasks"]
+        incremental_cost = result.get("incremental_cost_usd", 0.0)
 
-    result = await decompose_with_pm(state, meshwiki_client, github_client)
-    subtasks = result["subtasks"]
-    incremental_cost = result.get("incremental_cost_usd", 0.0)
+        parent_task = state.get("task_wiki_page", "")
 
-    parent_task = state.get("task_wiki_page", "")
-
-    # Guard: reject any subtask whose wiki_page is more than one level below
-    # the parent task — the PM must not create nested subtasks.
-    valid_subtasks = []
-    for subtask in subtasks:
-        page = subtask["wiki_page"]
-        expected_prefix = parent_task + "/"
-        relative = (
-            page[len(expected_prefix) :] if page.startswith(expected_prefix) else page
-        )
-        if "/" in relative:
-            logger.error(
-                "decompose: rejecting nested subtask %s (parent=%s) — "
-                "subtask wiki_page must be a direct child of the parent task",
-                page,
-                parent_task,
+        # Guard: reject any subtask whose wiki_page is more than one level below
+        # the parent task — the PM must not create nested subtasks.
+        valid_subtasks = []
+        for subtask in subtasks:
+            page = subtask["wiki_page"]
+            expected_prefix = parent_task + "/"
+            relative = (
+                page[len(expected_prefix):]
+                if page.startswith(expected_prefix)
+                else page
             )
-            continue
-        valid_subtasks.append(subtask)
+            if "/" in relative:
+                logger.error(
+                    "decompose: rejecting nested subtask %s (parent=%s) — "
+                    "subtask wiki_page must be a direct child of the parent task",
+                    page,
+                    parent_task,
+                )
+                continue
+            valid_subtasks.append(subtask)
 
-    if len(valid_subtasks) != len(subtasks):
-        logger.warning(
-            "decompose: dropped %d nested subtask(s) out of %d",
-            len(subtasks) - len(valid_subtasks),
-            len(subtasks),
-        )
-    subtasks = valid_subtasks
+        if len(valid_subtasks) != len(subtasks):
+            logger.warning(
+                "decompose: dropped %d nested subtask(s) out of %d",
+                len(subtasks) - len(valid_subtasks),
+                len(subtasks),
+            )
+        subtasks = valid_subtasks
 
-    for subtask in subtasks:
-        page_content = _build_subtask_page(subtask, parent_task)
+        for subtask in subtasks:
+            page_content = _build_subtask_page(subtask, parent_task)
+            try:
+                await meshwiki_client.create_page(subtask["wiki_page"], page_content)
+                logger.info("decompose: created wiki page %s", subtask["wiki_page"])
+            except Exception as exc:
+                logger.error(
+                    "decompose: failed to create wiki page %s: %s",
+                    subtask["wiki_page"],
+                    exc,
+                )
+
         try:
-            await meshwiki_client.create_page(subtask["wiki_page"], page_content)
-            logger.info("decompose: created wiki page %s", subtask["wiki_page"])
+            await meshwiki_client.transition_task(parent_task, "decomposed")
+            logger.info(
+                "decompose: transitioned parent task %s to decomposed", parent_task
+            )
         except Exception as exc:
             logger.error(
-                "decompose: failed to create wiki page %s: %s",
-                subtask["wiki_page"],
-                exc,
+                "decompose: failed to transition parent task %s: %s", parent_task, exc
             )
-
-        # Page is created with status: planned already — no transition needed.
-
-    try:
-        await meshwiki_client.transition_task(parent_task, "decomposed")
-        logger.info("decompose: transitioned parent task %s to decomposed", parent_task)
-    except Exception as exc:
-        logger.error(
-            "decompose: failed to transition parent task %s: %s", parent_task, exc
-        )
 
     return {
         "subtasks": subtasks,

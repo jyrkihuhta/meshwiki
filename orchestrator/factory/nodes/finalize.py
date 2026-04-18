@@ -26,27 +26,26 @@ async def finalize_node(state: FactoryState) -> dict:
     total_cost = sum(state.get("incremental_costs_usd", []))
     total_cost += state.get("cost_usd", 0.0)
 
-    client = MeshWikiClient()
-
-    logger.info(
-        "finalize: completing task %s (cost: $%.4f)",
-        state.get("task_wiki_page", "<unknown>"),
-        total_cost,
-    )
-
-    task_page = state["task_wiki_page"]
-
-    try:
-        await client.transition_task(
-            task_page,
-            "done",
-            extra_fields={"cost_usd": str(round(total_cost, 4))},
-        )
-    except Exception as exc:
-        logger.error(
-            "finalize: failed to transition %s to done: %s",
-            task_page,
-            exc,
+    async with MeshWikiClient() as client:
+        logger.info(
+            "finalize: completing task %s (cost: $%.4f)",
+            state.get("task_wiki_page", "<unknown>"),
+            total_cost,
         )
 
-    return {"graph_status": "completed"}
+        task_page = state["task_wiki_page"]
+
+        try:
+            await client.transition_task(
+                task_page,
+                "done",
+                extra_fields={"cost_usd": str(round(total_cost, 4))},
+            )
+        except Exception as exc:
+            logger.error(
+                "finalize: failed to transition %s to done: %s",
+                task_page,
+                exc,
+            )
+
+        return {"graph_status": "completed"}

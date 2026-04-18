@@ -28,15 +28,30 @@ class GitHubClient:
         settings = get_settings()
         self._token = token or settings.github_token
         self._repo = repo or settings.github_repo
+        self._client = httpx.AsyncClient(
+            base_url=_BASE_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30.0,
+        )
 
     def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
+        headers: dict[str, str] = {}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
+
+    async def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "GitHubClient":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
 
     async def get_pr(self, pr_number: int) -> dict:
         """Fetch full pull request metadata.
@@ -50,11 +65,10 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self._headers())
-            resp.raise_for_status()
-            return resp.json()
+        url = f"/repos/{self._repo}/pulls/{pr_number}"
+        resp = await self._client.get(url, headers=self._headers())
+        resp.raise_for_status()
+        return resp.json()
 
     async def get_pr_diff(self, pr_number: int) -> str:
         """Fetch the unified diff for a pull request.
@@ -68,12 +82,11 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}"
+        url = f"/repos/{self._repo}/pulls/{pr_number}"
         headers = {**self._headers(), "Accept": "application/vnd.github.v3.diff"}
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            return resp.text
+        resp = await self._client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.text
 
     async def create_pr_comment(self, pr_number: int, body: str) -> dict:
         """Post an issue comment on a pull request.
@@ -88,15 +101,14 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/issues/{pr_number}/comments"
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url,
-                headers=self._headers(),
-                json={"body": body},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        url = f"/repos/{self._repo}/issues/{pr_number}/comments"
+        resp = await self._client.post(
+            url,
+            headers=self._headers(),
+            json={"body": body},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def request_changes(self, pr_number: int, body: str) -> dict:
         """Submit a 'REQUEST_CHANGES' review on a pull request.
@@ -111,15 +123,14 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}/reviews"
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url,
-                headers=self._headers(),
-                json={"event": "REQUEST_CHANGES", "body": body},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        url = f"/repos/{self._repo}/pulls/{pr_number}/reviews"
+        resp = await self._client.post(
+            url,
+            headers=self._headers(),
+            json={"event": "REQUEST_CHANGES", "body": body},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def approve_pr(self, pr_number: int, body: str = "") -> dict:
         """Submit an 'APPROVE' review on a pull request.
@@ -134,18 +145,20 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}/reviews"
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url,
-                headers=self._headers(),
-                json={"event": "APPROVE", "body": body},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        url = f"/repos/{self._repo}/pulls/{pr_number}/reviews"
+        resp = await self._client.post(
+            url,
+            headers=self._headers(),
+            json={"event": "APPROVE", "body": body},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def merge_pr(
-        self, pr_number: int, commit_title: str = "", merge_method: str = "squash"
+        self,
+        pr_number: int,
+        commit_title: str = "",
+        merge_method: str = "squash",
     ) -> dict:
         """Merge a pull request via the GitHub API.
 
@@ -160,14 +173,13 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}/merge"
+        url = f"/repos/{self._repo}/pulls/{pr_number}/merge"
         body: dict = {"merge_method": merge_method}
         if commit_title:
             body["commit_title"] = commit_title
-        async with httpx.AsyncClient() as client:
-            resp = await client.put(url, headers=self._headers(), json=body)
-            resp.raise_for_status()
-            return resp.json()
+        resp = await self._client.put(url, headers=self._headers(), json=body)
+        resp.raise_for_status()
+        return resp.json()
 
     async def get_file_content(self, path: str, ref: str = "staging") -> str:
         """Fetch raw content of a file from the repository.
@@ -185,11 +197,10 @@ class GitHubClient:
         """
         import base64
 
-        url = f"{_BASE_URL}/repos/{self._repo}/contents/{path}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self._headers(), params={"ref": ref})
-            resp.raise_for_status()
-            data = resp.json()
+        url = f"/repos/{self._repo}/contents/{path}"
+        resp = await self._client.get(url, headers=self._headers(), params={"ref": ref})
+        resp.raise_for_status()
+        data = resp.json()
         if data.get("type") != "file":
             raise ValueError(f"Not a file: {path!r} (type={data.get('type')})")
         return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
@@ -206,15 +217,14 @@ class GitHubClient:
         Raises:
             httpx.HTTPStatusError: On non-2xx responses.
         """
-        url = f"{_BASE_URL}/repos/{self._repo}/pulls/{pr_number}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.patch(
-                url,
-                headers=self._headers(),
-                json={"state": "closed"},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        url = f"/repos/{self._repo}/pulls/{pr_number}"
+        resp = await self._client.patch(
+            url,
+            headers=self._headers(),
+            json={"state": "closed"},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _extract_pr_number(pr_url: str) -> int | None:

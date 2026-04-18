@@ -34,8 +34,8 @@ async def task_intake_node(state: FactoryState) -> dict:
     task_wiki_page: str = state.get("task_wiki_page", "")
     logger.info("task_intake: loading task %s", task_wiki_page)
 
-    meshwiki_client = MeshWikiClient()
-    page = await meshwiki_client.get_page(task_wiki_page)
+    async with MeshWikiClient() as meshwiki_client:
+        page = await meshwiki_client.get_page(task_wiki_page)
 
     if page is None:
         logger.error("task_intake: task page %s not found", task_wiki_page)

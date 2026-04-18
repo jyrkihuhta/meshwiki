@@ -62,6 +62,20 @@ def _make_subtask(**kwargs) -> SubTask:
     return subtask
 
 
+def _mock_client_for_cm(mock_client: AsyncMock) -> AsyncMock:
+    """Configure an AsyncMock to work as a context manager returning itself.
+
+    When MeshWikiClient/GitHubClient is patched with return_value=mock_client,
+    the code calls `async with mock_client as cm`.  By default AsyncMock's
+    __aenter__ returns a new AsyncMock (not mock_client), so method calls go
+    to the wrong object.  This helper fixes __aenter__ / __aexit__ so that
+    `cm is mock_client`.
+    """
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    return mock_client
+
+
 # ---------------------------------------------------------------------------
 # task_intake_node
 # ---------------------------------------------------------------------------
@@ -75,10 +89,14 @@ async def test_task_intake_node() -> None:
     mock_page = {
         "name": "Task_0042_test",
         "content": "## Requirements\nBuild the feature.",
-        "metadata": {"title": "Test Task Title", "status": "planned"},
+        "metadata": {
+            "title": "Test Task Title",
+            "status": "planned",
+            "assignee": "factory",
+        },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -95,7 +113,7 @@ async def test_task_intake_node_page_not_found() -> None:
     """task_intake_node falls back gracefully when the page is not found."""
     state = _make_state()
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=None)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -125,7 +143,7 @@ async def test_decompose_node() -> None:
         title="Build something",
     )
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.create_page = AsyncMock(return_value={})
     mock_meshwiki.transition_task = AsyncMock(return_value={})
 
@@ -149,10 +167,9 @@ async def test_decompose_node() -> None:
     create_args = mock_meshwiki.create_page.call_args
     assert create_args[0][0] == "Task_0042_Sub_01_build"
 
-    # Should have transitioned subtask to planned and parent to decomposed
-    assert mock_meshwiki.transition_task.await_count == 2
+    # Should have transitioned the parent task to decomposed
+    assert mock_meshwiki.transition_task.await_count == 1
     calls = [c[0] for c in mock_meshwiki.transition_task.call_args_list]
-    assert ("Task_0042_Sub_01_build", "planned") in calls
     assert ("Task_0042_test", "decomposed") in calls
 
 
@@ -161,7 +178,7 @@ async def test_decompose_node_no_subtasks() -> None:
     """decompose_node handles empty subtask list from PM agent."""
     state = _make_state()
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.create_page = AsyncMock(return_value={})
     mock_meshwiki.transition_task = AsyncMock(return_value={})
 
@@ -199,10 +216,10 @@ async def test_pm_review_node_approved() -> None:
     )
     state = _make_state(subtasks=[review_subtask])
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr_diff = AsyncMock(return_value="diff content")
 
     with (
@@ -231,10 +248,10 @@ async def test_pm_review_node_changes_requested() -> None:
     )
     state = _make_state(subtasks=[review_subtask])
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.get_page = AsyncMock(return_value=None)
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
 
     with (
         patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
@@ -265,8 +282,8 @@ async def test_pm_review_node_skips_non_review_subtasks() -> None:
     )
     state = _make_state(subtasks=[pending_subtask])
 
-    mock_meshwiki = AsyncMock()
-    mock_github = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_github = _mock_client_for_cm(AsyncMock())
 
     with (
         patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
@@ -333,12 +350,13 @@ async def test_task_intake_direct_grind() -> None:
             "title": "Direct Grind Task",
             "status": "planned",
             "skip_decomposition": "true",
+            "assignee": "factory",
             "expected_files": ["src/meshwiki/main.py"],
             "token_budget": "30000",
         },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -379,10 +397,11 @@ async def test_task_intake_direct_grind_boolean_flag() -> None:
             "title": "Bool Flag Task",
             "status": "planned",
             "skip_decomposition": True,
+            "assignee": "factory",
         },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -449,7 +468,7 @@ async def test_finalize_node() -> None:
     """finalize_node calls transition_task with 'done' and returns completed status."""
     state = _make_state(cost_usd=0.0042)
 
-    mock_client_instance = AsyncMock()
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
     mock_client_instance.transition_task = AsyncMock(return_value={})
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
@@ -469,7 +488,7 @@ async def test_finalize_node_handles_client_error() -> None:
     """finalize_node logs and swallows MeshWiki client errors, still returns completed."""
     state = _make_state()
 
-    mock_client_instance = AsyncMock()
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
     mock_client_instance.transition_task = AsyncMock(
         side_effect=RuntimeError("network error")
     )
@@ -562,7 +581,7 @@ async def test_merge_check_node_merged_pr() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 10, "state": "closed", "merged": True}
     )
@@ -585,7 +604,7 @@ async def test_merge_check_node_closed_not_merged() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 11, "state": "closed", "merged": False}
     )
@@ -607,7 +626,7 @@ async def test_merge_check_node_still_open() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 12, "state": "open", "merged": False}
     )
@@ -630,7 +649,7 @@ async def test_merge_check_node_pr_number_from_url() -> None:
     review_sub["pr_url"] = "https://github.com/owner/repo/pull/42"
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 42, "state": "closed", "merged": True}
     )
@@ -694,7 +713,7 @@ async def test_merge_check_node_api_error_continues() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         side_effect=httpx.HTTPStatusError(
             "404 Not Found",
@@ -737,7 +756,7 @@ async def test_merge_check_node_multiple_subtasks() -> None:
             return {"number": 20, "state": "closed", "merged": True}
         return {"number": 21, "state": "open", "merged": False}
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(side_effect=_fake_get_pr)
 
     with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):

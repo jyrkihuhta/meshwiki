@@ -77,7 +77,7 @@ class FactoryState(TypedDict):
     decomposition_approved: bool
 
     # Execution
-    active_grinders: dict[str, str]  # subtask_id -> grinder session id
+    active_grinders: list[str]  # subtask_ids currently running in a sandbox
     completed_subtask_ids: Annotated[list[str], _union_ids]
     failed_subtask_ids: Annotated[list[str], _union_ids]
 
