@@ -36,58 +36,57 @@ async def merge_check_node(state: FactoryState) -> dict:
         state.get("task_wiki_page", "<unknown>"),
     )
 
-    github_client = GitHubClient()
-    subtasks = list(state["subtasks"])
+    async with GitHubClient() as github_client:
+        subtasks = list(state["subtasks"])
 
-    for i, subtask in enumerate(subtasks):
-        if subtask["status"] != "review":
-            continue
+        for i, subtask in enumerate(subtasks):
+            if subtask["status"] != "review":
+                continue
 
-        pr_number: int | None = subtask.get("pr_number")
+            pr_number: int | None = subtask.get("pr_number")
 
-        # Fall back to extracting from pr_url if pr_number is not set
-        if pr_number is None:
-            pr_url = subtask.get("pr_url")
-            if pr_url:
-                pr_number = _extract_pr_number(pr_url)
+            if pr_number is None:
+                pr_url = subtask.get("pr_url")
+                if pr_url:
+                    pr_number = _extract_pr_number(pr_url)
 
-        if pr_number is None:
-            logger.warning(
-                "merge_check: subtask %s in 'review' has no pr_number or pr_url — skipping",
-                subtask["id"],
-            )
-            continue
+            if pr_number is None:
+                logger.warning(
+                    "merge_check: subtask %s in 'review' has no pr_number or pr_url — skipping",
+                    subtask["id"],
+                )
+                continue
 
-        try:
-            pr = await github_client.get_pr(pr_number)
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "merge_check: failed to fetch PR #%s for subtask %s: %s",
-                pr_number,
-                subtask["id"],
-                exc,
-            )
-            continue
+            try:
+                pr = await github_client.get_pr(pr_number)
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "merge_check: failed to fetch PR #%s for subtask %s: %s",
+                    pr_number,
+                    subtask["id"],
+                    exc,
+                )
+                continue
 
-        if pr.get("merged"):
-            logger.info(
-                "merge_check: PR #%s is merged for subtask %s",
-                pr_number,
-                subtask["id"],
-            )
-            subtasks[i] = {**subtask, "status": "merged"}
-        elif pr.get("state") == "closed":
-            logger.info(
-                "merge_check: PR #%s is closed (not merged) for subtask %s — marking failed",
-                pr_number,
-                subtask["id"],
-            )
-            subtasks[i] = {**subtask, "status": "failed"}
-        else:
-            logger.debug(
-                "merge_check: PR #%s is still open for subtask %s",
-                pr_number,
-                subtask["id"],
-            )
+            if pr.get("merged"):
+                logger.info(
+                    "merge_check: PR #%s is merged for subtask %s",
+                    pr_number,
+                    subtask["id"],
+                )
+                subtasks[i] = {**subtask, "status": "merged"}
+            elif pr.get("state") == "closed":
+                logger.info(
+                    "merge_check: PR #%s is closed (not merged) for subtask %s — marking failed",
+                    pr_number,
+                    subtask["id"],
+                )
+                subtasks[i] = {**subtask, "status": "failed"}
+            else:
+                logger.debug(
+                    "merge_check: PR #%s is still open for subtask %s",
+                    pr_number,
+                    subtask["id"],
+                )
 
-    return {"subtasks": subtasks}
+        return {"subtasks": subtasks}

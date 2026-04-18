@@ -343,7 +343,10 @@ async def _messages_create_with_retry(
                     for b in content
                     if hasattr(b, "type") and b.type == "tool_use"
                 ]
-                oai_msg: dict[str, Any] = {"role": "assistant", "content": " ".join(text_parts) or None}
+                oai_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": " ".join(text_parts) or None,
+                }
                 if tool_calls:
                     oai_msg["tool_calls"] = tool_calls
                 oai_messages.append(oai_msg)
@@ -354,11 +357,13 @@ async def _messages_create_with_retry(
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
-                        oai_messages.append({
-                            "role": "tool",
-                            "tool_call_id": block["tool_use_id"],
-                            "content": str(block.get("content", "")),
-                        })
+                        oai_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block["tool_use_id"],
+                                "content": str(block.get("content", "")),
+                            }
+                        )
                     else:
                         oai_messages.append({"role": "user", "content": str(block)})
             else:
@@ -616,7 +621,7 @@ async def review_with_pm(
         "(staging), not relative to main. Changes that were already on staging will NOT "
         "appear in the diff even if they are part of the full implementation. Before "
         "requesting changes for a missing feature, use `github_read_file` with "
-        f"`ref: \"{branch_name}\"` to read the actual current file and verify whether "
+        f'`ref: "{branch_name}"` to read the actual current file and verify whether '
         "the feature is already present.\n\n"
         "Please review this PR. "
         "Use `pm_approve_pr` if the implementation meets all acceptance criteria, "

@@ -20,27 +20,26 @@ async def finalize_node(state: FactoryState) -> dict:
     Returns:
         Partial state update setting ``graph_status`` to ``"completed"``.
     """
-    client = MeshWikiClient()
-
-    logger.info(
-        "finalize: completing task %s (cost: $%.4f)",
-        state.get("task_wiki_page", "<unknown>"),
-        state.get("cost_usd", 0.0),
-    )
-
-    task_page = state["task_wiki_page"]
-
-    try:
-        await client.transition_task(
-            task_page,
-            "done",
-            extra_fields={"cost_usd": str(round(state.get("cost_usd", 0), 4))},
-        )
-    except Exception as exc:
-        logger.error(
-            "finalize: failed to transition %s to done: %s",
-            task_page,
-            exc,
+    async with MeshWikiClient() as client:
+        logger.info(
+            "finalize: completing task %s (cost: $%.4f)",
+            state.get("task_wiki_page", "<unknown>"),
+            state.get("cost_usd", 0.0),
         )
 
-    return {"graph_status": "completed"}
+        task_page = state["task_wiki_page"]
+
+        try:
+            await client.transition_task(
+                task_page,
+                "done",
+                extra_fields={"cost_usd": str(round(state.get("cost_usd", 0), 4))},
+            )
+        except Exception as exc:
+            logger.error(
+                "finalize: failed to transition %s to done: %s",
+                task_page,
+                exc,
+            )
+
+        return {"graph_status": "completed"}
