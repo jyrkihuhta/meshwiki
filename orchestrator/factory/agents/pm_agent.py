@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from ..config import get_settings
+from ..cost import tokens_to_usd
 from ..integrations.github_client import _extract_pr_number
 from ..state import FactoryState, SubTask
 
@@ -343,7 +344,10 @@ async def _messages_create_with_retry(
                     for b in content
                     if hasattr(b, "type") and b.type == "tool_use"
                 ]
-                oai_msg: dict[str, Any] = {"role": "assistant", "content": " ".join(text_parts) or None}
+                oai_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": " ".join(text_parts) or None,
+                }
                 if tool_calls:
                     oai_msg["tool_calls"] = tool_calls
                 oai_messages.append(oai_msg)
@@ -354,11 +358,13 @@ async def _messages_create_with_retry(
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
-                        oai_messages.append({
-                            "role": "tool",
-                            "tool_call_id": block["tool_use_id"],
-                            "content": str(block.get("content", "")),
-                        })
+                        oai_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block["tool_use_id"],
+                                "content": str(block.get("content", "")),
+                            }
+                        )
                     else:
                         oai_messages.append({"role": "user", "content": str(block)})
             else:
@@ -417,13 +423,14 @@ async def decompose_with_pm(
     state: FactoryState,
     meshwiki_client: "MeshWikiClient",
     github_client: "GitHubClient | None",
-) -> list[SubTask]:
+) -> dict[str, Any]:
     """Run the PM agentic loop to decompose a parent task into subtasks.
 
     1. Reads context pages from MeshWiki.
     2. Builds a user message asking Claude to decompose the task.
     3. Runs the agentic loop (max 20 tool calls).
     4. Returns the list of SubTask objects created via ``meshwiki_create_subtask``.
+    5. Tracks incremental cost from Anthropic API responses.
 
     Args:
         state: Current FactoryState with task details.
@@ -431,11 +438,13 @@ async def decompose_with_pm(
         github_client: GitHub client (unused during decomposition, may be None).
 
     Returns:
-        List of SubTask TypedDicts produced by the PM agent.
+        Dict with ``subtasks`` list and ``incremental_cost_usd`` float.
     """
     client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
+    incremental_cost_usd: float = 0.0
+    model = get_settings().pm_decompose_model
 
     # Read context pages
     context_parts: list[str] = []
@@ -471,12 +480,15 @@ async def decompose_with_pm(
     while tool_calls_remaining > 0:
         response = await _messages_create_with_retry(
             client,
-            model=get_settings().pm_decompose_model,
+            model=model,
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
             messages=messages,
         )
+
+        if hasattr(response, "usage") and response.usage:
+            incremental_cost_usd += tokens_to_usd(response.usage, model)
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
@@ -553,7 +565,7 @@ async def decompose_with_pm(
             )
             break
 
-    return subtasks
+    return {"subtasks": subtasks, "incremental_cost_usd": incremental_cost_usd}
 
 
 async def review_with_pm(
@@ -576,6 +588,7 @@ async def review_with_pm(
     """
     settings = get_settings()
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+    incremental_cost_usd: float = 0.0
 
     pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
         subtask.get("pr_url", "")
@@ -616,7 +629,7 @@ async def review_with_pm(
         "(staging), not relative to main. Changes that were already on staging will NOT "
         "appear in the diff even if they are part of the full implementation. Before "
         "requesting changes for a missing feature, use `github_read_file` with "
-        f"`ref: \"{branch_name}\"` to read the actual current file and verify whether "
+        f'`ref: "{branch_name}"` to read the actual current file and verify whether '
         "the feature is already present.\n\n"
         "Please review this PR. "
         "Use `pm_approve_pr` if the implementation meets all acceptance criteria, "
@@ -646,6 +659,10 @@ async def review_with_pm(
                 max_tokens=512,
                 messages=[{"role": "user", "content": triage_prompt}],
             )
+            if hasattr(triage_response, "usage") and triage_response.usage:
+                incremental_cost_usd += tokens_to_usd(
+                    triage_response.usage, triage_model
+                )
             triage_text = "".join(
                 b.text for b in triage_response.content if hasattr(b, "text")
             ).strip()
@@ -656,7 +673,11 @@ async def review_with_pm(
                 triage_text[:120],
             )
             if triage_text.upper().startswith("APPROVED"):
-                return {"decision": "approved", "feedback": triage_text}
+                return {
+                    "decision": "approved",
+                    "feedback": triage_text,
+                    "incremental_cost_usd": incremental_cost_usd,
+                }
             # Triage flagged issues — fall through to full review with Sonnet
             # so the grinder gets actionable, detailed feedback.
             logger.info(
@@ -680,6 +701,11 @@ async def review_with_pm(
             tools=PM_TOOLS,
             messages=messages,
         )
+
+        if hasattr(response, "usage") and response.usage:
+            incremental_cost_usd += tokens_to_usd(
+                response.usage, settings.pm_review_model
+            )
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -760,4 +786,5 @@ async def review_with_pm(
     return {
         "decision": decision or "changes_requested",
         "feedback": feedback,
+        "incremental_cost_usd": incremental_cost_usd,
     }

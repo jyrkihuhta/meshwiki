@@ -25,6 +25,11 @@ def _union_ids(current: list[str], update: list[str]) -> list[str]:
     return list(set(current) | set(update))
 
 
+def _append_cost(current: list[float], update: list[float]) -> list[float]:
+    """Append reducer for incremental cost lists."""
+    return current + update
+
+
 class SubTask(TypedDict):
     """Represents a single unit of work assigned to a grinder agent."""
 
@@ -53,7 +58,9 @@ class SubTask(TypedDict):
     token_budget: int  # max tokens for the grinder session
     tokens_used: int
     review_feedback: str | None  # PM feedback for rejected subtasks
-    code_skeleton: str | None  # starter code template provided by PM during decomposition
+    code_skeleton: (
+        str | None
+    )  # starter code template provided by PM during decomposition
 
 
 class FactoryState(TypedDict):
@@ -83,6 +90,7 @@ class FactoryState(TypedDict):
 
     # Cost
     cost_usd: float
+    incremental_costs_usd: Annotated[list[float], _append_cost]
 
     # Status
     graph_status: Literal[

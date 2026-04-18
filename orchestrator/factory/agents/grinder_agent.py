@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from ..config import get_settings
+from ..cost import sandbox_time_to_usd, tokens_to_usd
 from ..state import FactoryState, SubTask
 
 if TYPE_CHECKING:
@@ -468,6 +469,7 @@ async def grind_subtask_e2b(
     """
     import os
     import re as _re
+    import time
 
     from e2b.sandbox.commands.command_handle import PtySize
     from e2b_code_interpreter import AsyncSandbox
@@ -549,6 +551,7 @@ async def grind_subtask_e2b(
     pr_url: str | None = None
     branch_name = f"factory/{subtask['id']}"
     status = "failed"
+    sandbox_cost: float = 0.0
 
     # Expose E2B_API_KEY so AsyncSandbox.create() picks it up from the environment
     os.environ["E2B_API_KEY"] = settings.e2b_api_key
@@ -556,6 +559,7 @@ async def grind_subtask_e2b(
     # Model string: Kilo expects "provider/model" format
     model_arg = f"minimax/{settings.grinder_model}"
 
+    t0 = time.monotonic()
     sbx = None
     try:
         sbx = await AsyncSandbox.create(
@@ -699,6 +703,8 @@ async def grind_subtask_e2b(
     except Exception as exc:
         logger.exception("e2b grinder: sandbox error: %s", exc)
     finally:
+        elapsed = time.monotonic() - t0
+        sandbox_cost = sandbox_time_to_usd(elapsed)
         if sbx is not None:
             try:
                 await sbx.kill()
@@ -712,7 +718,7 @@ async def grind_subtask_e2b(
             "pr_url": pr_url,
         }
     )
-    return subtask  # type: ignore[return-value]
+    return {"subtask": subtask, "incremental_cost_usd": sandbox_cost}
 
 
 async def grind_subtask(
@@ -807,6 +813,7 @@ async def grind_subtask(
     max_tool_calls = min(subtask["token_budget"] // 1000, 50)
     tool_calls_remaining = max_tool_calls
     tokens_used = 0
+    incremental_cost_usd: float = 0.0
     pr_url: str | None = None
     branch_name: str | None = subtask.get("branch_name")
 
@@ -825,10 +832,13 @@ async def grind_subtask(
             messages=messages,
         )
 
-        # Track token usage
+        # Track token usage and cost
         if hasattr(response, "usage") and response.usage:
             tokens_used += getattr(response.usage, "input_tokens", 0)
             tokens_used += getattr(response.usage, "output_tokens", 0)
+            incremental_cost_usd += tokens_to_usd(
+                response.usage, settings.grinder_model
+            )
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
@@ -909,4 +919,4 @@ async def grind_subtask(
             "status": final_status,
         }
     )
-    return updated
+    return {"subtask": updated, "incremental_cost_usd": incremental_cost_usd}

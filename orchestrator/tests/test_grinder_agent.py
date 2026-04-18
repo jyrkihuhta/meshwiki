@@ -368,8 +368,8 @@ async def test_grind_subtask_creates_pr() -> None:
             ):
                 result = await grind_subtask(state, subtask, meshwiki_client)
 
-    assert result["status"] == "review"
-    assert result["pr_url"] == pr_url
+    assert result["subtask"]["status"] == "review"
+    assert result["subtask"]["pr_url"] == pr_url
 
 
 @pytest.mark.asyncio
@@ -434,8 +434,8 @@ async def test_grind_subtask_fails_on_budget() -> None:
         ):
             result = await grind_subtask(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +493,7 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     expected_result = _make_subtask(
         status="review", pr_url="https://github.com/owner/repo/pull/1"
     )
+    wrapped_result = {"subtask": expected_result, "incremental_cost_usd": 0.0}
 
     with patch(
         "factory.agents.grinder_agent.get_settings",
@@ -500,12 +501,12 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     ):
         with patch(
             "factory.agents.grinder_agent.grind_subtask_e2b",
-            new=AsyncMock(return_value=expected_result),
+            new=AsyncMock(return_value=wrapped_result),
         ) as mock_e2b:
             result = await grind_subtask(state, subtask, meshwiki_client)
 
     mock_e2b.assert_called_once_with(state, subtask, meshwiki_client)
-    assert result["status"] == "review"
+    assert result["subtask"]["status"] == "review"
 
 
 def _make_sandbox_mock(commands_side_effect: list, pty_output: str = "") -> AsyncMock:
@@ -577,8 +578,8 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
             mock_cls.create = AsyncMock(return_value=mock_sandbox)
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "review"
-    assert result["pr_url"] == pr_url
+    assert result["subtask"]["status"] == "review"
+    assert result["subtask"]["pr_url"] == pr_url
 
 
 @pytest.mark.asyncio
@@ -608,8 +609,8 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
             mock_cls.create = AsyncMock(return_value=mock_sandbox)
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None
 
 
 @pytest.mark.asyncio
@@ -634,5 +635,5 @@ async def test_grind_subtask_e2b_sandbox_error() -> None:
             mock_cls.create = AsyncMock(side_effect=RuntimeError("sandbox auth failed"))
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None

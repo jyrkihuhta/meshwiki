@@ -133,7 +133,9 @@ async def test_decompose_node() -> None:
         patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
         patch(
             "factory.nodes.decompose.decompose_with_pm",
-            new=AsyncMock(return_value=[mock_subtask]),
+            new=AsyncMock(
+                return_value={"subtasks": [mock_subtask], "incremental_cost_usd": 0.0}
+            ),
         ),
     ):
         result = await decompose_node(state)
@@ -167,7 +169,7 @@ async def test_decompose_node_no_subtasks() -> None:
         patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
         patch(
             "factory.nodes.decompose.decompose_with_pm",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value={"subtasks": [], "incremental_cost_usd": 0.0}),
         ),
     ):
         result = await decompose_node(state)

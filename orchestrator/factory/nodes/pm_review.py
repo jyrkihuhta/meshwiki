@@ -40,6 +40,7 @@ async def pm_review_node(state: FactoryState) -> dict:
     logger.info("pm_review: %d subtask(s) in review status", len(review_subtasks))
 
     updated_subtasks: list[SubTask] = []
+    total_incremental_cost: float = 0.0
     for subtask in subtasks:
         if subtask["status"] != "review":
             updated_subtasks.append(subtask)
@@ -74,6 +75,7 @@ async def pm_review_node(state: FactoryState) -> dict:
 
         decision: str = result.get("decision", "changes_requested")
         feedback: str | None = result.get("feedback")
+        total_incremental_cost += result.get("incremental_cost_usd", 0.0)
 
         if decision == "approved":
             if get_settings().auto_merge and subtask.get("pr_url"):
@@ -160,4 +162,7 @@ async def pm_review_node(state: FactoryState) -> dict:
                     exc,
                 )
 
-    return {"subtasks": updated_subtasks}
+    return {
+        "subtasks": updated_subtasks,
+        "incremental_costs_usd": [total_incremental_cost],
+    }
