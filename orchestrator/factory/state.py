@@ -53,7 +53,9 @@ class SubTask(TypedDict):
     token_budget: int  # max tokens for the grinder session
     tokens_used: int
     review_feedback: str | None  # PM feedback for rejected subtasks
-    code_skeleton: str | None  # starter code template provided by PM during decomposition
+    code_skeleton: (
+        str | None
+    )  # starter code template provided by PM during decomposition
 
 
 class FactoryState(TypedDict):
@@ -70,7 +72,7 @@ class FactoryState(TypedDict):
     decomposition_approved: bool
 
     # Execution
-    active_grinders: dict[str, str]  # subtask_id -> grinder session id
+    active_grinders: list[str]  # subtask_ids currently running in a sandbox
     completed_subtask_ids: Annotated[list[str], _union_ids]
     failed_subtask_ids: Annotated[list[str], _union_ids]
 
