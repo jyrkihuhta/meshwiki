@@ -14,18 +14,24 @@ async def finalize_node(state: FactoryState) -> dict:
     Calls ``MeshWikiClient.transition_task()`` to move the task page to
     ``"done"`` state and persists ``cost_usd`` in the page frontmatter.
 
+    Accumulates all incremental costs from ``incremental_costs_usd`` into
+    ``cost_usd`` before recording.
+
     Args:
         state: Current FactoryState after all PRs are confirmed merged.
 
     Returns:
         Partial state update setting ``graph_status`` to ``"completed"``.
     """
+    total_cost = sum(state.get("incremental_costs_usd", []))
+    total_cost += state.get("cost_usd", 0.0)
+
     client = MeshWikiClient()
 
     logger.info(
         "finalize: completing task %s (cost: $%.4f)",
         state.get("task_wiki_page", "<unknown>"),
-        state.get("cost_usd", 0.0),
+        total_cost,
     )
 
     task_page = state["task_wiki_page"]
@@ -34,7 +40,7 @@ async def finalize_node(state: FactoryState) -> dict:
         await client.transition_task(
             task_page,
             "done",
-            extra_fields={"cost_usd": str(round(state.get("cost_usd", 0), 4))},
+            extra_fields={"cost_usd": str(round(total_cost, 4))},
         )
     except Exception as exc:
         logger.error(

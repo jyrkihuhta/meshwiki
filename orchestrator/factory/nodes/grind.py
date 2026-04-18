@@ -65,7 +65,9 @@ async def grind_node(state: FactoryState) -> dict:
     )
 
     meshwiki_client = MeshWikiClient()
-    updated = await grind_subtask(state, subtask, meshwiki_client)
+    result = await grind_subtask(state, subtask, meshwiki_client)
+    updated = result["subtask"]
+    incremental_cost = result.get("incremental_cost_usd", 0.0)
 
     # Transition the wiki task page to reflect the grinder outcome
     final_status = updated.get("status", "failed")
@@ -93,4 +95,4 @@ async def grind_node(state: FactoryState) -> dict:
         )
 
     subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
-    return {"subtasks": subtasks}
+    return {"subtasks": subtasks, "incremental_costs_usd": [incremental_cost]}

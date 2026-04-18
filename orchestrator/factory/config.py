@@ -32,11 +32,21 @@ class Settings(BaseSettings):
     grinder_model: str = "MiniMax-M2.7"  # FACTORY_GRINDER_MODEL
     checkpoint_db: str = "/data/checkpoints.db"  # FACTORY_CHECKPOINT_DB
     pr_base_branch: str = "main"  # FACTORY_PR_BASE_BRANCH — branch grinders target
-    auto_merge: bool = False  # FACTORY_AUTO_MERGE — merge PRs after PM approval, skip human review
-    pm_decompose_model: str = "claude-sonnet-4-6"  # FACTORY_PM_DECOMPOSE_MODEL — task decomposition
-    pm_review_model: str = "claude-sonnet-4-6"  # FACTORY_PM_REVIEW_MODEL — full review model
-    pm_triage_model: str = "claude-haiku-4-5-20251001"  # FACTORY_PM_TRIAGE_MODEL — fast triage; empty = skip triage
-    pm_review_max_diff_lines: int = 500  # FACTORY_PM_REVIEW_MAX_DIFF_LINES — truncate diff beyond this
+    auto_merge: bool = (
+        False  # FACTORY_AUTO_MERGE — merge PRs after PM approval, skip human review
+    )
+    pm_decompose_model: str = (
+        "claude-sonnet-4-6"  # FACTORY_PM_DECOMPOSE_MODEL — task decomposition
+    )
+    pm_review_model: str = (
+        "claude-sonnet-4-6"  # FACTORY_PM_REVIEW_MODEL — full review model
+    )
+    pm_triage_model: str = (
+        "claude-haiku-4-5-20251001"  # FACTORY_PM_TRIAGE_MODEL — fast triage; empty = skip triage
+    )
+    pm_review_max_diff_lines: int = (
+        500  # FACTORY_PM_REVIEW_MAX_DIFF_LINES — truncate diff beyond this
+    )
 
     model_config = SettingsConfigDict(env_prefix="FACTORY_")
 

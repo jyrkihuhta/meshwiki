@@ -103,7 +103,9 @@ async def decompose_node(state: FactoryState) -> dict:
     # github_client is not needed for decomposition
     github_client = None
 
-    subtasks = await decompose_with_pm(state, meshwiki_client, github_client)
+    result = await decompose_with_pm(state, meshwiki_client, github_client)
+    subtasks = result["subtasks"]
+    incremental_cost = result.get("incremental_cost_usd", 0.0)
 
     parent_task = state.get("task_wiki_page", "")
 
@@ -113,7 +115,9 @@ async def decompose_node(state: FactoryState) -> dict:
     for subtask in subtasks:
         page = subtask["wiki_page"]
         expected_prefix = parent_task + "/"
-        relative = page[len(expected_prefix):] if page.startswith(expected_prefix) else page
+        relative = (
+            page[len(expected_prefix) :] if page.startswith(expected_prefix) else page
+        )
         if "/" in relative:
             logger.error(
                 "decompose: rejecting nested subtask %s (parent=%s) — "
@@ -154,4 +158,8 @@ async def decompose_node(state: FactoryState) -> dict:
             "decompose: failed to transition parent task %s: %s", parent_task, exc
         )
 
-    return {"subtasks": subtasks, "graph_status": "dispatching"}
+    return {
+        "subtasks": subtasks,
+        "graph_status": "dispatching",
+        "incremental_costs_usd": [incremental_cost],
+    }

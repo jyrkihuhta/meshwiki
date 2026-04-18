@@ -59,11 +59,13 @@ def _make_text_block(text: str = "Done."):
     return block
 
 
-def _make_response(content, stop_reason: str = "tool_use"):
+def _make_response(content, stop_reason: str = "tool_use", usage=None):
     """Build a mock Anthropic Messages response."""
     resp = MagicMock()
     resp.content = content
     resp.stop_reason = stop_reason
+    if usage is not None:
+        resp.usage = usage
     return resp
 
 
@@ -167,8 +169,9 @@ async def test_decompose_with_pm_returns_subtasks() -> None:
         "factory.agents.pm_agent.anthropic.AsyncAnthropic",
         return_value=mock_anthropic_client,
     ):
-        subtasks = await decompose_with_pm(state, meshwiki_client, github_client=None)
+        result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
+    subtasks = result["subtasks"]
     assert len(subtasks) == 1
     assert subtasks[0]["title"] == "Add search"
     assert subtasks[0]["status"] == "pending"
@@ -199,9 +202,9 @@ async def test_decompose_stops_on_end_turn() -> None:
         "factory.agents.pm_agent.anthropic.AsyncAnthropic",
         return_value=mock_anthropic_client,
     ):
-        subtasks = await decompose_with_pm(state, meshwiki_client, github_client=None)
+        result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
-    assert subtasks == []
+    assert result["subtasks"] == []
 
 
 @pytest.mark.asyncio
@@ -260,8 +263,9 @@ async def test_decompose_reads_wiki_page_via_tool() -> None:
         "factory.agents.pm_agent.anthropic.AsyncAnthropic",
         return_value=mock_anthropic_client,
     ):
-        subtasks = await decompose_with_pm(state, meshwiki_client, github_client=None)
+        result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
+    subtasks = result["subtasks"]
     assert len(subtasks) == 1
 
 

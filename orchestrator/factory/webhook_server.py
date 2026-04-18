@@ -36,10 +36,13 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
         try:
             tasks = await client.list_tasks(status=status)
         except Exception as exc:
-            logger.warning("factory: could not fetch %s tasks on startup: %s", status, exc)
+            logger.warning(
+                "factory: could not fetch %s tasks on startup: %s", status, exc
+            )
             continue
         all_factory_tasks.extend(
-            t for t in tasks
+            t
+            for t in tasks
             if t.get("metadata", {}).get("assignee") == "factory"
             or t.get("assignee") == "factory"  # flat format (defensive)
         )
@@ -48,7 +51,9 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
         return
 
     factory_tasks = all_factory_tasks
-    logger.info("factory: found %d active factory task(s) on startup", len(factory_tasks))
+    logger.info(
+        "factory: found %d active factory task(s) on startup", len(factory_tasks)
+    )
     for task in factory_tasks:
         page_name = task.get("name", "")
         if not page_name:
@@ -80,7 +85,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver:
         app.state.graph = build_graph(saver)
-        logger.info("factory: graph initialised with SQLite checkpointer at %s", settings.checkpoint_db)
+        logger.info(
+            "factory: graph initialised with SQLite checkpointer at %s",
+            settings.checkpoint_db,
+        )
         await _resume_interrupted_tasks(app.state.graph, saver, settings)
         yield
     logger.info("factory: SQLite checkpointer closed")
@@ -192,7 +200,9 @@ async def receive_webhook(
     page_name: str = payload.get("page", "")
     data: dict[str, Any] = payload.get("data", {})
 
-    logger.info("webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name)
+    logger.info(
+        "webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name
+    )
 
     if event == "task.assigned":
         # Skip subtask pages — they are driven by their parent graph thread.

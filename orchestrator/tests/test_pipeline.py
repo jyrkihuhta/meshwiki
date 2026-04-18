@@ -9,12 +9,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from langgraph.checkpoint.memory import MemorySaver
 
 from factory.graph import build_graph
 from factory.state import FactoryState, SubTask
-
 
 # ---------------------------------------------------------------------------
 # Helpers

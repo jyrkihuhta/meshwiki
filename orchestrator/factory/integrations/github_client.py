@@ -144,7 +144,9 @@ class GitHubClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def merge_pr(self, pr_number: int, commit_title: str = "", merge_method: str = "squash") -> dict:
+    async def merge_pr(
+        self, pr_number: int, commit_title: str = "", merge_method: str = "squash"
+    ) -> dict:
         """Merge a pull request via the GitHub API.
 
         Args:

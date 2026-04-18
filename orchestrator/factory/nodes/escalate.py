@@ -62,7 +62,9 @@ async def escalate_node(state: FactoryState) -> dict:
     for s in retriable:
         try:
             await client.transition_task(s["wiki_page"], "in_progress")
-            logger.info("escalate: transitioned %s back to in_progress for retry", s["id"])
+            logger.info(
+                "escalate: transitioned %s back to in_progress for retry", s["id"]
+            )
         except Exception as exc:
             logger.warning(
                 "escalate: could not transition %s to in_progress: %s", s["id"], exc
