@@ -1172,40 +1172,6 @@ def _render_backlinks(page_name: str) -> str:
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BackLinks macro
-# ─────────────────────────────────────────────────────────────────────────────
-
-BACKLINKS_PATTERN = re.compile(r"<<BackLinks>>")
-
-
-def _render_backlinks(page_name: str) -> str:
-    """Render the <<BackLinks>> macro as an HTML list of pages linking to this page."""
-    from meshwiki.core.graph import get_engine
-
-    engine = get_engine()
-    if engine is None:
-        return ""
-
-    try:
-        backlinks = engine.get_backlinks(page_name)
-    except Exception:
-        return ""
-
-    if not backlinks:
-        return ""
-
-    lines = ['<ul class="backlinks">']
-    for link_target in backlinks:
-        url_name = link_target.replace(" ", "_")
-        lines.append(
-            f'<li><a href="/page/{url_name}" class="wiki-link">'
-            f"{html_escape(link_target)}</a></li>"
-        )
-    lines.append("</ul>")
-    return "\n".join(lines)
-
-
 class BackLinksPreprocessor(Preprocessor):
     """Replace <<BackLinks>> with rendered HTML, skipping code blocks."""
 
@@ -1252,6 +1218,65 @@ class BackLinksExtension(Extension):
             BackLinksPreprocessor(md, self.page_name),
             "backlinks",
             29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Children macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHILDREN_PATTERN = re.compile(r"<<Children>>")
+
+
+class ChildrenPreprocessor(Preprocessor):
+    """Replace <<Children>> with rendered HTML list of declared child pages."""
+
+    def __init__(self, md: Markdown, page_metadata: dict | None = None) -> None:
+        super().__init__(md)
+        self.page_metadata = page_metadata or {}
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<Children>>" not in text:
+            return lines
+
+        raw = self.page_metadata.get("children", [])
+        if isinstance(raw, str):
+            children = [c.strip() for c in raw.split(",") if c.strip()]
+        else:
+            children = [str(c) for c in raw if c]
+
+        if not children:
+            html = ""
+        else:
+            parts = ['<ul class="children-list">']
+            for child in children:
+                url = child.replace(" ", "_")
+                display = html_escape(child.replace("_", " "))
+                parts.append(
+                    f'<li><a href="/page/{url}" class="wiki-link">{display}</a></li>'
+                )
+            parts.append("</ul>")
+            html = "\n".join(parts)
+
+        def replace_match(_m: re.Match) -> str:
+            return self.md.htmlStash.store(html)
+
+        return CHILDREN_PATTERN.sub(replace_match, text).split("\n")
+
+
+class ChildrenExtension(Extension):
+    """Markdown extension for <<Children>> macro."""
+
+    def __init__(self, page_metadata: dict | None = None, **kwargs):
+        self.page_metadata = page_metadata
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            ChildrenPreprocessor(md, self.page_metadata),
+            "children",
+            28,
         )
 
 
@@ -1845,6 +1870,7 @@ def create_parser(
             PageCountExtension(),  # <<PageCount>>
             TagListExtension(pages=pages),  # <<TagList>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
+            ChildrenExtension(page_metadata=page_metadata),  # <<Children>>
             PageListExtension(pages=pages),  # <<PageList(...)>>
             IncludeExtension(
                 page_contents=page_contents or {},

@@ -29,34 +29,36 @@ def test_build_page_tree_flat():
     assert [n["name"] for n in tree] == ["Alpha", "Beta", "Gamma"]
 
 
-def test_build_page_tree_nested():
+def test_build_page_tree_no_children_all_are_roots():
+    """Without children: declarations, all pages appear as independent roots."""
     pages = _make_pages("Factory", "Factory/Macros", "Factory/Macros/Include")
     tree = build_page_tree_sync(pages)
-    assert len(tree) == 1
-    macros = tree[0]["children"][0]
-    assert macros["name"] == "Factory/Macros"
-    assert macros["children"][0]["name"] == "Factory/Macros/Include"
-
-
-def test_build_page_tree_done_folder_attaches_to_nearest_ancestor():
-    """Tasks under Done/ (no wiki page) attach to the nearest existing ancestor."""
-    pages = _make_pages(
+    # All three are roots because none declares the others as children.
+    assert {n["name"] for n in tree} == {
         "Factory",
         "Factory/Macros",
-        "Factory/Macros/Done/Task1",
-        "Factory/Macros/Done/Task2",
+        "Factory/Macros/Include",
+    }
+
+
+def test_build_page_tree_children_declaration_drives_nesting():
+    """children: frontmatter is authoritative for nesting."""
+    parent = Page(
+        name="Parent",
+        content="",
+        metadata=PageMetadata(children=["Child1", "Child2"]),
     )
-    tree = build_page_tree_sync(pages)
+    c1 = Page(name="Child1", content="", metadata=PageMetadata())
+    c2 = Page(name="Child2", content="", metadata=PageMetadata())
+    tree = build_page_tree_sync([parent, c1, c2])
     assert len(tree) == 1
-    macros = tree[0]["children"][0]
-    assert macros["name"] == "Factory/Macros"
-    child_names = [c["name"] for c in macros["children"]]
-    assert "Factory/Macros/Done/Task1" in child_names
-    assert "Factory/Macros/Done/Task2" in child_names
+    assert tree[0]["name"] == "Parent"
+    child_names = [c["name"] for c in tree[0]["children"]]
+    assert child_names == ["Child1", "Child2"]
 
 
-def test_build_page_tree_orphan_falls_back_to_root():
-    """Pages with no existing ancestor appear at tree root."""
+def test_build_page_tree_page_without_children_declaration_is_root():
+    """A page not listed as any child is a root even if its name contains '/'."""
     pages = _make_pages("Orphan/Child")
     tree = build_page_tree_sync(pages)
     assert tree[0]["name"] == "Orphan/Child"

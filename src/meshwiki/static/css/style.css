@@ -624,8 +624,8 @@ body {
     background: var(--color-danger-hover);
 }
 
-/* Backlinks Panel */
-.backlinks-panel {
+/* Connections Panel (outlinks + backlinks) */
+.connections-panel {
     margin-top: 2rem;
     padding: 1rem;
     background: var(--color-bg-secondary);
@@ -633,29 +633,57 @@ body {
     border-left: 3px solid var(--color-primary);
 }
 
-.backlinks-panel h3 {
+.connections-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+}
+
+@media (max-width: 640px) {
+    .connections-columns {
+        grid-template-columns: 1fr;
+    }
+}
+
+.connections-col h3 {
     font-size: 0.9375rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
     color: var(--color-text-muted);
 }
 
-.backlinks-list {
+.connections-list {
     list-style: none;
     padding: 0;
 }
 
-.backlinks-list li {
+.connections-list li {
     padding: 0.25rem 0;
 }
 
-.backlinks-list a {
+.connections-list a {
     color: var(--color-link);
     text-decoration: none;
 }
 
-.backlinks-list a:hover {
+.connections-list a:hover {
     text-decoration: underline;
+}
+
+.connections-overflow summary {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 0.25rem 0;
+    list-style: none;
+}
+
+.connections-overflow summary::-webkit-details-marker {
+    display: none;
+}
+
+.connections-overflow summary::before {
+    content: "+ ";
 }
 
 /* MetaTable */

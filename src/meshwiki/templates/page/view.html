@@ -65,16 +65,50 @@
             {{ html_content | safe }}
         </div>
 
-        {% if backlinks %}
-        <aside class="backlinks-panel">
-            <h3>Pages linking here</h3>
-            <ul class="backlinks-list">
-                {% for link in backlinks %}
-                <li>
-                    <a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a>
-                </li>
-                {% endfor %}
-            </ul>
+        {% if outlinks or backlinks %}
+        <aside class="connections-panel">
+            <div class="connections-columns">
+                {% if outlinks %}
+                <div class="connections-col">
+                    <h3>Links</h3>
+                    <ul class="connections-list">
+                        {% for link in outlinks[:10] %}
+                        <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% if outlinks | length > 10 %}
+                    <details class="connections-overflow">
+                        <summary>{{ outlinks | length - 10 }} more</summary>
+                        <ul class="connections-list">
+                            {% for link in outlinks[10:] %}
+                            <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endif %}
+                {% if backlinks %}
+                <div class="connections-col">
+                    <h3>Backlinks</h3>
+                    <ul class="connections-list">
+                        {% for link in backlinks[:10] %}
+                        <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% if backlinks | length > 10 %}
+                    <details class="connections-overflow">
+                        <summary>{{ backlinks | length - 10 }} more</summary>
+                        <ul class="connections-list">
+                            {% for link in backlinks[10:] %}
+                            <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
         </aside>
         {% endif %}
 

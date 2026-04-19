@@ -225,52 +225,111 @@ async def get_page_tree() -> list[dict]:
     return build_page_tree_sync(pages)
 
 
+def _is_factory_page(page: Page) -> bool:
+    """Return True for factory-managed pages that should not appear in the sidebar."""
+    extra = page.metadata.model_extra or {}
+    return bool(extra.get("parent_task") or extra.get("assignee") == "factory")
+
+
 def build_page_tree_sync(pages: list[Page]) -> list[dict]:
-    """Build a hierarchical tree from flat page list.
+    """Build a declarative hierarchy from each page's ``children:`` frontmatter.
 
-    Each node: {"name": str, "title": str, "children": list[dict], "level": int}
+    Each node: {"name": str, "title": str, "children": list[dict], "level": int,
+    "status": str, "stub": bool}
 
-    Pages whose direct parent doesn't exist as a page (e.g. tasks moved into a
-    Done/ subfolder that has no wiki page) are attached to the nearest ancestor
-    that does exist, rather than being dumped at the tree root.
+    - Pages never declared as anyone's child are roots.
+    - A page can appear under multiple parents (DAG).
+    - Cycles are detected per-path; back-edges are dropped with a warning.
+    - Factory pages (``parent_task:`` or ``assignee: factory``) are excluded.
+    - Missing children render as stub nodes (no page exists yet).
+    - ``Home`` is pinned as the first root.
     """
-    tree: list[dict] = []
-    nodes: dict[str, dict] = {}
+    page_map: dict[str, Page] = {p.name: p for p in pages}
 
-    for page in sorted(pages, key=lambda p: p.name.lower()):
-        parts = page.name.split("/")
-        level = len(parts) - 1
+    # Collect declared children (preserving frontmatter order), skipping factory.
+    children_of: dict[str, list[str]] = {}
+    for page in pages:
+        if _is_factory_page(page):
+            continue
+        declared = page.metadata.children
+        if declared:
+            children_of[page.name] = list(declared)
 
-        extra = (
-            page.metadata.model_extra if hasattr(page.metadata, "model_extra") else {}
-        )
+    all_declared_children: set[str] = {
+        child for kids in children_of.values() for child in kids
+    }
+
+    roots = [
+        p
+        for p in pages
+        if not _is_factory_page(p) and p.name not in all_declared_children
+    ]
+    roots.sort(key=lambda p: (p.name != "Home", p.name.lower()))
+
+    def _node(page_name: str, level: int) -> dict:
+        page = page_map.get(page_name)
+        if page is None:
+            return {
+                "name": page_name,
+                "title": page_name.replace("_", " "),
+                "children": [],
+                "level": level,
+                "status": "",
+                "stub": True,
+            }
+        extra = page.metadata.model_extra or {}
         status = extra.get("status", "") or ""
         if isinstance(status, list):
             status = status[0] if status else ""
-        node = {
+        return {
             "name": page.name,
             "title": page.title,
             "children": [],
             "level": level,
             "status": status,
+            "stub": False,
         }
-        nodes[page.name] = node
 
-        if level == 0:
+    def _subtree(page_name: str, level: int, ancestors: frozenset[str]) -> dict | None:
+        if page_name in ancestors:
+            log.warning("page_tree_cycle_detected", page=page_name)
+            return None
+        node = _node(page_name, level)
+        path = ancestors | {page_name}
+        for child_name in children_of.get(page_name, []):
+            child = _subtree(child_name, level + 1, path)
+            if child is not None:
+                node["children"].append(child)
+        return node
+
+    tree = []
+    for root in roots:
+        node = _subtree(root.name, 0, frozenset())
+        if node is not None:
             tree.append(node)
-        else:
-            # Walk up ancestor chain until we find an existing parent node.
-            ancestor = None
-            for i in range(len(parts) - 1, 0, -1):
-                candidate = "/".join(parts[:i])
-                if candidate in nodes:
-                    ancestor = nodes[candidate]
-                    break
-            if ancestor is not None:
-                ancestor["children"].append(node)
-            else:
-                tree.append(node)
 
+    # Orphan recovery: pages that form pure cycles (or are only referenced by
+    # cycle members) are unreachable from normal roots. Surface them at the root
+    # level so they don't silently vanish from the sidebar.
+    def _mark_reachable(page_name: str, path: frozenset[str], seen: set[str]) -> None:
+        if page_name in path or page_name in seen:
+            return
+        seen.add(page_name)
+        for child in children_of.get(page_name, []):
+            _mark_reachable(child, path | {page_name}, seen)
+
+    reachable: set[str] = set()
+    for root in roots:
+        _mark_reachable(root.name, frozenset(), reachable)
+
+    orphans = sorted(
+        [p for p in pages if not _is_factory_page(p) and p.name not in reachable],
+        key=lambda p: (p.name != "Home", p.name.lower()),
+    )
+    for orphan in orphans:
+        node = _subtree(orphan.name, 0, frozenset())
+        if node is not None:
+            tree.append(node)
     return tree
 
 
@@ -528,14 +587,19 @@ async def view_page(request: Request, name: str):
     log.info("page_viewed", page=name)
     page_views_total.labels(page=name).inc()
 
-    # Get backlinks and frontmatter metadata from graph engine first so the
-    # TaskStatus macro can use them during parsing.
+    # Get backlinks, outlinks and frontmatter metadata from graph engine first so
+    # the TaskStatus macro can use them during parsing.
     backlinks: list[str] = []
+    outlinks: list[str] = []
     frontmatter: dict = {}
     engine = get_engine()
     if engine is not None:
         try:
             backlinks = sorted(engine.get_backlinks(name))
+        except Exception:
+            pass
+        try:
+            outlinks = sorted(engine.get_outlinks(name))
         except Exception:
             pass
         try:
@@ -620,6 +684,7 @@ async def view_page(request: Request, name: str):
             html_content=html_content,
             toc_html=toc_html,
             backlinks=backlinks,
+            outlinks=outlinks,
             frontmatter=frontmatter,
             page_tree=await get_page_tree(),
         ),
@@ -683,11 +748,16 @@ async def save_page(request: Request, name: str, content: str = Form("")):
         # Return just the content area for HTMX swap
         html_content = parse_wiki_content(page.content, page_exists=page_exists_sync)
         backlinks: list[str] = []
+        outlinks_htmx: list[str] = []
         frontmatter: dict[str, list[str]] = {}
         engine = get_engine()
         if engine is not None:
             try:
                 backlinks = sorted(engine.get_backlinks(name))
+            except Exception:
+                pass
+            try:
+                outlinks_htmx = sorted(engine.get_outlinks(name))
             except Exception:
                 pass
             try:
@@ -701,6 +771,7 @@ async def save_page(request: Request, name: str, content: str = Form("")):
                 page=page,
                 html_content=html_content,
                 backlinks=backlinks,
+                outlinks=outlinks_htmx,
                 frontmatter=frontmatter,
             ),
         )
@@ -861,14 +932,13 @@ async def api_graph():
         for target in engine.get_outlinks(page.name):
             links.append({"source": page.name, "target": target})
 
-    # Add implicit parent→child edges for subpages (pages with "/" in name)
+    # Add parent→child edges from declared children: frontmatter
     page_ids = {p.name for p in pages}
     for page in pages:
-        if "/" in page.name:
-            parent_name = page.name.rsplit("/", 1)[0]
-            if parent_name in page_ids:
+        for child_name in page.metadata.children:
+            if child_name in page_ids:
                 links.append(
-                    {"source": parent_name, "target": page.name, "type": "parent"}
+                    {"source": page.name, "target": child_name, "type": "parent"}
                 )
 
     return {"nodes": nodes, "links": links}

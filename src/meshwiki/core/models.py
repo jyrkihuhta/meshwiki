@@ -43,6 +43,7 @@ class PageMetadata(BaseModel):
 
     title: str | None = None
     tags: list[str] = Field(default_factory=list)
+    children: list[str] = Field(default_factory=list)
     created: datetime | None = None
     modified: datetime | None = None
 
