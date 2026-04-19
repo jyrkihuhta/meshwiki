@@ -465,10 +465,14 @@ async def test_collect_results_node_all_succeeded() -> None:
 
 @pytest.mark.asyncio
 async def test_finalize_node() -> None:
-    """finalize_node calls transition_task with 'done' and returns completed status."""
-    state = _make_state(cost_usd=0.0042)
+    """finalize_node walks in_progress→review→merged→done and records cost."""
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(cost_usd=0.0042, subtasks=[merged_sub])
 
     mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
     mock_client_instance.transition_task = AsyncMock(return_value={})
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
@@ -476,19 +480,69 @@ async def test_finalize_node() -> None:
         result = await finalize_node(state)
 
     assert result["graph_status"] == "completed"
-    mock_client_instance.transition_task.assert_awaited_once()
-    call_args = mock_client_instance.transition_task.call_args
-    assert call_args[0][0] == "Task_0042_test"
-    assert call_args[0][1] == "done"
-    assert "cost_usd" in call_args[1]["extra_fields"]
+    # Should step through review → merged → done (3 calls)
+    assert mock_client_instance.transition_task.await_count == 3
+    calls = mock_client_instance.transition_task.call_args_list
+    assert calls[0][0] == ("Task_0042_test", "review")
+    assert calls[1][0] == ("Task_0042_test", "merged")
+    assert calls[2][0] == ("Task_0042_test", "done")
+    assert "cost_usd" in (calls[2][1].get("extra_fields") or {})
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_resumes_from_review() -> None:
+    """finalize_node skips already-completed steps when parent is already in review."""
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(subtasks=[merged_sub])
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "review"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert result["graph_status"] == "completed"
+    # Already in review → only merged + done
+    assert mock_client_instance.transition_task.await_count == 2
+    calls = mock_client_instance.transition_task.call_args_list
+    assert calls[0][0] == ("Task_0042_test", "merged")
+    assert calls[1][0] == ("Task_0042_test", "done")
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_skips_when_subtasks_pending() -> None:
+    """finalize_node does not transition parent when subtasks are still in_progress."""
+    pending_sub = _make_subtask(status="in_progress")
+    state = _make_state(subtasks=[pending_sub])
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert result["graph_status"] == "completed"
+    mock_client_instance.transition_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_finalize_node_handles_client_error() -> None:
     """finalize_node logs and swallows MeshWiki client errors, still returns completed."""
-    state = _make_state()
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(subtasks=[merged_sub])
 
     mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
     mock_client_instance.transition_task = AsyncMock(
         side_effect=RuntimeError("network error")
     )

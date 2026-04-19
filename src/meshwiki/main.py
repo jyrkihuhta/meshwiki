@@ -56,6 +56,8 @@ from meshwiki.core.parser import (
 )
 from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
+from meshwiki.core.task_machine import TASK_TRANSITIONS
+from meshwiki.core.task_machine import transition_task as _machine_transition
 from meshwiki.core.ws_manager import manager
 
 # Configure structured logging before anything else
@@ -640,9 +642,41 @@ async def delete_page(name: str):
 async def save_page(request: Request, name: str, content: str = Form("")):
     """Save page content."""
     _validate_page_name(name)
+
+    # C1: status changes on task/epic pages must go through the state machine so
+    # webhooks fire and invalid transitions are rejected.
+    pending_transition: tuple[str, str] | None = None
+    if settings.factory_enabled:
+        old_page = await storage.get_page(name)
+        if old_page is not None:
+            old_extras = old_page.metadata.model_extra or {}
+            old_status = old_extras.get("status")
+            old_type = old_extras.get("type")
+            if old_status and old_type in {"task", "epic"}:
+                new_meta, new_body = storage._parse_frontmatter(content)
+                new_status = (new_meta.model_extra or {}).get("status")
+                if new_status and new_status != old_status:
+                    allowed = TASK_TRANSITIONS.get(old_status, [])
+                    if new_status not in allowed:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"Cannot transition from '{old_status}' to '{new_status}'. Allowed: {allowed}",
+                        )
+                    # Revert status in content — transition_task() will write it
+                    setattr(new_meta, "status", old_status)
+                    content = storage._create_frontmatter(new_meta) + new_body
+                    pending_transition = (old_status, new_status)
+
     page = await storage.save_page(name, content)
     log.info("page_saved", page=name)
     page_writes_total.labels(operation="save").inc()
+
+    if pending_transition:
+        _, new_status = pending_transition
+        await _machine_transition(storage, name, new_status)
+        updated = await storage.get_page(name)
+        if updated:
+            page = updated
 
     # Check if this is an HTMX request
     if request.headers.get("HX-Request"):
