@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from .config import get_settings
+from .config import get_settings, validate_settings
 from .graph import build_graph
 from .integrations.meshwiki_client import MeshWikiClient
 from .state import FactoryState
@@ -88,6 +88,7 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
 async def lifespan(app: FastAPI):
     """Open the SQLite checkpoint DB, build the graph, close on shutdown."""
     settings = get_settings()
+    validate_settings(settings)
     async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver:
         app.state.graph = build_graph(saver)
         logger.info(
