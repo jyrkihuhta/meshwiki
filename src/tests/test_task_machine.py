@@ -1,7 +1,12 @@
 """Unit tests for the task state machine."""
 
-import pytest
+import importlib
 
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+import meshwiki.config as cfg
+import meshwiki.main
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import (
     CANONICAL_EVENTS,
@@ -127,3 +132,90 @@ async def test_done_has_no_transitions(storage):
 async def test_missing_page_raises(storage):
     with pytest.raises(ValueError, match="not found"):
         await transition_task(storage, "NonExistent", "planned")
+
+
+# ---------------------------------------------------------------------------
+# C1: save route must route status changes through the state machine
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def factory_settings(tmp_path):
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        data_dir=tmp_path,
+        factory_enabled=True,
+        factory_api_key="test-key",
+        graph_watch=False,
+        auth_enabled=False,
+    )
+    importlib.reload(meshwiki.main)
+    yield cfg.settings
+    cfg.settings = original
+    importlib.reload(meshwiki.main)
+
+
+@pytest.fixture
+async def factory_client(factory_settings):
+    async with AsyncClient(
+        transport=ASGITransport(app=meshwiki.main.app),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_save_valid_status_transition(factory_client, factory_settings):
+    """Saving a task page with a valid status change transitions it correctly."""
+    page_name = "Task_Save_Test"
+    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\ntype: task\nstatus: in_progress\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code in (200, 302)
+
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_save_invalid_status_transition_returns_422(
+    factory_client, factory_settings
+):
+    """Saving a task page with an illegal status change returns 422."""
+    page_name = "Task_Invalid_Transition"
+    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\ntype: task\nstatus: done\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code == 422
+
+    # Status must not have changed
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "planned"
+
+
+@pytest.mark.asyncio
+async def test_save_non_task_page_status_change_allowed(
+    factory_client, factory_settings
+):
+    """Regular (non-task) pages can freely change any frontmatter field."""
+    page_name = "Regular_Page"
+    content = "---\nstatus: some_value\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\nstatus: other_value\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code in (200, 302)
+
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "other_value"
