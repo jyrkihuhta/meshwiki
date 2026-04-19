@@ -58,7 +58,7 @@ def _make_initial_state(subtask: SubTask) -> FactoryState:
         requirements="Implement a test feature.",
         subtasks=[subtask],
         decomposition_approved=True,
-        active_grinders={},
+        active_grinders=[],
         completed_subtask_ids=[],
         failed_subtask_ids=[],
         pm_messages=[],
@@ -196,10 +196,27 @@ async def test_pipeline_happy_path_reaches_done() -> None:
 
 @pytest.mark.asyncio
 async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
-    """When grinder fails and retries are exhausted, graph ends via escalate→abandon."""
+    """When retries are exhausted and only a minority of subtasks failed,
+    escalate decides 'abandon' (isolated implementation problem, not decomposition)."""
     # Subtask already at max attempts so it won't retry
     subtask = _make_subtask(status="pending", attempt=2, max_attempts=3)
-    initial_state = _make_initial_state(subtask)
+    # Two already-merged subtasks so the failure is a minority (1/3) → abandon.
+    already_done_1 = _make_subtask(
+        id="task-0042-sub-done1",
+        wiki_page="Task_0042_Sub_02_done",
+        status="merged",
+    )
+    already_done_2 = _make_subtask(
+        id="task-0042-sub-done2",
+        wiki_page="Task_0042_Sub_03_done",
+        status="merged",
+    )
+    initial_state = FactoryState(
+        **{
+            **_make_initial_state(subtask),
+            "subtasks": [subtask, already_done_1, already_done_2],
+        }
+    )
 
     meshwiki = _mock_meshwiki_client()
 
@@ -234,7 +251,7 @@ async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
     ):
         final_state = await graph.ainvoke(initial_state, config=config)
 
-    # With all retries exhausted, escalate decides "abandon" → END
+    # Minority failure with exhausted retries → abandon
     assert final_state["graph_status"] == "escalated"
     assert final_state["escalation_decision"] == "abandon"
 

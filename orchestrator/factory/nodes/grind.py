@@ -35,14 +35,10 @@ async def grind_node(state: FactoryState) -> dict:
         logger.error("grind_node: subtask %r not found in state", subtask_id)
         return {}
 
-    active = list(state.get("active_grinders", []))
-    if subtask_id not in active:
-        active.append(subtask_id)
     logger.info(
-        "grind_node: running grinder for subtask %s (task %s), active count: %d",
+        "grind_node: running grinder for subtask %s (task %s)",
         subtask_id,
         state.get("task_wiki_page", "<unknown>"),
-        len(active),
     )
 
     async with MeshWikiClient() as meshwiki_client:
@@ -64,12 +60,7 @@ async def grind_node(state: FactoryState) -> dict:
                     subtask["wiki_page"],
                     exc,
                 )
-            subtasks = [
-                updated if s["id"] == subtask_id else s for s in state["subtasks"]
-            ]
-            if subtask_id in active:
-                active.remove(subtask_id)
-            return {"subtasks": subtasks, "active_grinders": active}
+            return {"subtasks": [updated]}
 
         result = await grind_subtask(state, subtask, meshwiki_client)
         updated = result["subtask"]
@@ -99,16 +90,8 @@ async def grind_node(state: FactoryState) -> dict:
                 exc,
             )
 
-    subtasks = [updated if s["id"] == subtask_id else s for s in state["subtasks"]]
-    if subtask_id in active:
-        active.remove(subtask_id)
-    logger.info(
-        "grind_node: completed subtask %s, active count: %d",
-        subtask_id,
-        len(active),
-    )
+    logger.info("grind_node: completed subtask %s", subtask_id)
     return {
-        "subtasks": subtasks,
-        "active_grinders": active,
+        "subtasks": [updated],
         "incremental_costs_usd": [incremental_cost],
     }

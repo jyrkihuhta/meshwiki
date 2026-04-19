@@ -150,7 +150,7 @@ def test_fanin_preserves_failed_and_completed_subtask_ids() -> None:
         "requirements": "Test reqs",
         "subtasks": [],
         "decomposition_approved": True,
-        "active_grinders": {},
+        "active_grinders": [],
         "completed_subtask_ids": [],  # no reducer needed for base state
         "failed_subtask_ids": [],  # no reducer needed for base state
         "pm_messages": [],
@@ -177,6 +177,72 @@ def test_fanin_preserves_failed_and_completed_subtask_ids() -> None:
 
     assert "task-001" in merged_failed
     assert "task-002" in merged_completed
+
+
+def test_fanin_delta_return_preserves_concurrent_status_updates() -> None:
+    """With delta returns (each branch returns only its updated subtask),
+    both parallel branches' status updates survive the fan-in merge.
+
+    This is the regression test for the fan-in merge bug fixed in Milestone F8.
+    The bug: each parallel grind branch returned the full subtask list. The later
+    branch's stale snapshot (sub-01 still "pending") clobbered the earlier
+    branch's "failed" update. Fix: return only [updated_subtask] (delta).
+    """
+    sub_01 = SubTask(
+        id="task-001",
+        wiki_page="Page1",
+        title="Sub 01",
+        description="Desc",
+        status="pending",
+        parent_task="Parent",
+        assigned_grinder=None,
+        branch_name=None,
+        pr_url=None,
+        pr_number=None,
+        attempt=0,
+        max_attempts=3,
+        error_log=[],
+        files_touched=[],
+        acceptance_criteria=[],
+        token_budget=50000,
+        tokens_used=0,
+        review_feedback=None,
+        code_skeleton=None,
+    )
+    sub_02 = SubTask(
+        id="task-002",
+        wiki_page="Page2",
+        title="Sub 02",
+        description="Desc",
+        status="pending",
+        parent_task="Parent",
+        assigned_grinder=None,
+        branch_name=None,
+        pr_url=None,
+        pr_number=None,
+        attempt=0,
+        max_attempts=3,
+        error_log=[],
+        files_touched=[],
+        acceptance_criteria=[],
+        token_budget=50000,
+        tokens_used=0,
+        review_feedback=None,
+        code_skeleton=None,
+    )
+    initial = [sub_01, sub_02]
+
+    # Branch A returns only its delta: sub-01 failed
+    failed_01 = SubTask(**{**sub_01, "status": "failed", "error_log": ["oops"]})
+    after_a = _merge_subtasks(initial, [failed_01])
+
+    # Branch B returns only its delta: sub-02 in review
+    review_02 = SubTask(**{**sub_02, "status": "review", "pr_url": "https://github.com/o/r/pull/2"})
+    final = _merge_subtasks(after_a, [review_02])
+
+    by_id = {s["id"]: s for s in final}
+    assert by_id["task-001"]["status"] == "failed"
+    assert by_id["task-002"]["status"] == "review"
 
 
 def test_fanin_subtasks_both_failed_and_completed_in_list() -> None:

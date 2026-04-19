@@ -192,7 +192,7 @@ def _build_initial_state(page_name: str, data: dict[str, Any]) -> FactoryState:
         requirements=data.get("requirements", ""),
         subtasks=[],
         decomposition_approved=False,
-        active_grinders={},
+        active_grinders=[],
         completed_subtask_ids=[],
         failed_subtask_ids=[],
         pm_messages=[],

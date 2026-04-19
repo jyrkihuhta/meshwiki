@@ -38,7 +38,7 @@ def _make_state(**kwargs) -> FactoryState:
         "requirements": "Implement a test feature.",
         "subtasks": [],
         "decomposition_approved": False,
-        "active_grinders": {},
+        "active_grinders": [],
         "completed_subtask_ids": [],
         "failed_subtask_ids": [],
         "pm_messages": [],

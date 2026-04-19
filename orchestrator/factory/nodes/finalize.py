@@ -48,7 +48,7 @@ async def finalize_node(state: FactoryState) -> dict:
                 len(pending),
                 [s["id"] for s in pending],
             )
-            return {"graph_status": "completed"}
+            return {"graph_status": "completed", "cost_usd": total_cost}
 
         logger.info(
             "finalize: completing task %s (cost: $%.4f)",
@@ -81,4 +81,4 @@ async def finalize_node(state: FactoryState) -> dict:
                 )
                 break
 
-        return {"graph_status": "completed"}
+        return {"graph_status": "completed", "cost_usd": total_cost}

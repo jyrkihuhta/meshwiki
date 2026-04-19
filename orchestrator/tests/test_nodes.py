@@ -12,6 +12,7 @@ from factory.nodes.collect import collect_results_node
 from factory.nodes.decompose import _build_subtask_page, decompose_node
 from factory.nodes.escalate import escalate_node
 from factory.nodes.finalize import finalize_node
+from factory.nodes.grind import grind_node
 from factory.nodes.merge_check import merge_check_node
 from factory.nodes.pm_review import pm_review_node
 from factory.nodes.task_intake import task_intake_node
@@ -31,7 +32,7 @@ def _make_state(**kwargs) -> FactoryState:
         "requirements": "",
         "subtasks": [],
         "decomposition_approved": False,
-        "active_grinders": {},
+        "active_grinders": [],
         "completed_subtask_ids": [],
         "failed_subtask_ids": [],
         "pm_messages": [],
@@ -695,7 +696,8 @@ async def test_escalate_retriable() -> None:
 
 @pytest.mark.asyncio
 async def test_escalate_exhausted() -> None:
-    """escalate_node sets decision='abandon' when subtask has used all attempts."""
+    """escalate_node sets decision='abandon' when retries are exhausted but
+    the failure is a minority — indicating an isolated implementation problem."""
     failed_sub = _make_subtask(
         wiki_page="Task_0042_Sub_01",
         title="Sub 01",
@@ -703,8 +705,12 @@ async def test_escalate_exhausted() -> None:
         attempt=2,
         max_attempts=3,
     )
+    # Three additional merged subtasks so the one failure is a minority (1/4).
+    ok_1 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="merged")
+    ok_2 = _make_subtask(wiki_page="Task_0042_Sub_03", title="Sub 03", status="merged")
+    ok_3 = _make_subtask(wiki_page="Task_0042_Sub_04", title="Sub 04", status="merged")
     state = _make_state(
-        subtasks=[failed_sub],
+        subtasks=[failed_sub, ok_1, ok_2, ok_3],
         failed_subtask_ids=[failed_sub["id"]],
     )
 
@@ -716,9 +722,9 @@ async def test_escalate_exhausted() -> None:
 
     assert result["escalation_decision"] == "abandon"
     assert result["graph_status"] == "escalated"
-    # Status should remain "failed" when not retriable
-    assert result["subtasks"][0]["attempt"] == 2
-    assert result["subtasks"][0]["status"] == "failed"
+    failed_statuses = [s for s in result["subtasks"] if s["id"] == failed_sub["id"]]
+    assert failed_statuses[0]["attempt"] == 2
+    assert failed_statuses[0]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -947,3 +953,116 @@ async def test_merge_check_node_multiple_subtasks() -> None:
     assert statuses[merged_sub["id"]] == "merged"
     assert statuses[open_sub["id"]] == "review"
     assert statuses[pending_sub["id"]] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# grind_node — delta return (fan-in bug fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grind_node_returns_delta_not_full_list() -> None:
+    """grind_node returns only the updated subtask, not the full subtask list.
+
+    This is the fix for the fan-in merge bug: each parallel branch returns
+    only its single updated subtask so _merge_subtasks never clobbers a
+    concurrent branch's status with a stale snapshot.
+    """
+    sub_01 = _make_subtask(wiki_page="Task_0042_Sub_01", title="Sub 01", status="pending")
+    sub_02 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="pending")
+    state = _make_state(subtasks=[sub_01, sub_02])
+    state["_current_subtask_id"] = sub_01["id"]
+
+    updated_sub = {**sub_01, "status": "review", "pr_url": "https://github.com/o/r/pull/1"}
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    with (
+        patch("factory.nodes.grind.MeshWikiClient", return_value=mock_meshwiki),
+        patch(
+            "factory.nodes.grind.grind_subtask",
+            new=AsyncMock(
+                return_value={"subtask": updated_sub, "incremental_cost_usd": 0.01}
+            ),
+        ),
+    ):
+        result = await grind_node(state)
+
+    assert len(result["subtasks"]) == 1
+    assert result["subtasks"][0]["id"] == sub_01["id"]
+    assert result["subtasks"][0]["status"] == "review"
+    assert "active_grinders" not in result
+
+
+# ---------------------------------------------------------------------------
+# escalate_node — redecompose path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_escalate_redecompose_when_majority_failed() -> None:
+    """escalate_node chooses 'redecompose' when majority of subtasks fail
+    with all retries exhausted — indicates a bad decomposition, not bad code."""
+    failed_1 = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    failed_2 = _make_subtask(
+        wiki_page="Task_0042_Sub_02",
+        title="Sub 02",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    ok_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_03",
+        title="Sub 03",
+        status="merged",
+    )
+    state = _make_state(
+        subtasks=[failed_1, failed_2, ok_sub],
+        failed_subtask_ids=[failed_1["id"], failed_2["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "redecompose"
+    assert result["graph_status"] == "escalated"
+    assert "error" in result
+    assert "failed" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_escalate_abandon_when_minority_failed_no_retries() -> None:
+    """escalate_node still abandons when only a minority of subtasks fail
+    and all retries are exhausted (not a decomposition problem)."""
+    failed_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    ok_1 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="merged")
+    ok_2 = _make_subtask(wiki_page="Task_0042_Sub_03", title="Sub 03", status="merged")
+    ok_3 = _make_subtask(wiki_page="Task_0042_Sub_04", title="Sub 04", status="merged")
+    state = _make_state(
+        subtasks=[failed_sub, ok_1, ok_2, ok_3],
+        failed_subtask_ids=[failed_sub["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "abandon"

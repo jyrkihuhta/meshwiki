@@ -79,7 +79,7 @@ def route_after_human_code_review(state: FactoryState) -> str:
 
 def route_after_escalation(state: FactoryState) -> str:
     """Route after escalation decision is made."""
-    return state.get("escalation_decision", "abandon")
+    return state.get("escalation_decision") or "abandon"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Escalate node: handle unrecoverable failures and decide next action."""
 
 import logging
+import math
 
 from ..integrations.meshwiki_client import MeshWikiClient
 from ..state import FactoryState
@@ -70,11 +71,28 @@ async def escalate_node(state: FactoryState) -> dict:
             else:
                 subtasks.append(s)
 
-        decision = "retry" if retriable else "abandon"
+        error_context: str | None = None
+        if retriable:
+            decision = "retry"
+        elif len(failed_subtasks) >= math.ceil(
+            max(1, len(state["subtasks"])) / 2
+        ):
+            # Majority failed with no retries left — likely a bad decomposition.
+            decision = "redecompose"
+            error_context = (
+                f"Majority of subtasks failed "
+                f"({len(failed_subtasks)}/{len(state['subtasks'])}): "
+                f"{', '.join(failed_ids)}. Prior decomposition needs revision."
+            )
+        else:
+            decision = "abandon"
         logger.info("escalate: decision=%s", decision)
 
-        return {
+        result: dict = {
             "subtasks": subtasks,
             "graph_status": "escalated",
             "escalation_decision": decision,
         }
+        if error_context is not None:
+            result["error"] = error_context
+        return result
