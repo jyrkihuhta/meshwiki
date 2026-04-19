@@ -239,13 +239,26 @@ class _TextBlock:
         self.text = text
 
 
+class _OpenAIUsageAdapter:
+    """Exposes OpenAI usage in Anthropic's ``input_tokens``/``output_tokens`` shape."""
+
+    def __init__(self, oai_usage: Any) -> None:
+        self.input_tokens: int = getattr(oai_usage, "prompt_tokens", 0) or 0
+        self.output_tokens: int = getattr(oai_usage, "completion_tokens", 0) or 0
+
+
 class _OpenAIResponseAdapter:
     """Wraps an OpenAI ChatCompletion to match the Anthropic Messages interface.
 
-    The PM agent loops inspect ``response.stop_reason`` and ``response.content``
-    (a list of tool-use/text blocks). This adapter translates the OpenAI shape
-    so the existing loop code works without modification.
+    The PM agent loops inspect ``response.stop_reason``, ``response.content``,
+    and ``response.usage``. This adapter translates the OpenAI shape so the
+    existing loop code works without modification.
+
+    ``_response_model`` is set to the actual model used so callers can price
+    the response at the correct rate rather than the Anthropic model's rate.
     """
+
+    _response_model: str = "MiniMax-M2.7"
 
     def __init__(self, oai_resp: Any) -> None:
         choice = oai_resp.choices[0]
@@ -260,6 +273,8 @@ class _OpenAIResponseAdapter:
         for tc in msg.tool_calls or []:
             blocks.append(_ToolUseBlock(tc))
         self.content = blocks
+
+        self.usage = _OpenAIUsageAdapter(oai_resp.usage) if oai_resp.usage else None
 
 
 def _anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -488,7 +503,8 @@ async def decompose_with_pm(
         )
 
         if hasattr(response, "usage") and response.usage:
-            incremental_cost_usd += tokens_to_usd(response.usage, model)
+            effective_model = getattr(response, "_response_model", model)
+            incremental_cost_usd += tokens_to_usd(response.usage, effective_model)
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})

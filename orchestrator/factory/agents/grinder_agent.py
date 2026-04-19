@@ -704,6 +704,8 @@ async def grind_subtask_e2b(
         logger.exception("e2b grinder: sandbox error: %s", exc)
     finally:
         elapsed = time.monotonic() - t0
+        # E2B compute cost only. Kilo CLI calls MiniMax internally inside the
+        # sandbox; those LLM token costs are opaque and not included here.
         sandbox_cost = sandbox_time_to_usd(elapsed)
         if sbx is not None:
             try:

@@ -12,7 +12,14 @@ logger = logging.getLogger(__name__)
 
 # (input_usd_per_token, output_usd_per_token)
 # Anthropic pricing: https://www.anthropic.com/pricing
+# MiniMax pricing: https://www.minimaxi.com/en/news/minimax-api-pricing
 MODEL_RATES: dict[str, tuple[float, float]] = {
+    # Claude 4.x models (current defaults)
+    "claude-sonnet-4-6": (3e-6, 15e-6),
+    "claude-haiku-4-5-20251001": (0.8e-6, 4e-6),
+    # MiniMax models
+    "MiniMax-M2.7": (0.3e-6, 1.1e-6),
+    # Legacy models kept for historical cost records
     "claude-3-5-sonnet-20241022": (3e-6, 15e-6),
     "claude-3-haiku-20240307": (0.25e-6, 1.25e-6),
 }

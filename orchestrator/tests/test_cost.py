@@ -58,6 +58,12 @@ class TestModelRates:
         assert "claude-3-5-sonnet-20241022" in MODEL_RATES
         assert "claude-3-haiku-20240307" in MODEL_RATES
 
+    def test_model_rates_contains_current_default_models(self):
+        """Default config models must have pricing so cost_usd is non-zero."""
+        assert "claude-sonnet-4-6" in MODEL_RATES
+        assert "claude-haiku-4-5-20251001" in MODEL_RATES
+        assert "MiniMax-M2.7" in MODEL_RATES
+
     def test_model_rates_format(self):
         for model, rates in MODEL_RATES.items():
             assert isinstance(rates, tuple)
@@ -65,3 +71,72 @@ class TestModelRates:
             input_rate, output_rate = rates
             assert input_rate > 0
             assert output_rate > 0
+
+    def test_tokens_to_usd_sonnet_4_6(self):
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000)
+        cost = tokens_to_usd(usage, "claude-sonnet-4-6")
+        assert cost > 0, "claude-sonnet-4-6 cost must be non-zero"
+
+    def test_tokens_to_usd_haiku_4_5(self):
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000)
+        cost = tokens_to_usd(usage, "claude-haiku-4-5-20251001")
+        assert cost > 0, "claude-haiku-4-5-20251001 cost must be non-zero"
+
+    def test_tokens_to_usd_minimax(self):
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000)
+        cost = tokens_to_usd(usage, "MiniMax-M2.7")
+        assert cost > 0, "MiniMax-M2.7 cost must be non-zero"
+
+
+class TestOpenAIResponseAdapter:
+    """Test that _OpenAIResponseAdapter exposes usage for cost tracking."""
+
+    def _make_oai_resp(self, prompt_tokens: int, completion_tokens: int):
+        from types import SimpleNamespace
+
+        usage = SimpleNamespace(
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        )
+        tool_call = None
+        msg = SimpleNamespace(content="hello", tool_calls=[])
+        choice = SimpleNamespace(message=msg, finish_reason="stop")
+        return SimpleNamespace(choices=[choice], usage=usage)
+
+    def test_usage_exposed_with_correct_field_names(self):
+        from factory.agents.pm_agent import _OpenAIResponseAdapter
+
+        oai = self._make_oai_resp(100, 50)
+        adapter = _OpenAIResponseAdapter(oai)
+        assert adapter.usage is not None
+        assert adapter.usage.input_tokens == 100
+        assert adapter.usage.output_tokens == 50
+
+    def test_response_model_is_minimax(self):
+        from factory.agents.pm_agent import _OpenAIResponseAdapter
+
+        oai = self._make_oai_resp(100, 50)
+        adapter = _OpenAIResponseAdapter(oai)
+        assert adapter._response_model == "MiniMax-M2.7"
+
+    def test_minimax_fallback_cost_uses_minimax_rates(self):
+        """Cost calculated from adapter usage must use MiniMax pricing."""
+        from factory.agents.pm_agent import _OpenAIResponseAdapter
+
+        oai = self._make_oai_resp(1_000_000, 1_000_000)
+        adapter = _OpenAIResponseAdapter(oai)
+        effective_model = getattr(adapter, "_response_model", "claude-sonnet-4-6")
+        cost = tokens_to_usd(adapter.usage, effective_model)
+        minimax_cost = tokens_to_usd(
+            SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000),
+            "MiniMax-M2.7",
+        )
+        assert abs(cost - minimax_cost) < 1e-9
+
+    def test_usage_none_when_no_usage_on_response(self):
+        from factory.agents.pm_agent import _OpenAIResponseAdapter
+
+        msg = SimpleNamespace(content="hi", tool_calls=[])
+        choice = SimpleNamespace(message=msg, finish_reason="stop")
+        oai = SimpleNamespace(choices=[choice], usage=None)
+        adapter = _OpenAIResponseAdapter(oai)
+        assert adapter.usage is None
