@@ -3,6 +3,12 @@
 Emits HMAC-signed HTTP POST events to the configured orchestrator URL
 whenever a task state transition occurs.  Uses an asyncio queue for
 fire-and-forget delivery so route handlers are never blocked.
+
+Delivery guarantees:
+- Up to _MAX_ATTEMPTS tries with exponential backoff before giving up.
+- Events that exhaust all retries are appended to a dead-letter JSONL file
+  so nothing is silently lost.  An operator can inspect and replay from it.
+- Queue overflow is logged at ERROR level (not just WARNING).
 """
 
 from __future__ import annotations
@@ -14,10 +20,14 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+_MAX_ATTEMPTS = 5
+_BASE_DELAY = 1.0  # seconds; actual delays: 1, 2, 4, 8, 16
 
 
 @dataclass
@@ -46,11 +56,12 @@ class WebhookEvent:
 
 
 class WebhookDispatcher:
-    """Fire-and-forget outbound webhook dispatcher.
+    """Fire-and-forget outbound webhook dispatcher with retries and dead-letter logging.
 
     Events are queued and dispatched asynchronously by a background task.
-    If the queue is full, events are dropped with a warning rather than
-    blocking the caller.
+    Failed deliveries are retried with exponential backoff.  Events that
+    exhaust all attempts are written to a dead-letter JSONL file rather than
+    silently discarded.
     """
 
     _QUEUE_SIZE = 1000
@@ -60,9 +71,27 @@ class WebhookDispatcher:
             maxsize=self._QUEUE_SIZE
         )
         self._task: asyncio.Task | None = None
+        self._dead_letter_path: Path | None = None
 
-    async def start(self) -> None:
-        """Start the background dispatch loop."""
+    async def start(self, dead_letter_path: Path | None = None) -> None:
+        """Start the background dispatch loop.
+
+        Args:
+            dead_letter_path: Optional path to the dead-letter JSONL file.
+                Defaults to ``{data_dir}/.webhook_dead_letter.jsonl`` when
+                the factory is configured.
+        """
+        if dead_letter_path is not None:
+            self._dead_letter_path = dead_letter_path
+        elif self._dead_letter_path is None:
+            try:
+                from meshwiki.config import settings
+
+                self._dead_letter_path = (
+                    settings.data_dir / ".webhook_dead_letter.jsonl"
+                )
+            except Exception:
+                pass
         self._task = asyncio.create_task(self._dispatch_loop())
 
     async def stop(self) -> None:
@@ -97,30 +126,57 @@ class WebhookDispatcher:
         try:
             self._queue.put_nowait(evt)
         except asyncio.QueueFull:
-            log.warning(
-                "webhook_queue_full",
-                extra={"event": event, "page": page_name},
+            log.error(
+                "webhook_queue_full: dropping event=%s page=%s — "
+                "queue size=%d; consider raising _QUEUE_SIZE or "
+                "investigating delivery latency",
+                event,
+                page_name,
+                self._QUEUE_SIZE,
             )
 
     async def _dispatch_loop(self) -> None:
-        import httpx
-
         async with httpx.AsyncClient(timeout=10.0) as client:
             while True:
                 evt = await self._queue.get()
                 try:
-                    await self._send(client, evt)
+                    await self._send_with_retries(client, evt)
                 except Exception as exc:
-                    log.warning(
-                        "webhook_dispatch_failed event=%s error=%s",
+                    log.error(
+                        "webhook_dead_letter: event=%s page=%s exhausted %d attempts: %s",
                         evt.event,
+                        evt.page_name,
+                        _MAX_ATTEMPTS,
                         exc,
-                        extra={"event": evt.event, "error": str(exc)},
                     )
+                    await self._write_dead_letter(evt, str(exc))
                 finally:
                     self._queue.task_done()
 
-    async def _send(self, client: "httpx.AsyncClient", evt: WebhookEvent) -> None:
+    async def _send_with_retries(
+        self, client: httpx.AsyncClient, evt: WebhookEvent
+    ) -> None:
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            if attempt > 0:
+                delay = _BASE_DELAY * (2 ** (attempt - 1))
+                log.warning(
+                    "webhook_retry: event=%s page=%s attempt=%d/%d delay=%.1fs",
+                    evt.event,
+                    evt.page_name,
+                    attempt + 1,
+                    _MAX_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            try:
+                await self._send(client, evt)
+                return
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc  # type: ignore[misc]
+
+    async def _send(self, client: httpx.AsyncClient, evt: WebhookEvent) -> None:
         from meshwiki.config import settings
 
         payload = evt.to_payload()
@@ -138,7 +194,29 @@ class WebhookDispatcher:
             ).hexdigest()
             headers["X-MeshWiki-Signature-256"] = f"sha256={sig}"
 
-        await client.post(settings.factory_webhook_url, content=body, headers=headers)
+        resp = await client.post(
+            settings.factory_webhook_url, content=body, headers=headers
+        )
+        resp.raise_for_status()
+
+    async def _write_dead_letter(self, evt: WebhookEvent, error: str) -> None:
+        if self._dead_letter_path is None:
+            return
+        record = {
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "error": error,
+            **evt.to_payload(),
+        }
+        try:
+            await asyncio.to_thread(_append_jsonl, self._dead_letter_path, record)
+        except Exception as exc:
+            log.error("webhook_dead_letter_write_failed: %s", exc)
+
+
+def _append_jsonl(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 dispatcher = WebhookDispatcher()
