@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -338,50 +339,69 @@ class GrinderToolExecutor:
         cmd = ["rg", pattern, search_path]
         if file_glob:
             cmd += ["--glob", file_glob]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            return "Error: search timed out"
         return result.stdout or "No matches"
 
     def _git_create_branch(self, branch_name: str) -> str:
         """Create and checkout a new branch from the configured base branch."""
         base = get_settings().pr_base_branch
-        result = subprocess.run(
-            ["git", "checkout", "-b", branch_name, f"origin/{base}"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "checkout", "-b", branch_name, f"origin/{base}"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git checkout timed out"
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         return f"Branch created: {branch_name}"
 
     def _git_commit(self, files: list[str], message: str) -> str:
         """Stage specified files and commit."""
-        add_result = subprocess.run(
-            ["git", "add"] + files,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            add_result = subprocess.run(
+                ["git", "add"] + files,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git add timed out"
         if add_result.returncode != 0:
             return f"Error staging files: {add_result.stderr}"
-        commit_result = subprocess.run(
-            ["git", "commit", "-m", message],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", message],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git commit timed out"
         if commit_result.returncode != 0:
             return f"Error committing: {commit_result.stderr}"
         return commit_result.stdout
 
     def _git_push(self, branch_name: str) -> str:
         """Push the branch to origin."""
-        result = subprocess.run(
-            ["git", "push", "-u", "origin", branch_name],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "push", "-u", "origin", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git push timed out"
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         return result.stdout or f"Pushed: {branch_name}"
@@ -389,12 +409,16 @@ class GrinderToolExecutor:
     def _run_tests(self, test_path: str | None = None) -> str:
         """Run pytest and return the last 100 lines of output."""
         path = test_path or "src/tests/"
-        result = subprocess.run(
-            ["python", "-m", "pytest", path, "-v"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["python", "-m", "pytest", path, "-v"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: pytest timed out after 300s"
         output = result.stdout + result.stderr
         lines = output.splitlines()
         return "\n".join(lines[-100:])
@@ -404,13 +428,17 @@ class GrinderToolExecutor:
         venv_bin = self.repo_root / ".venv" / "bin"
         ruff = str(venv_bin / "ruff")
         black = str(venv_bin / "black")
-        result = subprocess.run(
-            f"{ruff} check src/ && {black} --check src/",
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                f"{ruff} check src/ && {black} --check src/",
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: lint timed out after 60s"
         return result.stdout + result.stderr
 
     def _run_autofix(self) -> str:
@@ -419,24 +447,42 @@ class GrinderToolExecutor:
         black = str(venv_bin / "black")
         isort = str(venv_bin / "isort")
         ruff = str(venv_bin / "ruff")
-        result = subprocess.run(
-            f"{black} src/ && {isort} --profile black src/ && {ruff} --fix src/",
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                f"{black} src/ && {isort} --profile black src/ && {ruff} --fix src/",
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: autofix timed out after 120s"
         return result.stdout + result.stderr
 
     def _create_pr(self, title: str, body: str, branch_name: str) -> str:
         """Create a GitHub pull request and return the PR URL."""
         base = get_settings().pr_base_branch
-        result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "create",
+                    "--title",
+                    title,
+                    "--body",
+                    body,
+                    "--base",
+                    base,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: gh pr create timed out"
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         return result.stdout.strip()
@@ -562,20 +608,23 @@ async def grind_subtask_e2b(
     t0 = time.monotonic()
     sbx = None
     try:
-        sbx = await AsyncSandbox.create(
-            "meshwiki-grinder",  # pre-baked template: Node.js 20 + Kilo + gh + Python tools
-            timeout=3600,  # sandbox lives up to 1 hour; default 5 min is too short
-            envs={
-                "MINIMAX_API_KEY": settings.minimax_api_key,
-                # KILO_API_KEY is what Kilo reads for the minimax provider
-                "KILO_API_KEY": settings.minimax_api_key,
-                "GITHUB_TOKEN": settings.github_token,
-                "GH_TOKEN": settings.github_token,
-                # Enable full colour output so Kilo renders its TUI properly
-                "TERM": "xterm-256color",
-                "COLORTERM": "truecolor",
-                "FORCE_COLOR": "1",
-            },
+        sbx = await asyncio.wait_for(
+            AsyncSandbox.create(
+                "meshwiki-grinder",  # pre-baked template: Node.js 20 + Kilo + gh + Python tools
+                timeout=3600,  # sandbox *lifetime* (not create timeout); default 5 min is too short
+                envs={
+                    "MINIMAX_API_KEY": settings.minimax_api_key,
+                    # KILO_API_KEY is what Kilo reads for the minimax provider
+                    "KILO_API_KEY": settings.minimax_api_key,
+                    "GITHUB_TOKEN": settings.github_token,
+                    "GH_TOKEN": settings.github_token,
+                    # Enable full colour output so Kilo renders its TUI properly
+                    "TERM": "xterm-256color",
+                    "COLORTERM": "truecolor",
+                    "FORCE_COLOR": "1",
+                },
+            ),
+            timeout=120,  # 2 min to create the sandbox; lifetime timeout is separate
         )
         logger.info("e2b grinder: sandbox created for subtask %s", subtask["id"])
 
@@ -611,7 +660,7 @@ async def grind_subtask_e2b(
             'git config --global user.email "factory@meshwiki" && '
             'git config --global user.name "Factory Grinder" && '
             f'git config --global url."https://x-access-token:{settings.github_token}@github.com/".insteadOf "https://github.com/"',
-            timeout=0,
+            timeout=30,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
@@ -623,7 +672,7 @@ async def grind_subtask_e2b(
         )
         result = await sbx.commands.run(
             f"git clone --depth 1 --branch {base_branch} {clone_url} /tmp/repo",
-            timeout=0,
+            timeout=300,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
@@ -633,7 +682,7 @@ async def grind_subtask_e2b(
         # Install Python deps
         await sbx.commands.run(
             "cd /tmp/repo && pip install -e '.[dev]' -q --no-cache-dir",
-            timeout=0,
+            timeout=600,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
@@ -641,13 +690,13 @@ async def grind_subtask_e2b(
         # Install orchestrator deps (langgraph, anthropic, etc.)
         await sbx.commands.run(
             "cd /tmp/repo/orchestrator && pip install -e '.[dev]' -q --no-cache-dir",
-            timeout=0,
+            timeout=600,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
 
         # Write task file
-        await sbx.files.write("/tmp/task.md", task_prompt)
+        await asyncio.wait_for(sbx.files.write("/tmp/task.md", task_prompt), timeout=30)
 
         # ── Kilo run via PTY ──────────────────────────────────────────────────
         # PTY allocation makes Kilo render its full TUI (sidebars, progress
@@ -660,10 +709,9 @@ async def grind_subtask_e2b(
             subtask["id"],
         )
 
-        pty_handle = await sbx.pty.create(
-            size=PtySize(cols=160, rows=50),
-            on_data=_on_pty_data,
-            timeout=0,  # no timeout — sandbox 1-hour limit applies
+        pty_handle = await asyncio.wait_for(
+            sbx.pty.create(size=PtySize(cols=160, rows=50), on_data=_on_pty_data),
+            timeout=30,
         )
         pid = pty_handle.pid
 
@@ -672,10 +720,14 @@ async def grind_subtask_e2b(
             f"cd /tmp/repo && kilo run --auto --model {model_arg}"
             f' "$(cat /tmp/task.md)" ; exit\n'
         )
-        await sbx.pty.send_stdin(pid, kilo_cmd.encode())
+        await asyncio.wait_for(sbx.pty.send_stdin(pid, kilo_cmd.encode()), timeout=10)
 
         try:
-            await pty_handle.wait()
+            await asyncio.wait_for(pty_handle.wait(), timeout=2400)  # 40 min max
+        except asyncio.TimeoutError:
+            logger.warning(
+                "e2b grinder: Kilo timed out after 40 min for %s", subtask["id"]
+            )
         except Exception as pty_exc:
             # Non-zero exit is normal if kilo fails; log but continue so we
             # can still check whether a PR was opened.
@@ -753,15 +805,20 @@ async def grind_subtask(
         client = anthropic.AsyncAnthropic(
             api_key=settings.minimax_api_key or None,
             base_url="https://api.minimax.io/v1",
+            timeout=30.0,
         )
     elif settings.grinder_provider == "anthropic":
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key or None, timeout=30.0
+        )
     else:
         logger.warning(
             "grind_subtask: unknown grinder_provider %r, falling back to anthropic",
             settings.grinder_provider,
         )
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key or None, timeout=30.0
+        )
 
     executor = GrinderToolExecutor(
         repo_root=Path(settings.repo_root),

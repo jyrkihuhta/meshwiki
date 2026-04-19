@@ -341,6 +341,7 @@ async def _messages_create_with_retry(
     minimax_client = openai.AsyncOpenAI(
         api_key=settings.minimax_api_key,
         base_url="https://api.minimax.io/v1",
+        timeout=60.0,
     )
 
     # Convert messages: Anthropic tool_result blocks → OpenAI tool role messages.
@@ -455,7 +456,9 @@ async def decompose_with_pm(
     Returns:
         Dict with ``subtasks`` list and ``incremental_cost_usd`` float.
     """
-    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
+    client = anthropic.AsyncAnthropic(
+        api_key=get_settings().anthropic_api_key or None, timeout=30.0
+    )
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
     incremental_cost_usd: float = 0.0
@@ -603,7 +606,9 @@ async def review_with_pm(
         optional ``feedback`` string.
     """
     settings = get_settings()
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key or None, timeout=30.0
+    )
     incremental_cost_usd: float = 0.0
 
     pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
