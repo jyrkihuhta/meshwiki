@@ -22,7 +22,7 @@ def storage(tmp_path):
 
 
 async def _make_task(storage: FileStorage, name: str, status: str = "draft") -> None:
-    content = f"---\ntype: task\nstatus: {status}\n---\nTest task."
+    content = f"---\ntype: task\nassignee: factory\nstatus: {status}\n---\nTest task."
     await storage.save_page(name, content)
 
 
@@ -135,6 +135,56 @@ async def test_missing_page_raises(storage):
 
 
 # ---------------------------------------------------------------------------
+# C13: assignee:factory guardrail on planned/approved → in_progress
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c13_rejects_in_progress_without_assignee(storage):
+    """task/epic without assignee:factory cannot be transitioned to in_progress."""
+    content = "---\ntype: task\nstatus: planned\nassignee: human\n---\nBody."
+    await storage.save_page("Task_C13_NoAssignee", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Task_C13_NoAssignee", "in_progress")
+
+
+@pytest.mark.asyncio
+async def test_c13_rejects_in_progress_missing_assignee(storage):
+    """task/epic with no assignee field at all is also rejected."""
+    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    await storage.save_page("Task_C13_Missing", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Task_C13_Missing", "in_progress")
+
+
+@pytest.mark.asyncio
+async def test_c13_allows_in_progress_with_factory_assignee(storage):
+    """task with assignee:factory transitions normally."""
+    content = "---\ntype: task\nstatus: planned\nassignee: factory\n---\nBody."
+    await storage.save_page("Task_C13_Factory", content)
+    result = await transition_task(storage, "Task_C13_Factory", "in_progress")
+    assert result["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_c13_non_task_page_not_affected(storage):
+    """Regular pages (no type field) are not subject to the guardrail."""
+    content = "---\nstatus: planned\n---\nBody."
+    await storage.save_page("Regular_C13", content)
+    result = await transition_task(storage, "Regular_C13", "in_progress")
+    assert result["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_c13_approved_to_in_progress_also_guarded(storage):
+    """The guardrail also applies to the approved → in_progress path."""
+    content = "---\ntype: epic\nstatus: approved\nassignee: human\n---\nBody."
+    await storage.save_page("Epic_C13_Approved", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Epic_C13_Approved", "in_progress")
+
+
+# ---------------------------------------------------------------------------
 # C1: save route must route status changes through the state machine
 # ---------------------------------------------------------------------------
 
@@ -169,10 +219,10 @@ async def factory_client(factory_settings):
 async def test_save_valid_status_transition(factory_client, factory_settings):
     """Saving a task page with a valid status change transitions it correctly."""
     page_name = "Task_Save_Test"
-    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    content = "---\ntype: task\nassignee: factory\nstatus: planned\n---\nBody."
     await meshwiki.main.storage.save_page(page_name, content)
 
-    new_content = "---\ntype: task\nstatus: in_progress\n---\nBody."
+    new_content = "---\ntype: task\nassignee: factory\nstatus: in_progress\n---\nBody."
     resp = await factory_client.post(
         f"/page/{page_name}", data={"content": new_content}
     )

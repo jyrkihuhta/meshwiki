@@ -183,7 +183,7 @@ async def test_transition_with_extra_fields(client):
         "/api/v1/pages",
         json={
             "name": "TaskTwelve",
-            "content": "---\ntype: task\nstatus: approved\n---\nTest",
+            "content": "---\ntype: task\nassignee: factory\nstatus: approved\n---\nTest",
         },
         headers=_AUTH,
     )

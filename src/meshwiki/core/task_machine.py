@@ -97,6 +97,21 @@ async def transition_task(
             f"Allowed: {allowed}"
         )
 
+    # C13: factory tasks must have assignee:factory before going in_progress
+    extras = page.metadata.model_extra or {}
+    page_type = extras.get("type")
+    if (
+        new_status == "in_progress"
+        and current_status in ("planned", "approved")
+        and page_type in ("task", "epic")
+        and extras.get("assignee") != "factory"
+    ):
+        raise InvalidTransitionError(
+            f"Cannot start task {page_name!r}: assignee is "
+            f"{extras.get('assignee')!r}, expected 'factory'. "
+            f"Set 'assignee: factory' in the page frontmatter first."
+        )
+
     # Apply status change
     await storage.update_frontmatter_field(page_name, "status", new_status)
 
