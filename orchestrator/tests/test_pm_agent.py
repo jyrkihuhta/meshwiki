@@ -318,9 +318,19 @@ async def test_review_with_pm_approved() -> None:
     github_client = AsyncMock()
     github_client.get_pr_diff = AsyncMock(return_value="diff --git ...")
 
-    with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+    mock_settings = MagicMock()
+    mock_settings.pm_triage_model = ""  # disable triage so mock responses aren't consumed
+    mock_settings.pm_review_model = "claude-sonnet-4-6"
+    mock_settings.anthropic_api_key = "test-key"
+    mock_settings.pm_review_max_diff_lines = 500
+    mock_settings.minimax_api_key = None
+
+    with (
+        patch(
+            "factory.agents.pm_agent.anthropic.AsyncAnthropic",
+            return_value=mock_anthropic_client,
+        ),
+        patch("factory.agents.pm_agent.get_settings", return_value=mock_settings),
     ):
         result = await review_with_pm(state, subtask, meshwiki_client, github_client)
 
@@ -373,9 +383,19 @@ async def test_review_with_pm_changes_requested() -> None:
     github_client = AsyncMock()
     github_client.get_pr_diff = AsyncMock(return_value="diff --git ...")
 
-    with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+    mock_settings = MagicMock()
+    mock_settings.pm_triage_model = ""  # disable triage so mock responses aren't consumed
+    mock_settings.pm_review_model = "claude-sonnet-4-6"
+    mock_settings.anthropic_api_key = "test-key"
+    mock_settings.pm_review_max_diff_lines = 500
+    mock_settings.minimax_api_key = None
+
+    with (
+        patch(
+            "factory.agents.pm_agent.anthropic.AsyncAnthropic",
+            return_value=mock_anthropic_client,
+        ),
+        patch("factory.agents.pm_agent.get_settings", return_value=mock_settings),
     ):
         result = await review_with_pm(state, subtask, meshwiki_client, github_client)
 

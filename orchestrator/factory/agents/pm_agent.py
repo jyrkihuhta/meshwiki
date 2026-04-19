@@ -307,8 +307,6 @@ async def _messages_create_with_retry(
     MiniMax via OpenAI-compatible API if ``FACTORY_MINIMAX_API_KEY`` is set.
     All other errors are re-raised immediately.
     """
-    import openai
-
     last_exc: BaseException | None = None
     for attempt in range(max_overload_attempts):
         try:
@@ -332,6 +330,8 @@ async def _messages_create_with_retry(
     settings = get_settings()
     if not settings.minimax_api_key:
         raise last_exc  # type: ignore[misc]
+
+    import openai  # optional dependency; only needed for MiniMax fallback
 
     logger.warning(
         "pm_agent: Anthropic overloaded after %d attempts, falling back to MiniMax",
