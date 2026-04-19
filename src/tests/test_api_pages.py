@@ -242,3 +242,74 @@ async def test_rename_nonexistent_page_returns_404(client):
         headers=_AUTH,
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PATCH frontmatter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_updates_frontmatter_field(client):
+    await client.post(
+        "/api/v1/pages",
+        json={"name": "PatchTarget", "content": "---\nstatus: draft\n---\nBody text."},
+        headers=_AUTH,
+    )
+    resp = await client.patch(
+        "/api/v1/pages/PatchTarget",
+        json={"fields": {"status": "planned", "priority": "high"}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    meta = resp.json()["metadata"]
+    assert meta["status"] == "planned"
+    assert meta["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_patch_preserves_page_body(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "PatchBody",
+            "content": "---\nstatus: draft\n---\nOriginal body.",
+        },
+        headers=_AUTH,
+    )
+    await client.patch(
+        "/api/v1/pages/PatchBody",
+        json={"fields": {"status": "planned"}},
+        headers=_AUTH,
+    )
+    resp = await client.get("/api/v1/pages/PatchBody", headers=_AUTH)
+    assert "Original body." in resp.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_patch_removes_field_when_null(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "PatchNull",
+            "content": "---\nstatus: draft\nbranch: old\n---\nBody.",
+        },
+        headers=_AUTH,
+    )
+    resp = await client.patch(
+        "/api/v1/pages/PatchNull",
+        json={"fields": {"branch": None}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    assert "branch" not in resp.json()["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_patch_nonexistent_page_returns_404(client):
+    resp = await client.patch(
+        "/api/v1/pages/NoSuchPage",
+        json={"fields": {"status": "planned"}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 404

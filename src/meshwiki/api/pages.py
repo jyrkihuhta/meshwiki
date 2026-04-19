@@ -19,6 +19,10 @@ class PageCreate(BaseModel):
     content: str
 
 
+class PagePatch(BaseModel):
+    fields: dict[str, str | None]
+
+
 class PageRename(BaseModel):
     new_name: str
 
@@ -101,6 +105,19 @@ async def update_page(
 ) -> PageResponse:
     """Create or update a page."""
     page = await storage.save_page(name, body.content)
+    return _page_response(page)
+
+
+@router.patch("/pages/{name:path}", response_model=PageResponse)
+async def patch_page_frontmatter(
+    name: str,
+    body: PagePatch,
+    storage: FileStorage = Depends(get_storage),
+) -> PageResponse:
+    """Update frontmatter fields without replacing the page body."""
+    page = await storage.patch_frontmatter(name, body.fields)
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
     return _page_response(page)
 
 

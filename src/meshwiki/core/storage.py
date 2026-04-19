@@ -363,6 +363,53 @@ class FileStorage(Storage):
             exists=True,
         )
 
+    async def patch_frontmatter(
+        self, name: str, fields: dict[str, str | None]
+    ) -> "Page | None":
+        """Update multiple frontmatter fields without touching the page body.
+
+        Pass ``None`` as a value to remove an extra field.  Known metadata
+        fields (``title``, ``tags``) follow the same coercion rules as
+        ``update_frontmatter_field``.
+        """
+        path = self._get_path(name)
+        if not path.exists():
+            return None
+
+        raw = path.read_text(encoding="utf-8")
+        metadata, body = self._parse_frontmatter(raw)
+
+        for field, value in fields.items():
+            if field == "tags":
+                metadata.tags = (
+                    [t.strip() for t in value.split(",") if t.strip()] if value else []
+                )
+            elif field == "title":
+                metadata.title = value if value else None
+            elif value is not None:
+                setattr(metadata, field, value)
+            else:
+                extras = getattr(metadata, "__pydantic_extra__", None)
+                if extras and field in extras:
+                    del extras[field]
+
+        metadata.modified = datetime.now()
+
+        frontmatter = self._create_frontmatter(metadata)
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        field_names = ", ".join(fields)
+        if self._revisions is not None:
+            self._revisions.record(
+                name,
+                raw,
+                operation="frontmatter_update",
+                message=f"Updated {field_names}",
+            )
+
+        return Page(name=name, content=body, metadata=metadata, exists=True)
+
     async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
         """Move a page to a new name/location."""
         old_path = self._get_path(old_name)
