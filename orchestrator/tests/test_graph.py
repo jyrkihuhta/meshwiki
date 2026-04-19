@@ -9,7 +9,6 @@ from factory.graph import build_graph, route_after_intake
 EXPECTED_NODES = {
     "task_intake",
     "decompose",
-    "human_review_plan",
     "assign_grinders",
     "grind",
     "collect_results",
@@ -44,11 +43,10 @@ def test_graph_default_checkpointer() -> None:
 
 
 def test_graph_interrupt_nodes() -> None:
-    """The graph interrupts before human_review_code only (plan review is auto-approved)."""
+    """The graph interrupts before human_review_code only."""
     graph = build_graph(MemorySaver())
     interrupt_nodes = set(graph.interrupt_before_nodes)
-    assert "human_review_plan" not in interrupt_nodes
-    assert "human_review_code" in interrupt_nodes
+    assert interrupt_nodes == {"human_review_code"}
 
 
 # ---------------------------------------------------------------------------

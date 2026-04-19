@@ -12,7 +12,6 @@ from .nodes import (
     finalize_node,
     grind_node,
     human_review_code_node,
-    human_review_plan_node,
     merge_check_node,
     pm_review_node,
     route_grinders,
@@ -37,14 +36,6 @@ def route_after_intake(state: FactoryState) -> str:
     if state.get("decomposition_approved"):
         return "skip_decompose"
     return "decompose"
-
-
-def route_after_plan_review(state: FactoryState) -> str:
-    """Route after human reviews the decomposition plan."""
-    resp = state.get("human_approval_response")
-    if resp == "approve":
-        return "approved"
-    return "rejected"  # both "reject" and "modify" restart decomposition
 
 
 def route_after_grinding(state: FactoryState) -> str:
@@ -115,7 +106,6 @@ def build_graph(checkpointer):
     # -----------------------------------------------------------------------
     graph.add_node("task_intake", task_intake_node)
     graph.add_node("decompose", decompose_node)
-    graph.add_node("human_review_plan", human_review_plan_node)
     graph.add_node("assign_grinders", assign_grinders_node)
     graph.add_node("grind", grind_node)
     graph.add_node("collect_results", collect_results_node)
