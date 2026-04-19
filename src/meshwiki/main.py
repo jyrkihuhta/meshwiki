@@ -249,6 +249,11 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
     """
     page_map: dict[str, Page] = {p.name: p for p in pages}
 
+    # Underscores and spaces are interchangeable in page name references
+    # (storage converts _path_to_name with replace("_", " ")).
+    def _ref(name: str) -> str:
+        return name.replace("_", " ")
+
     # Build children_of from both explicit children: lists and parent_task: fields.
     children_of: dict[str, list[str]] = {}
     for page in pages:
@@ -256,7 +261,7 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
             continue
         declared = page.metadata.children
         if declared:
-            children_of[page.name] = list(declared)
+            children_of[page.name] = [_ref(c) for c in declared]
 
     # Derive implicit children from parent_task: (append after explicitly declared ones).
     for page in pages:
@@ -265,7 +270,7 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
         extra = page.metadata.model_extra or {}
         parent = extra.get("parent_task")
         if parent:
-            bucket = children_of.setdefault(parent, [])
+            bucket = children_of.setdefault(_ref(parent), [])
             if page.name not in bucket:
                 bucket.append(page.name)
 
