@@ -94,6 +94,6 @@ engine = get_engine()  # Returns None if not available
 
 ## Related
 
-- [[Docs/Architecture Overview]] - System design
-- [[Docs/Rust Graph Engine]] - Graph engine details
-- [[Docs/Getting Started]] - User-facing guide
+- [[Architecture_Overview]] - System design
+- [[Rust_Graph_Engine]] - Graph engine details
+- [[Getting_Started]] - User-facing guide

@@ -59,6 +59,6 @@ Current development status and planned milestones.
 
 ## Related
 
-- [[Docs/Architecture Overview]] - System design
-- [[Docs/Kubernetes Setup]] - Deployment infrastructure
-- [[Docs/Getting Started]] - User guide
+- [[Architecture_Overview]] - System design
+- [[Kubernetes_Setup]] - Deployment infrastructure
+- [[Getting_Started]] - User guide

@@ -91,6 +91,6 @@ k3d image import meshwiki:latest -c meshwiki
 
 ## Related
 
-- [[Docs/Architecture Overview]] - Application architecture
-- [[Project Roadmap]] - Development timeline
-- [[Docs/Python Development]] - Local dev setup
+- [[Architecture_Overview]] - Application architecture
+- [[Project_Roadmap]] - Development timeline
+- [[Python_Development]] - Local dev setup

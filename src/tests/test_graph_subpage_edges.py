@@ -1,4 +1,4 @@
-"""Tests for automatic parent→child edges for subpages in the graph API."""
+"""Tests for parent→child edges in the graph API based on children: frontmatter."""
 
 import os
 
@@ -15,20 +15,19 @@ def cleanup_engine():
 
 @pytest.fixture
 def wiki_dir(tmp_path):
-    (tmp_path / "Parent.md").write_text("# Parent\n")
-    (tmp_path / "Parent").mkdir()
-    (tmp_path / "Parent" / "Child1.md").write_text("# Child 1\n")
-    (tmp_path / "Parent" / "Child2.md").write_text("# Child 2\n[[Parent/Child1]]\n")
-    (tmp_path / "Orphan").mkdir()
-    (tmp_path / "Orphan" / "Sub.md").write_text("# Orphan sub (parent page missing)\n")
+    (tmp_path / "Parent.md").write_text(
+        "---\nchildren:\n  - Child1\n  - Child2\n---\n# Parent\n"
+    )
+    (tmp_path / "Child1.md").write_text("# Child 1\n")
+    (tmp_path / "Child2.md").write_text("# Child 2\n[[Child1]]\n")
     (tmp_path / "Standalone.md").write_text("# Standalone\n")
     return tmp_path
 
 
-class TestSubpageEdges:
+class TestChildrenEdges:
     @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
     @pytest.mark.asyncio
-    async def test_parent_edges_added_for_subpages(self, wiki_dir):
+    async def test_parent_edges_from_children_frontmatter(self, wiki_dir):
         import importlib
 
         os.environ["MESHWIKI_DATA_DIR"] = str(wiki_dir)
@@ -51,13 +50,13 @@ class TestSubpageEdges:
         parent_links = [lnk for lnk in data["links"] if lnk.get("type") == "parent"]
         parent_link_pairs = {(lnk["source"], lnk["target"]) for lnk in parent_links}
 
-        assert ("Parent", "Parent/Child1") in parent_link_pairs
-        assert ("Parent", "Parent/Child2") in parent_link_pairs
+        assert ("Parent", "Child1") in parent_link_pairs
+        assert ("Parent", "Child2") in parent_link_pairs
 
     @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
     @pytest.mark.asyncio
-    async def test_no_parent_edge_when_parent_page_missing(self, wiki_dir):
-        """Subpages whose parent page doesn't exist get no parent edge."""
+    async def test_no_parent_edge_for_standalone_page(self, wiki_dir):
+        """Pages not listed in any children: get no parent edge."""
         import importlib
 
         os.environ["MESHWIKI_DATA_DIR"] = str(wiki_dir)
@@ -78,7 +77,7 @@ class TestSubpageEdges:
 
         parent_links = [lnk for lnk in data["links"] if lnk.get("type") == "parent"]
         targets = {lnk["target"] for lnk in parent_links}
-        assert "Orphan/Sub" not in targets
+        assert "Standalone" not in targets
 
     @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
     @pytest.mark.asyncio
@@ -104,6 +103,6 @@ class TestSubpageEdges:
 
         wiki_links = [lnk for lnk in data["links"] if "type" not in lnk]
         assert any(
-            lnk["source"] == "Parent/Child2" and lnk["target"] == "Parent/Child1"
+            lnk["source"] == "Child2" and lnk["target"] == "Child1"
             for lnk in wiki_links
         )

@@ -343,15 +343,9 @@ def get_context(**kwargs) -> dict:
 
 # ── Page name validation ──────────────────────────────────────────────────────
 
-_MAX_DEPTH = 3  # maximum number of slashes allowed in a page name
-
 
 def _validate_page_name(name: str) -> None:
-    """Raise HTTPException 400 for invalid or potentially dangerous page names.
-
-    Allows forward slashes for subpages (up to _MAX_DEPTH levels deep), but
-    blocks any pattern that could escape the data directory.
-    """
+    """Raise HTTPException 400 for invalid or potentially dangerous page names."""
     if not name:
         raise HTTPException(status_code=400, detail="Invalid page name")
     # Block null bytes and backslashes (Windows path separator)
@@ -363,15 +357,8 @@ def _validate_page_name(name: str) -> None:
     # Block consecutive slashes
     if "//" in name:
         raise HTTPException(status_code=400, detail="Invalid page name")
-    segments = name.split("/")
-    # Enforce depth limit
-    if len(segments) > _MAX_DEPTH + 1:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Page nesting limited to {_MAX_DEPTH} levels",
-        )
     # Block empty segments and directory traversal
-    if any(seg in (".", "..") or seg == "" for seg in segments):
+    if any(seg in (".", "..") or seg == "" for seg in name.split("/")):
         raise HTTPException(status_code=400, detail="Invalid page name")
 
 
@@ -577,6 +564,11 @@ async def page_diff(request: Request, name: str, rev_range: str):
 @app.get("/page/{name:path}", response_class=HTMLResponse)
 async def view_page(request: Request, name: str):
     """View a wiki page."""
+    # 301 redirect for legacy slash-path URLs (e.g. /page/Docs/Getting_Started → /page/Getting_Started)
+    if "/" in name:
+        slug = name.rsplit("/", 1)[1]
+        if slug and storage._get_path(slug).exists():
+            return RedirectResponse(url=f"/page/{slug}", status_code=301)
     _validate_page_name(name)
     page = await storage.get_page(name)
 
