@@ -459,7 +459,7 @@ async def decompose_with_pm(
         Dict with ``subtasks`` list and ``incremental_cost_usd`` float.
     """
     client = anthropic.AsyncAnthropic(
-        api_key=get_settings().anthropic_api_key or None, timeout=30.0
+        api_key=get_settings().anthropic_api_key or None, timeout=600.0
     )
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
