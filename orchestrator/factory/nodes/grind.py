@@ -67,7 +67,11 @@ async def grind_node(state: FactoryState) -> dict:
                     subtask["wiki_page"],
                     exc,
                 )
-            return {"subtasks": [updated], "active_grinders": [subtask_id]}
+            return {
+                "subtasks": [updated],
+                "active_grinders": [subtask_id],
+                "_current_subtask_id": subtask_id,
+            }
 
         result = await grind_subtask(state, subtask, meshwiki_client)
         updated = result["subtask"]
@@ -102,4 +106,6 @@ async def grind_node(state: FactoryState) -> dict:
         "subtasks": [updated],
         "incremental_costs_usd": [incremental_cost],
         "active_grinders": [subtask_id],
+        # Echo subtask ID so route_after_grinding can identify which branch completed.
+        "_current_subtask_id": subtask_id,
     }

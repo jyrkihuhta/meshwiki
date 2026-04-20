@@ -11,7 +11,6 @@ EXPECTED_NODES = {
     "decompose",
     "assign_grinders",
     "grind",
-    "collect_results",
     "pm_review",
     "human_review_code",
     "merge_check",

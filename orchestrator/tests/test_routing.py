@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from langgraph.types import Send
+
 from factory.agents.pm_agent import _build_subtask
 from factory.graph import (
     route_after_escalation,
@@ -34,6 +36,7 @@ def _make_state(**kwargs) -> FactoryState:
         "human_approval_response": None,
         "human_feedback": None,
         "cost_usd": 0.0,
+        "incremental_costs_usd": [],
         "graph_status": "intake",
         "error": None,
         "escalation_decision": None,
@@ -82,73 +85,122 @@ class TestRouteAfterIntake:
 
 
 # ---------------------------------------------------------------------------
-# route_after_grinding
+# route_after_grinding — per-subtask fan-out via Send()
 # ---------------------------------------------------------------------------
 
 
 class TestRouteAfterGrinding:
-    def test_all_succeeded_no_pending(self) -> None:
+    def test_succeeded_returns_send_to_pm_review(self) -> None:
+        """A successfully ground subtask is fanned out directly to pm_review."""
+        sub = _make_subtask(status="review")
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
+        result = route_after_grinding(state)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], Send)
+        assert result[0].node == "pm_review"
+        assert result[0].arg["_current_subtask_id"] == sub["id"]
+
+    def test_failed_subtask_escalates(self) -> None:
+        """A failed subtask routes to escalate."""
+        sub = _make_subtask(status="failed")
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
+        assert route_after_grinding(state) == "escalate"
+
+    def test_missing_subtask_id_escalates(self) -> None:
+        """If _current_subtask_id is not found in subtasks, fall back to escalate."""
+        sub = _make_subtask(status="review")
+        state = _make_state(subtasks=[sub], _current_subtask_id="nonexistent-id")
+        assert route_after_grinding(state) == "escalate"
+
+    def test_none_subtask_id_escalates(self) -> None:
+        """If _current_subtask_id is None, fall back to escalate."""
         sub = _make_subtask(status="review")
         state = _make_state(subtasks=[sub])
-        assert route_after_grinding(state) == "all_succeeded"
+        assert route_after_grinding(state) == "escalate"
 
-    def test_more_pending_when_pending_remain(self) -> None:
-        review_sub = _make_subtask(wiki_page="Task_0042_Sub_01", status="review")
-        pending_sub = _make_subtask(wiki_page="Task_0042_Sub_02", status="pending")
-        state = _make_state(subtasks=[review_sub, pending_sub])
-        assert route_after_grinding(state) == "more_pending"
-
-    def test_all_failed_when_none_succeeded(self) -> None:
-        sub = _make_subtask(status="failed")
-        state = _make_state(subtasks=[sub])
-        assert route_after_grinding(state) == "all_failed"
-
-    def test_some_failed_when_mix(self) -> None:
-        failed_sub = _make_subtask(wiki_page="Task_0042_Sub_01", status="failed")
-        review_sub = _make_subtask(wiki_page="Task_0042_Sub_02", status="review")
-        state = _make_state(subtasks=[failed_sub, review_sub])
-        assert route_after_grinding(state) == "some_failed"
-
-    def test_changes_requested_treated_as_pending(self) -> None:
-        review_sub = _make_subtask(wiki_page="Task_0042_Sub_01", status="review")
-        rework_sub = _make_subtask(
-            wiki_page="Task_0042_Sub_02", status="changes_requested"
+    def test_send_payload_contains_full_state(self) -> None:
+        """The Send payload carries the full state so pm_review has all context."""
+        sub = _make_subtask(status="review")
+        state = _make_state(
+            subtasks=[sub],
+            _current_subtask_id=sub["id"],
+            task_wiki_page="Task_0042_test",
         )
-        state = _make_state(subtasks=[review_sub, rework_sub])
-        assert route_after_grinding(state) == "more_pending"
+        result = route_after_grinding(state)
+        assert isinstance(result, list)
+        payload = result[0].arg
+        assert payload["task_wiki_page"] == "Task_0042_test"
+        assert payload["subtasks"] == [sub]
 
 
 # ---------------------------------------------------------------------------
-# route_after_pm_review
+# route_after_pm_review — per-subtask fan-out routing
 # ---------------------------------------------------------------------------
 
 
 class TestRouteAfterPmReview:
     def test_escalate_when_attempts_exhausted(self) -> None:
         sub = _make_subtask(status="changes_requested", attempt=3, max_attempts=3)
-        state = _make_state(subtasks=[sub])
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
         assert route_after_pm_review(state) == "escalate"
 
-    def test_changes_requested_when_retries_remain(self) -> None:
+    def test_rework_sends_to_grind_when_retries_remain(self) -> None:
+        """changes_requested with retries left returns Send to grind."""
         sub = _make_subtask(status="changes_requested", attempt=1, max_attempts=3)
-        state = _make_state(subtasks=[sub])
-        assert route_after_pm_review(state) == "changes_requested"
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
+        result = route_after_pm_review(state)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], Send)
+        assert result[0].node == "grind"
+        assert result[0].arg["_current_subtask_id"] == sub["id"]
 
-    def test_skip_human_review_when_auto_merge_enabled(self) -> None:
+    def test_approved_all_done_skip_human_review_when_auto_merge(self) -> None:
+        """All subtasks terminal + auto_merge → skip_human_review."""
         sub = _make_subtask(status="merged")
-        state = _make_state(subtasks=[sub])
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
         mock_settings = MagicMock()
         mock_settings.auto_merge = True
-        with patch("factory.config.get_settings", return_value=mock_settings):
+        with patch("factory.graph.get_settings", return_value=mock_settings):
             assert route_after_pm_review(state) == "skip_human_review"
 
-    def test_all_approved_when_auto_merge_disabled(self) -> None:
+    def test_approved_all_done_all_approved_when_no_auto_merge(self) -> None:
+        """All subtasks terminal + no auto_merge → all_approved."""
         sub = _make_subtask(status="merged")
-        state = _make_state(subtasks=[sub])
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
         mock_settings = MagicMock()
         mock_settings.auto_merge = False
-        with patch("factory.config.get_settings", return_value=mock_settings):
+        with patch("factory.graph.get_settings", return_value=mock_settings):
             assert route_after_pm_review(state) == "all_approved"
+
+    def test_approved_but_siblings_still_running_returns_end(self) -> None:
+        """Approved subtask but sibling still in 'review' — branch ends (END)."""
+        from langgraph.graph import END
+
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="review")
+        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id=sub1["id"])
+        mock_settings = MagicMock()
+        mock_settings.auto_merge = False
+        with patch("factory.graph.get_settings", return_value=mock_settings):
+            result = route_after_pm_review(state)
+        assert result == END
+
+    def test_missing_subtask_id_escalates(self) -> None:
+        """Missing _current_subtask_id falls back to escalate."""
+        sub = _make_subtask(status="merged")
+        state = _make_state(subtasks=[sub], _current_subtask_id="nonexistent")
+        assert route_after_pm_review(state) == "escalate"
+
+    def test_rework_send_payload_has_correct_subtask_id(self) -> None:
+        """The Send payload for rework carries the correct subtask id."""
+        sub = _make_subtask(status="changes_requested", attempt=0, max_attempts=3)
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
+        result = route_after_pm_review(state)
+        assert isinstance(result, list)
+        payload = result[0].arg
+        assert payload["_current_subtask_id"] == sub["id"]
 
 
 # ---------------------------------------------------------------------------

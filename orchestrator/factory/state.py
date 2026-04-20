@@ -127,3 +127,9 @@ class FactoryState(TypedDict):
     ]
     error: str | None
     escalation_decision: Literal["retry", "redecompose", "abandon"] | None
+
+    # Per-branch routing (ephemeral — set by Send() and echoed by grind/pm_review)
+    # Used by route_after_grinding and route_after_pm_review to identify which
+    # subtask this branch is operating on.  Not a persistent field; each branch
+    # writes its own value so parallel branches don't conflict.
+    _current_subtask_id: str | None
