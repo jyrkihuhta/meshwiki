@@ -128,7 +128,7 @@ Fix correctness and reliability issues in the v1 orchestrator.
 
 **Reliability**
 - [x] **F8.6** Bookkeeper bot — periodic job reconciling stale task states (stuck in_progress → failed, merged PRs → merged)
-- [ ] **F8.7** Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
+- [x] **F8.7** Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
 
 **Performance**
 - [ ] **F8.8** Pre-bake Python deps into E2B template — `pip install -e '.[dev]'` runs from scratch every grind session; baking deps into the `meshwiki-grinder` E2B template snapshot would make this near-instant and eliminate a large chunk of per-run disk/time overhead (requires rebuilding the template via `e2b template build`)
