@@ -14,6 +14,7 @@ from markdown.inlinepatterns import InlineProcessor, SimpleTagInlineProcessor
 from markdown.preprocessors import Preprocessor
 
 from meshwiki.core.graph import get_engine
+from meshwiki.extensions.running_clock import RunningClockExtension
 
 _ESCAPED_MACRO_RE = re.compile(r"\\<<([A-Za-z][^>]*)>>")
 
@@ -1878,6 +1879,7 @@ def create_parser(
             CalloutExtension(),  # ```info``` etc. callout blocks
             RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
+            RunningClockExtension(),  # <<RunningClock>>
             TagListExtension(pages=pages),  # <<TagList>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
             ChildrenExtension(page_metadata=page_metadata),  # <<Children>>
