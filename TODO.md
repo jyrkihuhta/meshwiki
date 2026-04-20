@@ -138,7 +138,7 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [x] **F8.10** Auth-gate `/ws/terminal/{name}` WebSocket — currently unauthenticated; anyone who knows (or guesses) a task page name can read live grinder terminal output, which may include API keys, tokens, or repo contents streamed via Kilo
 
 **Efficiency**
-- [ ] **F8.11** httpx clients — share a single `httpx.AsyncClient` per session in `MeshWikiClient` and `GitHubClient`
+- [x] **F8.11** httpx clients — share a single `httpx.AsyncClient` per session in `MeshWikiClient` and `GitHubClient`
 
 **Larger refactors / lower priority**
 - [ ] **F8.12** Stable page identity via UUID — terminal session keys, WebSocket lookups, and graph thread IDs all use the fragile human-readable page name (spaces/underscores/special chars cause mismatch bugs). Root cause: wiki URLs encode spaces as underscores, but page names can also contain real underscores (e.g. `get_engine()`), making the two indistinguishable in a URL. Add a `uuid` frontmatter field generated on page creation; use it as the canonical key everywhere internally, keeping the page name only for display/URL routing
