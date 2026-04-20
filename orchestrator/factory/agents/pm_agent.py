@@ -610,7 +610,7 @@ async def review_with_pm(
     """
     settings = get_settings()
     client = anthropic.AsyncAnthropic(
-        api_key=settings.anthropic_api_key or None, timeout=30.0
+        api_key=settings.anthropic_api_key or None, timeout=600.0
     )
     incremental_cost_usd: float = 0.0
 
