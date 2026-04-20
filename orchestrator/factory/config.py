@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     pm_review_max_diff_lines: int = (
         500  # FACTORY_PM_REVIEW_MAX_DIFF_LINES — truncate diff beyond this
     )
+    bookkeeper_interval_seconds: int = (
+        300  # FACTORY_BOOKKEEPER_INTERVAL_SECONDS — how often the bookkeeper runs
+    )
+    bookkeeper_stale_hours: float = (
+        2.0  # FACTORY_BOOKKEEPER_STALE_HOURS — age threshold for stuck in_progress tasks
+    )
 
     model_config = SettingsConfigDict(env_prefix="FACTORY_")
 

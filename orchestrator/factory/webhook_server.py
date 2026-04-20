@@ -12,6 +12,8 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from .bots.bookkeeper import BookkeeperBot
+from .bots.registry import BotRegistry
 from .config import get_settings, validate_settings
 from .graph import build_graph
 from .integrations.meshwiki_client import MeshWikiClient
@@ -128,9 +130,15 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open the SQLite checkpoint DB, build the graph, close on shutdown."""
+    """Open the SQLite checkpoint DB, build the graph, start bots, close on shutdown."""
     settings = get_settings()
     validate_settings(settings)
+
+    # Build bot registry
+    bot_registry = BotRegistry()
+    bot_registry.register(BookkeeperBot())
+    app.state.bot_registry = bot_registry
+
     async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver:
         app.state.graph = build_graph(saver)
         logger.info(
@@ -138,7 +146,9 @@ async def lifespan(app: FastAPI):
             settings.checkpoint_db,
         )
         await _resume_interrupted_tasks(app.state.graph, saver, settings)
+        await bot_registry.start_all()
         yield
+        await bot_registry.stop_all()
     logger.info("factory: SQLite checkpointer closed")
 
 
