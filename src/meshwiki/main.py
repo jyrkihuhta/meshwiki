@@ -59,6 +59,7 @@ from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import TASK_TRANSITIONS
 from meshwiki.core.task_machine import transition_task as _machine_transition
 from meshwiki.core.ws_manager import manager
+from meshwiki.routes.api import router as api_preview_router
 
 # Configure structured logging before anything else
 configure_logging()
@@ -216,6 +217,8 @@ if settings.factory_enabled:
     from meshwiki.api import router as api_v1_router
 
     app.include_router(api_v1_router)
+
+app.include_router(api_preview_router, prefix="/api")
 
 
 # Template context helper
