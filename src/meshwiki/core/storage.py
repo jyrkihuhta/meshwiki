@@ -384,6 +384,14 @@ class FileStorage(Storage):
                 metadata.tags = (
                     [t.strip() for t in value.split(",") if t.strip()] if value else []
                 )
+            elif field == "children":
+                # children is a list field — split on commas or newlines
+                if value:
+                    metadata.children = [
+                        v.strip() for v in re.split(r"[,\n]", value) if v.strip()
+                    ]
+                else:
+                    metadata.children = []
             elif field == "title":
                 metadata.title = value if value else None
             elif value is not None:
