@@ -224,12 +224,12 @@ def test_epic_appears_in_factory_section():
     assert _find(section["children"], "MyEpic") is not None
 
 
-def test_standalone_task_appears_in_standalone_section():
-    """Tasks without parent_task appear under 'Standalone Tasks' section."""
+def test_standalone_task_appears_in_factory_section():
+    """Tasks without parent_task appear under the Factory section alongside epics."""
     pages = [_page("Solo", type="task"), _page("Home")]
     tree = build_page_tree_sync(pages)
     section = next(
-        (n for n in tree if n.get("section") and n["title"] == "Standalone Tasks"), None
+        (n for n in tree if n.get("section") and n["title"] == "Factory"), None
     )
     assert section is not None
     assert _find(section["children"], "Solo") is not None
