@@ -122,7 +122,7 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [x] **F8.2** Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
 
 **Correctness**
-- [ ] **F8.3** Fan-in state merge bug — when parallel grinders finish at different times, `collect_results` sees a merged subtasks list that drops the failed status of earlier-finishing subtasks; investigate LangGraph reducer annotation on `subtasks` / `failed_subtask_ids` fields in `FactoryState` and add an `Annotated` reducer so all branch updates are correctly combined
+- [x] **F8.3** Fan-in state merge bug — when parallel grinders finish at different times, `collect_results` sees a merged subtasks list that drops the failed status of earlier-finishing subtasks; investigate LangGraph reducer annotation on `subtasks` / `failed_subtask_ids` fields in `FactoryState` and add an `Annotated` reducer so all branch updates are correctly combined
 - [ ] **F8.4** Per-subtask PM review — currently PM review waits for ALL grinders to finish before reviewing any; restructure so each grind instance fans out to its own `pm_review` via `Send()`, unblocking fast subtasks from slow rework cycles
 - [ ] **F8.5** PM review feedback visible on wiki — `append_to_page` in `pm_review_node` isn't writing feedback to the task page; PM review decisions should be visible in the Agent Log section
 

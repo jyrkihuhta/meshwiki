@@ -315,6 +315,117 @@ def test_fanin_delta_return_preserves_concurrent_status_updates() -> None:
     assert by_id["task-002"]["status"] == "review"
 
 
+def _make_subtask_raw(
+    id_: str,
+    wiki_page: str,
+    status: str,
+    error_log: list | None = None,
+    pr_url: str | None = None,
+) -> SubTask:
+    """Minimal SubTask factory for reducer tests."""
+    return SubTask(
+        id=id_,
+        wiki_page=wiki_page,
+        parent_task="ParentEpic",
+        title=f"Subtask {id_}",
+        description="Test",
+        status=status,  # type: ignore[arg-type]
+        assigned_grinder=None,
+        branch_name=None,
+        pr_url=pr_url,
+        pr_number=None,
+        attempt=0,
+        max_attempts=3,
+        error_log=error_log or [],
+        files_touched=[],
+        acceptance_criteria=[],
+        token_budget=50000,
+        tokens_used=0,
+        review_feedback=None,
+        code_skeleton=None,
+    )
+
+
+def test_fanin_full_list_return_would_clobber_earlier_branch() -> None:
+    """Regression: if grind_node returned the FULL subtask list (old behavior),
+    the later branch would clobber the earlier branch's status update.
+
+    This test documents the bug and verifies it does NOT happen with the delta
+    reducer approach (each branch returns only its own updated entry).
+
+    Scenario:
+    - Initial state: [sub-01 pending, sub-02 pending]
+    - Branch A finishes first: sets sub-01 → failed.
+      State after branch A: [sub-01 failed, sub-02 pending]
+    - Branch B finishes later: sets sub-02 → review.
+      Branch B had a stale snapshot where sub-01 was still "pending".
+
+    OLD behavior (full list return, last-write-wins):
+      Branch B returns [sub-01 PENDING, sub-02 review]  ← stale sub-01
+      LangGraph applies branch B's full list, overwriting branch A's update.
+      Result: sub-01 ends up "pending" again — the failed status is LOST.
+
+    NEW behavior (delta return + _merge_subtasks reducer):
+      Branch B returns only [sub-02 review].
+      Reducer merges by ID: sub-01 keeps "failed", sub-02 gets "review".
+      Result: both statuses are preserved correctly.
+    """
+    initial = [
+        _make_subtask_raw("sub-01", "Page1", "pending"),
+        _make_subtask_raw("sub-02", "Page2", "pending"),
+    ]
+
+    # ── Old (buggy) behavior: each branch returns the full list ──────────────
+    # Branch A finishes first: returns full list with sub-01=failed, sub-02=pending
+    branch_a_full = [
+        _make_subtask_raw("sub-01", "Page1", "failed", error_log=["broke"]),
+        _make_subtask_raw("sub-02", "Page2", "pending"),  # stale snapshot of sub-02
+    ]
+    after_a_old = _merge_subtasks(initial, branch_a_full)
+    assert after_a_old[0]["status"] == "failed" or after_a_old[1]["status"] == "failed"
+
+    # Branch B finishes later: returns full list with sub-01=pending (stale!), sub-02=review
+    branch_b_full = [
+        _make_subtask_raw(
+            "sub-01", "Page1", "pending"
+        ),  # stale — branch B saw sub-01 as pending
+        _make_subtask_raw(
+            "sub-02", "Page2", "review", pr_url="https://github.com/o/r/pull/2"
+        ),
+    ]
+    after_b_old = _merge_subtasks(after_a_old, branch_b_full)
+    by_id_old = {s["id"]: s for s in after_b_old}
+    # BUG: sub-01's "failed" status is clobbered by branch B's stale "pending"
+    assert (
+        by_id_old["sub-01"]["status"] == "pending"
+    ), "Demonstrates the OLD bug: full-list return causes branch B to clobber branch A's status"
+
+    # ── New (fixed) behavior: each branch returns only its own delta ──────────
+    # Branch A returns only its updated entry
+    branch_a_delta = [
+        _make_subtask_raw("sub-01", "Page1", "failed", error_log=["broke"]),
+    ]
+    after_a_new = _merge_subtasks(initial, branch_a_delta)
+
+    # Branch B returns only its updated entry (no stale sub-01 in the list)
+    branch_b_delta = [
+        _make_subtask_raw(
+            "sub-02", "Page2", "review", pr_url="https://github.com/o/r/pull/2"
+        ),
+    ]
+    after_b_new = _merge_subtasks(after_a_new, branch_b_delta)
+    by_id_new = {s["id"]: s for s in after_b_new}
+
+    # FIX: both statuses are preserved
+    assert (
+        by_id_new["sub-01"]["status"] == "failed"
+    ), "sub-01's failed status must survive the fan-in (branch A's delta is not clobbered)"
+    assert (
+        by_id_new["sub-02"]["status"] == "review"
+    ), "sub-02's review status must also be present after fan-in"
+    assert len(after_b_new) == 2, "Both subtasks must be present after merge"
+
+
 def test_fanin_subtasks_both_failed_and_completed_in_list() -> None:
     """Simulate two parallel branches updating subtasks with different statuses.
 
