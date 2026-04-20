@@ -1,0 +1,8 @@
+<div id="wiki-hover-card" class="hover-card" role="tooltip">
+  {% if exists %}
+    <p class="hover-card__title">{{ page_name | replace("_", " ") }}</p>
+    <p class="hover-card__excerpt">{{ excerpt }}</p>
+  {% else %}
+    <p class="hover-card__not-found">⚠ Page not found</p>
+  {% endif %}
+</div>
