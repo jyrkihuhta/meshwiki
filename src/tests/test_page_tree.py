@@ -224,15 +224,25 @@ def test_epic_appears_in_factory_section():
     assert _find(section["children"], "MyEpic") is not None
 
 
-def test_standalone_task_appears_in_factory_section():
-    """Tasks without parent_task appear under the Factory section alongside epics."""
+def test_standalone_task_appears_in_standalone_tasks_section():
+    """Tasks without parent_task appear under the 'Standalone Tasks' section."""
     pages = [_page("Solo", type="task"), _page("Home")]
     tree = build_page_tree_sync(pages)
     section = next(
-        (n for n in tree if n.get("section") and n["title"] == "Factory"), None
+        (n for n in tree if n.get("section") and n["title"] == "Standalone Tasks"), None
     )
     assert section is not None
     assert _find(section["children"], "Solo") is not None
+
+
+def test_standalone_task_not_in_factory_section():
+    """Standalone tasks are NOT merged into the Factory (epics) section."""
+    pages = [_page("Solo", type="task"), _page("Home")]
+    tree = build_page_tree_sync(pages)
+    factory_section = next(
+        (n for n in tree if n.get("section") and n["title"] == "Factory"), None
+    )
+    assert factory_section is None
 
 
 def test_section_nodes_not_in_wiki_roots():
