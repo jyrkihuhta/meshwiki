@@ -945,11 +945,7 @@ async def diagnose_with_pm(
         messages=[{"role": "user", "content": user_message}],
     )
 
-    incremental_cost_usd = tokens_to_usd(
-        model=settings.pm_decompose_model,
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
-    )
+    incremental_cost_usd = tokens_to_usd(response.usage, settings.pm_decompose_model)
 
     revised = ""
     for block in response.content:
