@@ -369,10 +369,23 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
         if node is not None:
             tree.append(node)
 
-    if epic_roots:
-        tree.append(_section("Factory", "factory", epic_roots))
-    if standalone_task_roots:
-        tree.append(_section("Standalone Tasks", "standalone", standalone_task_roots))
+    if epic_roots or standalone_task_roots:
+        factory_children = _section("Factory", "factory", epic_roots)["children"]
+        if standalone_task_roots:
+            factory_children.append(
+                _section("Standalone Tasks", "standalone", standalone_task_roots)
+            )
+        tree.append(
+            {
+                "name": "__section__factory",
+                "title": "Factory",
+                "children": factory_children,
+                "level": 0,
+                "status": "",
+                "stub": False,
+                "section": True,
+            }
+        )
 
     # Orphan recovery: pages that form pure cycles (or are only referenced by
     # cycle members) are unreachable from normal roots. Surface them at the root

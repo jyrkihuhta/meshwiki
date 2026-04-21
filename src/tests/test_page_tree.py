@@ -225,24 +225,30 @@ def test_epic_appears_in_factory_section():
 
 
 def test_standalone_task_appears_in_standalone_tasks_section():
-    """Tasks without parent_task appear under the 'Standalone Tasks' section."""
-    pages = [_page("Solo", type="task"), _page("Home")]
-    tree = build_page_tree_sync(pages)
-    section = next(
-        (n for n in tree if n.get("section") and n["title"] == "Standalone Tasks"), None
-    )
-    assert section is not None
-    assert _find(section["children"], "Solo") is not None
-
-
-def test_standalone_task_not_in_factory_section():
-    """Standalone tasks are NOT merged into the Factory (epics) section."""
+    """Standalone tasks appear under Factory > Standalone Tasks subsection."""
     pages = [_page("Solo", type="task"), _page("Home")]
     tree = build_page_tree_sync(pages)
     factory_section = next(
         (n for n in tree if n.get("section") and n["title"] == "Factory"), None
     )
-    assert factory_section is None
+    assert factory_section is not None
+    standalone_section = next(
+        (
+            n
+            for n in factory_section["children"]
+            if n.get("section") and n["title"] == "Standalone Tasks"
+        ),
+        None,
+    )
+    assert standalone_section is not None
+    assert _find(standalone_section["children"], "Solo") is not None
+
+
+def test_standalone_task_not_at_root():
+    """Standalone tasks are not placed at the tree root level."""
+    pages = [_page("Solo", type="task"), _page("Home")]
+    tree = build_page_tree_sync(pages)
+    assert "Solo" not in _names(tree)
 
 
 def test_section_nodes_not_in_wiki_roots():
@@ -355,7 +361,7 @@ def test_factory_task_node_has_status_in_tree():
         _page("Task_001", status="in_progress", assignee="factory"),
     ]
     tree = build_page_tree_sync(pages)
-    factory_section = next(n for n in tree if n.get("section"))
-    task_node = next(n for n in factory_section["children"] if n["name"] == "Task_001")
+    task_node = _find(tree, "Task_001")
+    assert task_node is not None
     assert "status" in task_node
     assert task_node["status"] == "in_progress"
