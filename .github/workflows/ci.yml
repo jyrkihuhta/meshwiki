@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, staging]
   pull_request:
-    branches: [main]
+    branches: [main, staging]
 
 jobs:
   # Detect which parts of the codebase changed.
