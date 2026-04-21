@@ -1292,6 +1292,118 @@ class ChildrenExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TableOfContents macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOC_PATTERN = re.compile(r"<<TableOfContents(?:\(([^)]+)\))?>>")
+
+
+class TableOfContentsPreprocessor(Preprocessor):
+    def __init__(self, md: Markdown, toc_html: str = "", default_depth: int = 99):
+        super().__init__(md)
+        self.toc_html = toc_html
+        self.default_depth = default_depth
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<TableOfContents" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00TOCBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            depth = self.default_depth
+            try:
+                depth_str = m.group(1)
+                if depth_str:
+                    import re as _re
+
+                    depth_match = _re.search(r"(\d+)", depth_str)
+                    if depth_match:
+                        depth = int(depth_match.group(1))
+            except (IndexError, TypeError):
+                pass
+            html = self._build_toc(depth)
+            return self.md.htmlStash.store(html)
+
+        text = TOC_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00TOCBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+    def _build_toc(self, max_depth: int) -> str:
+        if not self.toc_html:
+            return ""
+        toc_str = self.toc_html.strip()
+        if not toc_str:
+            return ""
+        inner = self._strip_toc_wrapper(toc_str)
+        if not inner.strip():
+            return ""
+        if "<a href=" not in inner:
+            return ""
+        filtered = self._filter_by_depth(inner, max_depth)
+        if not filtered.strip() or "<a href=" not in filtered:
+            return ""
+        return f'<nav class="wiki-toc wiki-toc-inline">\n{filtered}\n</nav>'
+
+    def _strip_toc_wrapper(self, toc_html: str) -> str:
+        start = toc_html.find("<ul>")
+        end = toc_html.rfind("</div>")
+        if start == -1 or end == -1:
+            return toc_html
+        return toc_html[start:end]
+
+    def _filter_by_depth(self, toc_inner: str, max_depth: int) -> str:
+        if max_depth <= 0:
+            return ""
+        result: list[str] = []
+        depth = 0
+        i = 0
+        while i < len(toc_inner):
+            if toc_inner[i : i + 4] == "<ul>":
+                depth += 1
+                heading_level = depth - 1
+                if heading_level < max_depth:
+                    result.append("<ul>")
+                i += 4
+            elif toc_inner[i : i + 5] == "</ul>":
+                if depth - 1 < max_depth:
+                    result.append("</ul>")
+                depth -= 1
+                i += 5
+            else:
+                if depth - 1 < max_depth:
+                    result.append(toc_inner[i])
+                i += 1
+        return "".join(result)
+
+
+class TableOfContentsExtension(Extension):
+    def __init__(self, toc_html: str = "", default_depth: int = 99, **kwargs):
+        self.toc_html = toc_html
+        self.default_depth = default_depth
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            TableOfContentsPreprocessor(md, self.toc_html, self.default_depth),
+            "tableofcontents",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Include macro
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1839,6 +1951,7 @@ def create_parser(
     include_chain: list[str] | None = None,
     page_modified: datetime | None = None,
     pages: list | None = None,
+    toc_html: str = "",
 ) -> Markdown:
     """Create a Markdown parser with wiki link support.
 
@@ -1852,6 +1965,7 @@ def create_parser(
         include_chain: List of page names in the current include chain (for circular detection).
         page_modified: Last modified datetime of the page (for LastModified macro).
         pages: List of all Page objects for TagList macro.
+        toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
 
     Returns:
         Configured Markdown parser instance.
@@ -1891,6 +2005,7 @@ def create_parser(
             NewPageExtension(),  # <<NewPage(...)>>
             LastModifiedExtension(modified=page_modified),  # <<LastModified>>
             CalloutExtension(),  # ```info / ```warning / ```tip / ```error / ```note
+            TableOfContentsExtension(toc_html=toc_html),  # <<TableOfContents>>
         ]
     )
 
@@ -1905,6 +2020,7 @@ def parse_wiki_content(
     include_chain: list[str] | None = None,
     page_modified: datetime | None = None,
     pages: list | None = None,
+    toc_html: str = "",
 ) -> str:
     """Parse wiki content (Markdown + wiki links) to HTML.
 
@@ -1918,6 +2034,7 @@ def parse_wiki_content(
         include_chain: List of page names in the current include chain (for circular detection).
         page_modified: Last modified datetime of the page (for LastModified macro).
         pages: List of all Page objects for TagList macro.
+        toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
 
     Returns:
         HTML string.
@@ -1931,8 +2048,22 @@ def parse_wiki_content(
         include_chain=include_chain or [],
         page_modified=page_modified,
         pages=pages,
+        toc_html=toc_html,
     )
     return parser.convert(content)
+
+
+def parse_markdown(content: str, toc_html: str = "") -> str:
+    """Parse Markdown content with wiki macros and optional TOC injection.
+
+    Args:
+        content: Raw Markdown source (may include <<TableOfContents>> macro).
+        toc_html: Pre-generated TOC HTML to inject at <<TableOfContents>> position.
+
+    Returns:
+        Rendered HTML string.
+    """
+    return parse_wiki_content(content, toc_html=toc_html)
 
 
 def parse_wiki_content_with_toc(
