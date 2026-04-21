@@ -12,103 +12,102 @@
 <div class="fc">
 
   <header class="fc-header">
-    <h1>⚡ Factory Command Center</h1>
-    <div class="fc-live">
-      <span class="fc-live-dot"></span>
-      Live
-    </div>
+    <h1>⚡ Factory</h1>
+    <div class="fc-live"><span class="fc-live-dot"></span>Live</div>
     <span id="fc-updated" class="fc-updated"></span>
   </header>
 
-  <!-- Pipeline summary bar -->
-  <div class="fc-pipeline-bar" id="fc-pipeline-bar">
-    <div class="fc-pipe-stage" id="fc-pipe-backlog">
-      <span class="fc-pipe-icon">📋</span>
-      <span class="fc-pipe-label">Backlog</span>
-      <span class="fc-pipe-count" id="fc-count-planned">—</span>
+  <!-- Pipeline flow — the visual centrepiece -->
+  <section class="fc-flow">
+    <svg id="fc-svg" class="fc-svg" aria-hidden="true"></svg>
+
+    <div class="fc-node fc-node--backlog" id="fc-node-planned">
+      <div class="fc-node-icon">📋</div>
+      <div class="fc-node-count" id="fc-count-planned">—</div>
+      <div class="fc-node-label">Backlog</div>
     </div>
-    <div class="fc-pipe-arrow">›</div>
-    <div class="fc-pipe-stage fc-pipe-stage--active" id="fc-pipe-progress">
-      <span class="fc-pipe-icon">⚙</span>
-      <span class="fc-pipe-label">In Progress</span>
-      <span class="fc-pipe-count" id="fc-count-in_progress">—</span>
+
+    <div class="fc-node fc-node--progress" id="fc-node-in_progress">
+      <div class="fc-node-icon">⚙</div>
+      <div class="fc-node-count" id="fc-count-in_progress">—</div>
+      <div class="fc-node-label">In Progress</div>
     </div>
-    <div class="fc-pipe-arrow">›</div>
-    <div class="fc-pipe-stage" id="fc-pipe-review">
-      <span class="fc-pipe-icon">🔍</span>
-      <span class="fc-pipe-label">Review</span>
-      <span class="fc-pipe-count" id="fc-count-review">—</span>
+
+    <div class="fc-node fc-node--review" id="fc-node-review">
+      <div class="fc-node-icon">🔍</div>
+      <div class="fc-node-count" id="fc-count-review">—</div>
+      <div class="fc-node-label">Review</div>
     </div>
-    <div class="fc-pipe-arrow">›</div>
-    <div class="fc-pipe-stage fc-pipe-stage--outcomes" id="fc-pipe-outcomes">
-      <span class="fc-pipe-icon">✓</span>
-      <span class="fc-pipe-label">Merged</span>
-      <span class="fc-pipe-count" id="fc-count-merged">—</span>
+
+    <div class="fc-node fc-node--outcomes" id="fc-node-outcomes">
+      <div class="fc-node-icon">✓</div>
+      <div class="fc-node-count" id="fc-count-merged">—</div>
+      <div class="fc-node-label">Merged</div>
+      <div class="fc-node-sub">
+        <span class="fc-node-sub--failed">✗ <span id="fc-count-failed">0</span></span>
+        <span class="fc-node-sub--rejected">⊘ <span id="fc-count-rejected">0</span></span>
+      </div>
     </div>
-    <div class="fc-pipe-sep"></div>
-    <div class="fc-pipe-stage fc-pipe-stage--failed">
-      <span class="fc-pipe-icon">✗</span>
-      <span class="fc-pipe-label">Failed</span>
-      <span class="fc-pipe-count" id="fc-count-failed">—</span>
+  </section>
+
+  <!-- KPI strip -->
+  <div class="fc-kpis">
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-graphs">0</span>
+      <span class="fc-kpi-label">active graphs</span>
     </div>
-    <div class="fc-pipe-stage fc-pipe-stage--rejected">
-      <span class="fc-pipe-icon">⊘</span>
-      <span class="fc-pipe-label">Rejected</span>
-      <span class="fc-pipe-count" id="fc-count-rejected">—</span>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-grinders">0</span>
+      <span class="fc-kpi-label">grinders running</span>
+    </div>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-cost">$0.00</span>
+      <span class="fc-kpi-label">session cost</span>
+    </div>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-cap">—</span>
+      <span class="fc-kpi-label">slots free</span>
     </div>
   </div>
 
-  <!-- Main 2×2 grid -->
-  <div class="fc-grid">
+  <!-- Detail: graphs (wide) + bots (narrow) -->
+  <div class="fc-detail">
 
-    <!-- Active Graphs panel -->
-    <div class="fc-panel" id="fc-panel-graphs">
-      <div class="fc-panel-head">
-        <span class="fc-panel-icon">🧠</span>
-        <span class="fc-panel-title">Active Graphs</span>
-        <span class="fc-panel-badge" id="fc-graphs-badge">0</span>
+    <div class="fc-detail-col fc-detail-col--wide">
+      <div class="fc-section-head">
+        <span class="fc-section-title">Active Graphs</span>
+        <span class="fc-section-badge" id="fc-graphs-badge">0</span>
       </div>
-      <div class="fc-panel-body" id="fc-graphs-body">
+      <div class="fc-graphs-scroll" id="fc-graphs-body">
         <div class="fc-empty">No active graphs</div>
       </div>
     </div>
 
-    <!-- Bots panel -->
-    <div class="fc-panel" id="fc-panel-bots">
-      <div class="fc-panel-head">
-        <span class="fc-panel-icon">🤖</span>
-        <span class="fc-panel-title">Bots</span>
-        <span class="fc-panel-badge" id="fc-bots-badge">0</span>
+    <div class="fc-detail-divider"></div>
+
+    <div class="fc-detail-col fc-detail-col--narrow">
+      <div class="fc-section-head">
+        <span class="fc-section-title">Bots</span>
+        <span class="fc-section-badge" id="fc-bots-badge">0</span>
       </div>
-      <div class="fc-panel-body" id="fc-bots-body">
+      <div class="fc-bots-list" id="fc-bots-body">
         <div class="fc-empty">No bots registered</div>
       </div>
     </div>
 
-    <!-- Resources panel -->
-    <div class="fc-panel" id="fc-panel-resources">
-      <div class="fc-panel-head">
-        <span class="fc-panel-icon">📊</span>
-        <span class="fc-panel-title">Resources</span>
-      </div>
-      <div class="fc-panel-body" id="fc-resources-body">
-        <div class="fc-empty">Loading…</div>
-      </div>
+  </div>
+
+  <!-- Activity strip -->
+  <div class="fc-activity">
+    <span class="fc-activity-label">Activity</span>
+    <div class="fc-activity-scroll" id="fc-activity-body">
+      <span class="fc-activity-hint">Watching for transitions…</span>
     </div>
+  </div>
 
-    <!-- Activity panel -->
-    <div class="fc-panel" id="fc-panel-activity">
-      <div class="fc-panel-head">
-        <span class="fc-panel-icon">📡</span>
-        <span class="fc-panel-title">Activity</span>
-      </div>
-      <div class="fc-panel-body fc-panel-body--scroll" id="fc-activity-body">
-        <div class="fc-empty">Watching for transitions…</div>
-      </div>
-    </div>
-
-  </div><!-- /.fc-grid -->
-
-</div><!-- /.fc -->
+</div>
 <script src="/static/js/factory.js"></script>
 {% endblock %}
