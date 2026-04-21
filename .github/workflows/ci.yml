@@ -416,6 +416,7 @@ jobs:
           FACTORY_GITHUB_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN }}
           FACTORY_MINIMAX_API_KEY: ${{ secrets.FACTORY_MINIMAX_API_KEY }}
           FACTORY_SCHEDULER_ENABLED: ${{ secrets.FACTORY_SCHEDULER_ENABLED }}
+          FACTORY_CI_FIXER_ENABLED: ${{ secrets.FACTORY_CI_FIXER_ENABLED }}
           FACTORY_OPENROUTER_API_KEY: ${{ secrets.FACTORY_OPENROUTER_API_KEY }}
         run: |
           {
@@ -428,6 +429,7 @@ jobs:
               "FACTORY_GITHUB_REPO=${{ github.repository }}" \
               "FACTORY_MINIMAX_API_KEY=${FACTORY_MINIMAX_API_KEY}" \
               "FACTORY_SCHEDULER_ENABLED=${FACTORY_SCHEDULER_ENABLED}" \
+              "FACTORY_CI_FIXER_ENABLED=${FACTORY_CI_FIXER_ENABLED}" \
               "FACTORY_HOST=0.0.0.0" \
               "FACTORY_PORT=8002" \
               "FACTORY_PR_BASE_BRANCH=staging" \
