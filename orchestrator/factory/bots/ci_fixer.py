@@ -54,7 +54,7 @@ def _parse_analysis(text: str) -> dict[str, str]:
 
 
 def _job_id_from_details_url(url: str) -> int | None:
-    m = re.search(r"/jobs/(\d+)", url)
+    m = re.search(r"/jobs?/(\d+)", url)
     return int(m.group(1)) if m else None
 
 

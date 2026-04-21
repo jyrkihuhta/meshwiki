@@ -49,6 +49,11 @@ def test_job_id_from_details_url_valid():
     assert _job_id_from_details_url(url) == 67890
 
 
+def test_job_id_from_details_url_singular():
+    url = "https://github.com/owner/repo/actions/runs/12345/job/67890"
+    assert _job_id_from_details_url(url) == 67890
+
+
 def test_job_id_from_details_url_no_match():
     assert _job_id_from_details_url("https://example.com/no-job-here") is None
 
