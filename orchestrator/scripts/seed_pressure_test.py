@@ -129,14 +129,17 @@ async def create_page(client: httpx.AsyncClient, name: str, content: str) -> boo
 
 
 async def list_pressure_pages(client: httpx.AsyncClient) -> list[str]:
-    """Return all page names that start with PAGE_PREFIX."""
+    """Return all page names that start with PAGE_PREFIX (underscore or space variant)."""
     resp = await client.get("/api/v1/pages")
     resp.raise_for_status()
     all_pages = resp.json()
+    # Wiki may normalise underscores to spaces in stored names
+    prefix_space = PAGE_PREFIX.replace("_", " ")
     return [
         p["name"] if isinstance(p, dict) else p
         for p in all_pages
         if (p["name"] if isinstance(p, dict) else p).startswith(PAGE_PREFIX)
+        or (p["name"] if isinstance(p, dict) else p).startswith(prefix_space)
     ]
 
 
