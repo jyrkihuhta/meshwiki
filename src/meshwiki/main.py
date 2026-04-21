@@ -416,6 +416,7 @@ def get_context(**kwargs) -> dict:
     """Create base context for templates."""
     return {
         "app_title": settings.app_title,
+        "factory_enabled": settings.factory_enabled,
         **kwargs,
     }
 
@@ -989,6 +990,18 @@ async def graph_view(request: Request):
         request,
         "graph.html",
         get_context(page_tree=await get_page_tree()),
+    )
+
+
+@app.get("/factory/live", response_class=HTMLResponse)
+async def factory_live(request: Request):
+    """Factory command-center dashboard."""
+    if not settings.factory_enabled:
+        raise HTTPException(status_code=404, detail="Factory not enabled")
+    return templates.TemplateResponse(
+        request,
+        "factory_live.html",
+        get_context(page_tree=None),
     )
 
 

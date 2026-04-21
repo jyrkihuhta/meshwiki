@@ -69,6 +69,7 @@
                 <a href="/">All Pages</a>
                 <a href="/tags">Tags</a>
                 <a href="/graph">Graph</a>
+                {% if factory_enabled %}<a href="/factory/live">Factory</a>{% endif %}
                 <a href="/page/Home/edit">New Page</a>
                 <button type="button" id="theme-toggle" class="btn btn-theme" aria-label="Toggle dark mode">Dark</button>
                 {% if request.session.get("authenticated") %}

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Factory — {{ app_title }}{% endblock %}
+
+{% block main_class %}main--full-width{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/css/factory.css">
+{% endblock %}
+
+{% block content %}
+<div class="fc">
+
+  <header class="fc-header">
+    <h1>⚡ Factory Command Center</h1>
+    <div class="fc-live">
+      <span class="fc-live-dot"></span>
+      Live
+    </div>
+    <span id="fc-updated" class="fc-updated"></span>
+  </header>
+
+  <div class="fc-pipeline">
+    <svg id="fc-svg" class="fc-svg" width="100%" height="100%"></svg>
+
+    <!-- Backlog -->
+    <div class="fc-stage fc-stage--backlog" id="fc-stage-planned">
+      <div class="fc-stage-head">
+        <div class="fc-stage-icon">📋</div>
+        <div class="fc-stage-label">Backlog</div>
+        <div class="fc-stage-badge" id="fc-badge-planned">0</div>
+      </div>
+      <div class="fc-stage-tasks" id="fc-tasks-planned"></div>
+    </div>
+
+    <!-- In Progress -->
+    <div class="fc-stage fc-stage--progress" id="fc-stage-in_progress">
+      <div class="fc-stage-head">
+        <div class="fc-stage-icon">⚙</div>
+        <div class="fc-stage-label">In Progress</div>
+        <div class="fc-stage-badge" id="fc-badge-in_progress">0</div>
+      </div>
+      <div class="fc-stage-tasks" id="fc-tasks-in_progress"></div>
+    </div>
+
+    <!-- Review -->
+    <div class="fc-stage fc-stage--review" id="fc-stage-review">
+      <div class="fc-stage-head">
+        <div class="fc-stage-icon">🔍</div>
+        <div class="fc-stage-label">Review</div>
+        <div class="fc-stage-badge" id="fc-badge-review">0</div>
+      </div>
+      <div class="fc-stage-tasks" id="fc-tasks-review"></div>
+    </div>
+
+    <!-- Outcomes -->
+    <div class="fc-stage fc-stage--outcomes" id="fc-stage-outcomes">
+      <div class="fc-stage-head">
+        <div class="fc-stage-icon">✓</div>
+        <div class="fc-stage-label">Outcomes</div>
+        <div class="fc-stage-badge" id="fc-badge-outcomes">0</div>
+      </div>
+      <div class="fc-stage-tasks" id="fc-tasks-outcomes"></div>
+    </div>
+  </div>
+
+  <div class="fc-feed">
+    <div class="fc-feed-label">Activity</div>
+    <div class="fc-feed-scroll" id="fc-feed-scroll"></div>
+  </div>
+
+</div>
+<script src="/static/js/factory.js"></script>
+{% endblock %}
