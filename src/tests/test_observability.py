@@ -289,3 +289,38 @@ async def test_csp_header_present(client):
     assert "unpkg.com" in csp
     assert "cdnjs.cloudflare.com" in csp
     assert "wss:" in csp
+
+
+# ── M13: stdlib logging regression guard ──────────────────────────────────────
+
+
+def test_no_stdlib_logging_in_app_code():
+    """Assert no .py file under src/meshwiki/ contains stdlib 'import logging'."""
+    import re
+    from pathlib import Path
+
+    src_root = Path("/tmp/repo/src/meshwiki")
+    offenders = []
+
+    for py_file in src_root.rglob("*.py"):
+        if "__pycache__" in py_file.parts:
+            continue
+        content = py_file.read_text()
+        for lineno, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if (
+                stripped.startswith("#")
+                or stripped.startswith('"""')
+                or stripped.startswith("'''")
+            ):
+                continue
+            if '"import logging"' in line or "'import logging'" in line:
+                offenders.append(f"{py_file}:{lineno}")
+                continue
+            if re.match(r"^\s*from\s+logging\s+import", stripped):
+                offenders.append(f"{py_file}:{lineno}")
+
+    assert offenders == [], (
+        "The following files contain stdlib 'import logging' or 'from logging import'. "
+        "Use structlog instead:\n" + "\n".join(offenders)
+    )
