@@ -328,4 +328,24 @@ def _validate_checks(filename: str, checks: object) -> list[str]:
                 f"(must be one of: {', '.join(sorted(_VALID_SEVERITIES))})"
             )
 
+        # Mutation shape — every entry under `mutations:` must be a mapping
+        # ({header, value, body, url_override, note} keys recognized by
+        # PlaybookMutation.from_dict). Bare strings get silently dropped at
+        # load time and the check no-ops at runtime.
+        muts = check.get("mutations")
+        if muts is not None:
+            if not isinstance(muts, list):
+                errors.append(
+                    f"`{filename}`: check[{idx}] `mutations` must be a list, "
+                    f"got {type(muts).__name__}"
+                )
+            else:
+                for mi, m in enumerate(muts):
+                    if not isinstance(m, dict):
+                        errors.append(
+                            f"`{filename}`: check[{idx}].mutations[{mi}] must be a "
+                            f"mapping with keys like body/header/value/url_override/note, "
+                            f"got {type(m).__name__}: {str(m)[:60]}"
+                        )
+
     return errors
