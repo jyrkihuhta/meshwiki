@@ -391,6 +391,128 @@ checks:
     assert _check_playbook_files(files) == []
 
 
+def test_check_playbook_files_rejects_note_only_mutations_for_deterministic() -> None:
+    """A deterministic check whose mutations are all note-only no-ops at
+    runtime: Intruder fires the baseline and has nothing to compare it
+    against. Reject so the grinder learns to add a real payload."""
+    fm = """\
+---
+playbook: baseline-only
+name: Baseline-only
+leaf_type: rest_api
+checks:
+  - id: c1
+    name: c1
+    mode: deterministic
+    category: idor-enum
+    severity: medium
+    mutations:
+      - note: baseline request 1
+      - note: baseline request 2
+---
+"""
+    files = [_make_md_file("playbooks/baseline-only.md", fm)]
+    errors = _check_playbook_files(files)
+    assert errors, "expected at least one validation error"
+    assert any("no mutation carries a payload" in e for e in errors), errors
+
+
+def test_check_playbook_files_rejects_note_only_mutations_for_oob() -> None:
+    """oob mode also routes through Intruder — note-only is equally broken
+    there. The {{OOB_URL}} substitution needs a body/header/url_override
+    string to live in."""
+    fm = """\
+---
+playbook: oob-noop
+name: OOB no-op
+leaf_type: rest_api
+checks:
+  - id: c1
+    name: c1
+    mode: oob
+    category: ssrf
+    severity: high
+    requires_capabilities:
+      - oob_callback
+    mutations:
+      - note: would callback {{OOB_URL}} if we had a body
+---
+"""
+    files = [_make_md_file("playbooks/oob-noop.md", fm)]
+    errors = _check_playbook_files(files)
+    assert any("no mutation carries a payload" in e for e in errors), errors
+
+
+def test_check_playbook_files_accepts_note_only_mutations_for_analytical() -> None:
+    """Analytical checks are driven by the brain LLM, not Intruder.
+    note-only mutations are a legitimate way to leave inline reasoning
+    hooks for the LLM to pick up."""
+    fm = """\
+---
+playbook: analytical-notes
+name: Analytical notes
+leaf_type: rest_api
+checks:
+  - id: c1
+    name: c1
+    mode: analytical
+    category: business-logic
+    severity: medium
+    mutations:
+      - note: consider what happens when X
+      - note: also probe Y
+---
+"""
+    files = [_make_md_file("playbooks/analytical-notes.md", fm)]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_accepts_mixed_mutations_with_one_real_payload() -> None:
+    """At least one real mutation per check is enough — the rest can be
+    note-only commentary."""
+    fm = """\
+---
+playbook: mixed
+name: Mixed
+leaf_type: rest_api
+checks:
+  - id: c1
+    name: c1
+    mode: deterministic
+    category: ssrf
+    severity: high
+    mutations:
+      - note: baseline (no body)
+      - body: '{"url": "http://169.254.169.254/"}'
+        note: AWS IMDS attempt
+---
+"""
+    files = [_make_md_file("playbooks/mixed.md", fm)]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_accepts_url_override_only_mutation() -> None:
+    """A url_override-only mutation is a real mutation (replaces the URL)."""
+    fm = """\
+---
+playbook: url-override
+name: URL override
+leaf_type: rest_api
+checks:
+  - id: c1
+    name: c1
+    mode: deterministic
+    category: ssrf
+    severity: high
+    mutations:
+      - url_override: https://attacker.example/probe
+        note: redirect target
+---
+"""
+    files = [_make_md_file("playbooks/url-override.md", fm)]
+    assert _check_playbook_files(files) == []
+
+
 def test_check_playbook_files_accepts_unknown_severity() -> None:
     """Several factory-generated playbooks use severity: unknown — that's
     allowed by the underlying loader (defaults to "unknown") so the

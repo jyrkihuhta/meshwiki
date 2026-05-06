@@ -48,6 +48,16 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 # matching to actually fire the playbook.
 _PLAYBOOK_REQUIRED_FM: tuple[str, ...] = ("playbook", "name", "leaf_type")
 _CHECK_REQUIRED_KEYS: tuple[str, ...] = ("id", "name", "mode", "category", "severity")
+# Modes whose checks are routed through Intruder and therefore need at least
+# one mutation that actually mutates something (body/header+value/url_override).
+# `analytical` and `idea` are exempt — Intruder doesn't run those.
+_MUTATION_REQUIRED_MODES: frozenset[str] = frozenset({"deterministic", "oob"})
+# A mutation is "real" when it carries at least one of these payload-bearing
+# keys. `note` and `value` (without `header`) alone don't qualify — `value`
+# without `header` has nothing to attach to and is silently dropped.
+_MUTATION_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {"body", "header", "url_override"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +362,15 @@ def _validate_checks(filename: str, checks: object) -> list[str]:
         # ({header, value, body, url_override, note} keys recognized by
         # PlaybookMutation.from_dict). Bare strings get silently dropped at
         # load time and the check no-ops at runtime.
+        #
+        # For deterministic/oob modes we additionally require at least one
+        # mutation to actually mutate something — i.e. carry at least one of
+        # body/header/url_override (note alone is just a comment; a check
+        # whose mutations are all "- note: baseline X" sends only the
+        # baseline request and Intruder has nothing to compare against, so
+        # the check no-ops at runtime). Analytical/idea modes are exempt
+        # because Intruder doesn't run them; the brain LLM can use note-only
+        # entries as inline reasoning hooks.
         muts = check.get("mutations")
         if muts is not None:
             if not isinstance(muts, list):
@@ -360,6 +379,7 @@ def _validate_checks(filename: str, checks: object) -> list[str]:
                     f"got {type(muts).__name__}"
                 )
             else:
+                any_real_mutation = False
                 for mi, m in enumerate(muts):
                     if not isinstance(m, dict):
                         errors.append(
@@ -367,5 +387,20 @@ def _validate_checks(filename: str, checks: object) -> list[str]:
                             f"mapping with keys like body/header/value/url_override/note, "
                             f"got {type(m).__name__}: {str(m)[:60]}"
                         )
+                        continue
+                    if any(k in m for k in _MUTATION_PAYLOAD_KEYS):
+                        any_real_mutation = True
+                if (
+                    mode in _MUTATION_REQUIRED_MODES
+                    and muts  # non-empty list
+                    and not any_real_mutation
+                ):
+                    errors.append(
+                        f"`{filename}`: check[{idx}] mode={mode!r} but no mutation "
+                        f"carries a payload — every entry only has `note:` (or other "
+                        f"non-payload keys). Add at least one mutation with `body:`, "
+                        f"`header:` (with `value:`), or `url_override:` so Intruder "
+                        f"has something to send beyond the baseline request."
+                    )
 
     return errors

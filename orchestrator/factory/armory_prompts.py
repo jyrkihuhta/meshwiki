@@ -169,6 +169,23 @@ mutations:
     note: path traversal in URL
 ```
 
+### Note-only mutations (deterministic / oob modes):
+
+For `mode: deterministic` or `mode: oob`, at least one mutation per check
+MUST carry a real payload — i.e. one of `body`, `header`, or
+`url_override`. A list of `- note: ...` entries with no payload key sends
+nothing to Intruder beyond the baseline request, so the check no-ops at
+runtime. WRONG:
+
+```yaml
+mutations:
+  - note: baseline request 1
+  - note: baseline request 2     # WRONG — neither entry mutates anything
+```
+
+`mode: analytical` and `mode: idea` are exempt — those are driven by the
+brain LLM, which can pick up `note:` strings as inline reasoning hooks.
+
 ### Validation rules (enforced by the validator):
 
 - `playbook`, `name`, `leaf_type` required in frontmatter.
@@ -180,6 +197,8 @@ mutations:
 - `severity` must be one of: `critical`, `high`, `medium`, `low`,
   `info`, `unknown`.
 - `mutations:` if present must be a list of mappings, not strings.
+- For `deterministic` / `oob` modes, at least one mutation per check
+  must contain `body`, `header`, or `url_override` (note-only is rejected).
 - All YAML must be syntactically valid.
 
 ### Reference: the absolute-minimum well-formed playbook
@@ -208,6 +227,8 @@ Body prose explaining what this playbook tests and why.
   must be inside the `---` frontmatter delimiters.
 - **DO NOT** write `mode: intruder` — use `mode: deterministic`.
 - **DO NOT** write `mutations:` as a list of bare payload strings.
+- **DO NOT** write a deterministic/oob check whose mutations are all
+  `- note: ...` with no payload — that no-ops at runtime.
 - **DO NOT** ship a playbook with only check `id`s and the rest of the
   fields populated as `?` — that's a sign the YAML is structurally
   wrong (probably emitted as a list of strings rather than mappings).
