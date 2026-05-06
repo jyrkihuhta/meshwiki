@@ -547,6 +547,139 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
     )
 
 
+def build_grinder_task_prompt(
+    *,
+    subtask: dict,
+    page_content: str,
+    review_feedback: str,
+    is_rework: bool,
+    artifact_type: str | None,
+    task_repo_root: str | None,
+    is_meshwiki: bool,
+    base_branch: str,
+) -> str:
+    """Build the e2b grinder task prompt.
+
+    Extracted from ``grind_subtask_e2b`` so the rework / fresh-start
+    branching logic is unit-testable. The grinder runs as a Claude Code
+    CLI session inside an e2b sandbox; this prompt is the *only* control
+    we have over its git workflow once it starts. Getting the rework
+    branch instructions wrong leads to PR-stall loops where the grinder
+    pushes corrected content to a new ``factory/foo-v2`` branch while
+    the actual PR continues to show the old broken file.
+
+    Args:
+        subtask: Active subtask dict (id, title, etc.).
+        page_content: Full MeshWiki task page content (markdown).
+        review_feedback: Last PM feedback (empty string for fresh runs).
+        is_rework: ``True`` when the grinder is being re-dispatched
+            after a ``changes_requested`` PM verdict.
+        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``,
+            ``"code"``, or ``None``.
+        task_repo_root: Subdirectory inside the cloned repo where the
+            artifact lives (e.g. ``"playbooks"``); ``None`` for MeshWiki.
+        is_meshwiki: ``True`` when targeting the MeshWiki repo (changes
+            the autofix/test commands).
+        base_branch: Base branch the PR targets (e.g. ``"main"`` or
+            ``"staging"``).
+
+    Returns:
+        Fully-rendered task prompt string the grinder receives as input.
+    """
+    subtask_id: str = subtask["id"]
+
+    if is_rework:
+        branch_instruction = (
+            f"2. Set up the branch — you MUST push fixes to the EXISTING PR branch:\n"
+            f"   git fetch origin\n"
+            f"   git checkout factory/{subtask_id} 2>/dev/null || \\\n"
+            f"     git checkout -B factory/{subtask_id} origin/factory/{subtask_id}\n"
+            f"   ⚠️  NON-NEGOTIABLE: the open PR is for branch `factory/{subtask_id}`.\n"
+            f"   You MUST push to that exact branch — NEVER create a new branch with a\n"
+            f"   semantic name like `factory/foo-v2`, `factory/foo-rework`, or any other\n"
+            f"   variant. Pushing to a different branch leaves the PR showing the OLD\n"
+            f"   broken file and the rework cycle stalls. If `git rebase` conflicts in\n"
+            f"   step 8, resolve them in place — do NOT abandon the branch.\n"
+        )
+        rework_section = (
+            f"\n## ⚠️ REWORK REQUIRED — Previous review feedback\n\n"
+            f"{review_feedback}\n\n"
+            f"Apply these changes on top of the existing `factory/{subtask_id}` branch.\n"
+            f"After committing, push with `git push origin factory/{subtask_id}`\n"
+            f"(or `git push --force-with-lease origin factory/{subtask_id}` if you\n"
+            f"rebased and need to overwrite). The existing PR will update automatically;\n"
+            f"do NOT open a new PR.\n"
+        )
+        push_cmd = f"git push --force-with-lease origin factory/{subtask_id}"
+        push_note = (
+            "(Force-with-lease is required because the branch has been "
+            "rebased; pushing to a different branch is FORBIDDEN.)"
+        )
+        step9_cmd = "gh pr view --json url --jq .url  # print existing PR URL"
+        step9_verb = "Update the existing PR"
+    else:
+        branch_instruction = (
+            f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
+            f"   git fetch origin\n"
+            f"   git checkout factory/{subtask_id} 2>/dev/null || git checkout -b factory/{subtask_id} origin/{base_branch}\n"
+            f"   (If the branch already exists from a previous interrupted run, check out the existing branch.\n"
+            f"    Then check if there is already an open PR for this branch: gh pr list --head factory/{subtask_id} --json number,url\n"
+            f"    If an open PR exists and this is NOT a rework, skip straight to step 9 and print its URL.)\n"
+        )
+        rework_section = ""
+        push_cmd = "git push -u origin HEAD"
+        push_note = (
+            "(Use 'git push -u origin HEAD' — do NOT use --force-with-lease; "
+            "the branch may have no upstream tracking yet.)"
+        )
+        step9_cmd = (
+            f'gh pr create --base {base_branch} --head factory/{subtask_id}'
+            f' --title "[Factory] ..." --body "..."'
+        )
+        step9_verb = "Create a PR"
+
+    repo_intro = _artifact_intro(artifact_type, task_repo_root)
+    armory_protocol = get_armory_prompt(artifact_type)
+
+    if is_meshwiki:
+        autofix_step = (
+            "4. Run autofix on Python files only: black src/ && isort --profile black src/ && ruff check src/\n"
+            "   (Tools are installed globally — do NOT use .venv/bin/ prefix. black/isort are for .py files ONLY; do not run them on .js, .css, or other file types.)\n"
+        )
+        test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
+    else:
+        lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
+        autofix_step = (
+            f"4. Run autofix: ruff check --fix {lint_target} && black {lint_target}\n"
+            "   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
+        )
+        test_step = "5. Run: python -m pytest tests/ -x -q\n"
+
+    return (
+        f"{repo_intro} "
+        f"Implement the following task and open a GitHub PR when done.\n\n"
+        f"{armory_protocol + chr(10) if armory_protocol else ''}"
+        f"## Task: {subtask['title']}\n\n"
+        f"{page_content}\n"
+        f"{rework_section}\n"
+        f"## Instructions\n"
+        f"1. Explore the codebase to understand context\n"
+        f"{branch_instruction}"
+        f"3. Implement the changes with tests\n"
+        f"{autofix_step}"
+        f"{test_step}"
+        f"6. Fix any lint/test failures\n"
+        f"7. Commit your changes\n"
+        f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
+        f"   git fetch origin && git rebase origin/{base_branch}\n"
+        f"   Resolve any conflicts, then push: {push_cmd}\n"
+        f"   {push_note}\n"
+        f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
+        f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
+        f"10. Print the PR URL on the last line of your output"
+    )
+
+
 def _strip_ansi(text: str) -> str:
     """Remove ANSI colour/escape codes from *text*.
 
@@ -676,80 +809,16 @@ async def grind_subtask_e2b(
     base_branch = settings.pr_base_branch
     review_feedback = subtask.get("review_feedback") or ""
     is_rework = bool(review_feedback)
-    subtask_id = subtask["id"]
 
-    if is_rework:
-        branch_instruction = (
-            f"2. Set up the branch:\n"
-            f"   git fetch origin\n"
-            f"   git checkout factory/{subtask['id']} 2>/dev/null || git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
-            f"   (This is a REWORK iteration — you must apply the fixes below before pushing.)\n"
-        )
-        rework_section = (
-            f"\n## ⚠️ REWORK REQUIRED — Previous review feedback\n\n"
-            f"{review_feedback}\n\n"
-            f"Apply these changes on top of the existing branch, then push and update the PR.\n"
-        )
-    else:
-        branch_instruction = (
-            f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
-            f"   git fetch origin\n"
-            f"   git checkout factory/{subtask['id']} 2>/dev/null || git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
-            f"   (If the branch already exists from a previous interrupted run, check out the existing branch.\n"
-            f"    Then check if there is already an open PR for this branch: gh pr list --head factory/{subtask['id']} --json number,url\n"
-            f"    If an open PR exists and this is NOT a rework, skip straight to step 9 and print its URL.)\n"
-        )
-        rework_section = ""
-
-    if is_rework:
-        step9_cmd = "gh pr view --json url --jq .url  # print existing PR URL"
-        step9_verb = "Update the existing PR"
-    else:
-        step9_cmd = (
-            f'gh pr create --base {base_branch} --head factory/{subtask_id}'
-            f' --title "[Factory] ..." --body "..."'
-        )
-        step9_verb = "Create a PR"
-
-    repo_intro = _artifact_intro(artifact_type, task_repo_root)
-    armory_protocol = get_armory_prompt(artifact_type)
-
-    if is_meshwiki:
-        autofix_step = (
-            "4. Run autofix on Python files only: black src/ && isort --profile black src/ && ruff check src/\n"
-            "   (Tools are installed globally — do NOT use .venv/bin/ prefix. black/isort are for .py files ONLY; do not run them on .js, .css, or other file types.)\n"
-        )
-        test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
-    else:
-        lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
-        autofix_step = (
-            f"4. Run autofix: ruff check --fix {lint_target} && black {lint_target}\n"
-            "   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
-        )
-        test_step = "5. Run: python -m pytest tests/ -x -q\n"
-
-    task_prompt = (
-        f"{repo_intro} "
-        f"Implement the following task and open a GitHub PR when done.\n\n"
-        f"{armory_protocol + chr(10) if armory_protocol else ''}"
-        f"## Task: {subtask['title']}\n\n"
-        f"{page_content}\n"
-        f"{rework_section}\n"
-        f"## Instructions\n"
-        f"1. Explore the codebase to understand context\n"
-        f"{branch_instruction}"
-        f"3. Implement the changes with tests\n"
-        f"{autofix_step}"
-        f"{test_step}"
-        f"6. Fix any lint/test failures\n"
-        f"7. Commit your changes\n"
-        f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
-        f"   git fetch origin && git rebase origin/{base_branch}\n"
-        f"   Resolve any conflicts, then push: git push -u origin HEAD\n"
-        f"   (Use 'git push -u origin HEAD' — do NOT use --force-with-lease; the branch may have no upstream tracking yet.)\n"
-        f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
-        f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
-        f"10. Print the PR URL on the last line of your output"
+    task_prompt = build_grinder_task_prompt(
+        subtask=subtask,
+        page_content=page_content,
+        review_feedback=review_feedback,
+        is_rework=is_rework,
+        artifact_type=artifact_type,
+        task_repo_root=task_repo_root,
+        is_meshwiki=is_meshwiki,
+        base_branch=base_branch,
     )
 
     pr_url: str | None = None

@@ -12,6 +12,7 @@ from factory.agents.grinder_agent import (
     GRINDER_SYSTEM_PROMPT,
     GRINDER_TOOLS,
     GrinderToolExecutor,
+    build_grinder_task_prompt,
     grind_subtask,
     grind_subtask_e2b,
 )
@@ -468,6 +469,98 @@ def test_grinder_tools_list() -> None:
         "meshwiki_update_task",
     }
     assert names == expected
+
+
+# ---------------------------------------------------------------------------
+# build_grinder_task_prompt — branch handling for fresh vs rework runs
+# ---------------------------------------------------------------------------
+
+
+def _make_prompt_subtask(subtask_id: str = "abcd1234-sub-01", title: str = "Add X") -> dict:
+    return {
+        "id": subtask_id,
+        "wiki_page": "Task_0001_X",
+        "parent_task": "Task_0001",
+        "title": title,
+        "description": "",
+        "status": "pending",
+        "attempt": 0,
+        "max_attempts": 3,
+        "error_log": [],
+        "files_touched": [],
+        "acceptance_criteria": [],
+        "token_budget": 50000,
+        "tokens_used": 0,
+        "assigned_grinder": None,
+        "branch_name": None,
+        "pr_url": None,
+        "pr_number": None,
+        "review_feedback": None,
+        "code_skeleton": None,
+    }
+
+
+def test_build_grinder_task_prompt_fresh_run_uses_canonical_branch() -> None:
+    """A fresh (non-rework) run must check out factory/<id> from base_branch
+    and push HEAD; no rework warnings should appear."""
+    sub = _make_prompt_subtask("eb21874d-sub-73fe18")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    assert "factory/eb21874d-sub-73fe18" in prompt
+    assert "git push -u origin HEAD" in prompt
+    assert "REWORK REQUIRED" not in prompt
+    assert "NEVER create a new branch" not in prompt
+
+
+def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
+    """A rework must explicitly forbid creating new semantic branches and
+    push back to the canonical factory/<id> branch with --force-with-lease.
+    Failure mode this test guards against (observed in production
+    2026-05-06): grinder created factory/foo-v2, factory/foo-rework, etc.,
+    leaving the open PR pointing at the old broken file."""
+    sub = _make_prompt_subtask("35b3cb7c-sub-3feb68")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="Schema violation: mode must be deterministic.",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Canonical branch is mentioned and the rework warning is present.
+    assert "factory/35b3cb7c-sub-3feb68" in prompt
+    assert "REWORK REQUIRED" in prompt
+    assert "NEVER create a new branch" in prompt
+    # Forbidden semantic patterns must be called out by name so the LLM
+    # has an explicit rule to follow.
+    assert "factory/foo-v2" in prompt
+    assert "factory/foo-rework" in prompt
+    # Push must target the exact PR branch with --force-with-lease (since
+    # we may rebase). Pushing HEAD without an explicit branch is a footgun
+    # if the LLM has wandered onto a different branch.
+    assert (
+        "git push --force-with-lease origin factory/35b3cb7c-sub-3feb68"
+        in prompt
+    )
+    assert "git push -u origin HEAD" not in prompt
+    # The previous review feedback is surfaced verbatim so the grinder
+    # knows what to fix.
+    assert "Schema violation: mode must be deterministic." in prompt
+    # Step 9 must NOT instruct the grinder to open a new PR.
+    assert "gh pr create" not in prompt
+    assert "Update the existing PR" in prompt
 
 
 # ---------------------------------------------------------------------------
