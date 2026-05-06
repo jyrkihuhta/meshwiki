@@ -86,46 +86,131 @@ class MyTool(ToolBase):
 PLAYBOOK_SCHEMA = """\
 ## Molly Playbook Schema
 
-A Molly playbook is a Markdown file (.md) with YAML frontmatter and a `checks:` YAML
-block in the body.
+A Molly playbook is a Markdown file (.md) with YAML frontmatter. The
+`checks:` list MUST be in the frontmatter — NOT in a fenced YAML block
+in the body. Molly's PlaybookLoader.from_doc() reads only the
+frontmatter; checks defined elsewhere are silently ignored.
 
-### Frontmatter (required fields):
-```yaml
+### Required frontmatter fields:
+
+```markdown
 ---
 playbook: <slug>          # unique snake_case identifier, e.g. jwt-algorithm-confusion
 name: <Human Name>        # display name
-leaf_type: <type>         # endpoint category this applies to, e.g. auth_endpoint
-applies_to:               # list of tags that trigger this playbook
-  - auth
+leaf_type: <type>         # endpoint category this applies to, e.g. auth_endpoint, rest_api, graphql_api
+applies_to:               # list of tags; playbook fires on any leaf whose
+  - auth                  # tech_fingerprint contains any of these tags
   - jwt
+checks:
+  - id: check_slug
+    name: Check display name
+    mode: deterministic     # one of: deterministic | analytical | idea | oob
+    category: auth-bypass   # any string; common ones: auth-bypass, idor-bola,
+                            # graphql-abuse, ssrf, xss, race-condition,
+                            # business-logic, misconfiguration, info
+    severity: high          # one of: critical | high | medium | low | info | unknown
+    # Optional fields below
+    technique: |
+      Multi-line description of the attack technique. Include the win
+      condition and what response signals would confirm exploitation.
+    requires_capabilities:
+      - oob_callback        # capability tags from molly-armory/capabilities.json
+    mutations:
+      - body: '{"key": "value"}'    # JSON request body
+        note: short description
+      - header: X-Custom-Header
+        value: malicious-value
+        note: header injection variant
+      - url_override: https://...   # override the request URL
+        note: alternative endpoint
+sub_tech:                    # optional list, used to gate by tech subtype
+  - hasura
 ---
 ```
 
-### Checks block (required):
+### Mode semantics (how Molly executes each check):
+
+- `deterministic` — runs through Intruder. Each `mutations:` entry is
+  applied to a baseline request; the response is diffed for anomalies.
+  This is what most checks should be.
+- `analytical` — invokes the 7-stage LLM pipeline. Use when behavior
+  needs reasoning, not pattern matching.
+- `idea` — dormant; only promoted to active during a research phase
+  when matching evidence is found. Useful for placeholders.
+- `oob` — substitutes `{{OOB_URL}}` in mutation bodies and polls the
+  OOB server for callbacks. Requires `requires_capabilities:
+  [oob_callback]`.
+
+### Mutation shape (deterministic + oob modes):
+
+Each mutation MUST be a YAML mapping (dict), NOT a bare string.
+Recognized keys:
+- `body`: full JSON/raw body to send
+- `header`: header name (paired with `value`)
+- `value`: header value when `header` is set
+- `url_override`: replace the request URL entirely
+- `note`: short description for log readability
+
+Bare strings are silently dropped at load time. WRONG:
+
 ```yaml
-checks:
-  - id: check_slug              # unique within this playbook
-    name: Check display name
-    mode: intruder              # intruder | forge | analytical | oob
-    category: auth              # auth | injection | ssrf | info | logic | config
-    severity: critical          # critical | high | medium | low | info
-    # Optional fields:
-    requires_capabilities:
-      - jwt_forge
-    technique: "Description of the attack technique."
-    mutations:
-      - payload1
-      - payload2
-    win_condition: "What constitutes a successful finding."
+mutations:
+  - <script>alert(1)</script>     # WRONG — string, not a dict
+  - ../../../etc/passwd            # WRONG
 ```
 
-### Validation rules:
-- `playbook`, `name`, and `leaf_type` are required in frontmatter.
-- At least one check must be defined.
-- Each check must have `id`, `name`, `mode`, `category`, and `severity`.
-- `mode` must be one of: `intruder`, `forge`, `analytical`, `oob`.
-- `severity` must be one of: `critical`, `high`, `medium`, `low`, `info`.
+RIGHT:
+
+```yaml
+mutations:
+  - body: '{"x": "<script>alert(1)</script>"}'
+    note: reflected XSS in body
+  - url_override: /etc/passwd
+    note: path traversal in URL
+```
+
+### Validation rules (enforced by the validator):
+
+- `playbook`, `name`, `leaf_type` required in frontmatter.
+- `checks:` must be a non-empty list in the frontmatter.
+- Each check requires `id`, `name`, `mode`, `category`, `severity`.
+- `mode` must be one of: `deterministic`, `analytical`, `idea`, `oob`.
+  Words like `intruder`, `forge`, `nuclei` are NOT valid — those are
+  routed via `requires_capabilities`, not `mode`.
+- `severity` must be one of: `critical`, `high`, `medium`, `low`,
+  `info`, `unknown`.
+- `mutations:` if present must be a list of mappings, not strings.
 - All YAML must be syntactically valid.
+
+### Reference: the absolute-minimum well-formed playbook
+
+```markdown
+---
+playbook: contract-minimal
+name: Minimal Example
+leaf_type: rest_api
+applies_to:
+  - rest
+checks:
+  - id: c1
+    name: Minimal check
+    mode: analytical
+    category: misc
+    severity: medium
+---
+
+Body prose explaining what this playbook tests and why.
+```
+
+### Pitfalls to avoid
+
+- **DO NOT** put `checks:` in a fenced ```yaml block in the body — it
+  must be inside the `---` frontmatter delimiters.
+- **DO NOT** write `mode: intruder` — use `mode: deterministic`.
+- **DO NOT** write `mutations:` as a list of bare payload strings.
+- **DO NOT** ship a playbook with only check `id`s and the rest of the
+  fields populated as `?` — that's a sign the YAML is structurally
+  wrong (probably emitted as a list of strings rather than mappings).
 """
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 
+from ..armory_prompts import get_armory_prompt
 from ..config import get_settings
 from ..cost import tokens_to_usd
 from ..integrations.github_client import _extract_pr_number
@@ -740,11 +741,46 @@ async def review_with_pm(
         else ""
     )
 
+    # Armory artifact PRs (playbook/tool/wordlist) need a different review
+    # bar than MeshWiki code PRs — they have a strict schema we must enforce
+    # at review time. Without this, the LLM falls back to generic style/
+    # acceptance review and lets through structurally-broken artifacts
+    # (e.g. `mode: intruder` instead of `deterministic`, `mutations:` as
+    # bare strings, empty `checks:` lists). See armory_prompts.PLAYBOOK_SCHEMA.
+    artifact_type: str | None = state.get("artifact_type")
+    armory_addendum = get_armory_prompt(artifact_type)
+    armory_review_section = ""
+    if armory_addendum:
+        armory_review_section = (
+            f"\n\n## Armory Artifact Review\n\n"
+            f"This PR contributes a `{artifact_type}` to the molly-armory. "
+            f"Standard code-review heuristics do NOT apply — what matters is "
+            f"strict conformance to Molly's loader schema. A playbook that "
+            f"parses but uses the wrong mode vocabulary or string mutations "
+            f"will silently no-op at runtime, costing real coverage cycles.\n\n"
+            f"REQUEST CHANGES if any of the following hold:\n"
+            f"- `checks:` is missing, empty, or in a fenced YAML block in the body "
+            f"(it must be inside the `---` frontmatter).\n"
+            f"- Any check has `mode:` set to something other than "
+            f"`deterministic`, `analytical`, `idea`, or `oob`. The words "
+            f"`intruder`, `forge`, `nuclei`, `feroxbuster` are NEVER valid in "
+            f"the `mode` field — those are routed via `requires_capabilities`.\n"
+            f"- Any check's `mutations:` is a list of strings rather than "
+            f"a list of mappings with `body|header|value|url_override|note` keys.\n"
+            f"- Frontmatter is missing `playbook`, `name`, or `leaf_type`.\n"
+            f"- Any check is missing `id`, `name`, `mode`, `category`, or `severity`.\n"
+            f"- `severity:` uses a value outside "
+            f"`critical|high|medium|low|info|unknown`.\n\n"
+            f"For reference, the schema the artifact must conform to:\n\n"
+            f"{armory_addendum}"
+        )
+
     user_message = (
         f"## Subtask: {subtask['title']}\n\n"
         f"**Acceptance Criteria (from wiki page):**\n{acceptance_criteria}\n\n"
         f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```"
-        f"{truncation_notice}\n\n"
+        f"{truncation_notice}"
+        f"{armory_review_section}\n\n"
         "**Important:** The diff above shows only changes relative to the PR base branch "
         "(staging), not relative to main. Changes that were already on staging will NOT "
         "appear in the diff even if they are part of the full implementation. Before "
@@ -760,8 +796,21 @@ async def review_with_pm(
     # Run a fast single-shot review with the triage model. If it approves,
     # skip the full agentic review entirely. If it requests changes, fall
     # through to the full Sonnet review so the grinder gets detailed feedback.
+    #
+    # Armory artifacts (playbook/tool/wordlist) bypass the triage pass: their
+    # loader schema is strict and most failure modes (wrong mode vocabulary,
+    # bare-string mutations, empty checks lists) are silent at runtime, so a
+    # diff-only triage cannot reliably gate them. Force them through the full
+    # review which has file-inspection tools and the armory schema embedded.
     triage_model = settings.pm_triage_model
-    if triage_model:
+    if triage_model and armory_addendum:
+        logger.info(
+            "review_with_pm: skipping triage for armory %s (subtask %s) — "
+            "going straight to full review",
+            artifact_type,
+            subtask["id"],
+        )
+    if triage_model and not armory_addendum:
         triage_prompt = (
             f"## Subtask: {subtask['title']}\n\n"
             f"**Acceptance Criteria:**\n{acceptance_criteria}\n\n"

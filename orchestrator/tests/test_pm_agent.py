@@ -446,6 +446,87 @@ async def test_review_with_pm_changes_requested() -> None:
     assert result["feedback"] == "Missing tests for tag deletion."
 
 
+@pytest.mark.asyncio
+async def test_review_with_pm_armory_playbook_injects_schema_and_skips_triage() -> None:
+    """For artifact_type='playbook' state, the user_message must contain the
+    Molly playbook schema, AND the triage pass must be skipped (so a
+    diff-only LLM cannot fast-approve a structurally-broken playbook)."""
+    state = _make_state(artifact_type="playbook")
+
+    subtask = _build_subtask(
+        {
+            "page_name": "Task_0099_Sub_01",
+            "title": "Add SSRF playbook",
+            "description": "Add ssrf-internal-api playbook.",
+            "acceptance_criteria": ["File exists at playbooks/ssrf-internal-api.md"],
+            "parent_task": "Task_0099_armory",
+            "estimation": "s",
+            "expected_files": ["playbooks/ssrf-internal-api.md"],
+        },
+        parent_thread_id="task-0099",
+    )
+    subtask = SubTask(**{**subtask, "pr_number": 7, "status": "review"})
+
+    approve_response = _make_response(
+        content=[_make_tool_use_block(
+            "pm_approve_pr",
+            {"subtask_id": subtask["id"], "comment": "schema-conformant"},
+        )],
+        stop_reason="tool_use",
+    )
+    end_response = _make_response(
+        content=[_make_text_block("Approved.")], stop_reason="end_turn"
+    )
+
+    mock_create = AsyncMock(side_effect=[approve_response, end_response])
+    mock_messages = MagicMock()
+    mock_messages.create = mock_create
+
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_client.messages = mock_messages
+
+    meshwiki_client = AsyncMock()
+    meshwiki_client.get_page = AsyncMock(return_value=None)
+
+    github_client = AsyncMock()
+    github_client.get_pr_diff = AsyncMock(return_value="diff --git a/playbooks/...")
+
+    mock_settings = MagicMock()
+    # Triage IS configured — the test asserts it gets bypassed for armory PRs.
+    mock_settings.pm_triage_model = "google/gemini-flash-1.5-8b"
+    mock_settings.pm_review_model = "claude-sonnet-4-6"
+    mock_settings.anthropic_api_key = "test-key"
+    mock_settings.pm_review_max_diff_lines = 500
+    mock_settings.minimax_api_key = None
+
+    with (
+        patch(
+            "factory.agents.pm_agent.anthropic.AsyncAnthropic",
+            return_value=mock_anthropic_client,
+        ),
+        patch("factory.agents.pm_agent.get_settings", return_value=mock_settings),
+    ):
+        result = await review_with_pm(state, subtask, meshwiki_client, github_client)
+
+    assert result["decision"] == "approved"
+
+    # The first call must be the full review (not triage) and must carry the
+    # armory schema in the user message. We verify both by inspecting the first
+    # call's prompt text — the triage prompt starts with "Quick triage:" while
+    # the full-review user_message starts with "## Subtask:" + acceptance, and
+    # only the latter carries the "Armory Artifact Review" section.
+    first_call_kwargs = mock_create.call_args_list[0].kwargs
+    first_model = first_call_kwargs.get("model", "")
+    user_msg = first_call_kwargs["messages"][0]["content"]
+    assert first_model == "claude-sonnet-4-6", (
+        f"first call should be full review, got model={first_model!r}"
+    )
+    assert "Quick triage:" not in user_msg, "triage prompt should not have run"
+    assert "Armory Artifact Review" in user_msg
+    assert "deterministic" in user_msg
+    assert "mode: intruder" in user_msg  # appears in pitfalls section
+
+
 # ---------------------------------------------------------------------------
 # _OpenAIResponseAdapter — model threading + cost pricing
 # ---------------------------------------------------------------------------
