@@ -387,6 +387,151 @@ async def test_pm_review_node_changes_requested() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pm_review_node_pre_merge_gate_rejects_broken_playbook() -> None:
+    """When the PM approves an artifact_type=playbook PR but the PR's files
+    fail the deterministic schema check (e.g. mode=intruder, string
+    mutations), pm_review must downgrade the decision to changes_requested
+    BEFORE auto-merge fires. This is the load-bearing pre-merge gate that
+    keeps structurally-broken playbooks out of the armory."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0099_Sub_01",
+        title="Add SSRF playbook",
+        status="review",
+        pr_number=42,
+        pr_url="https://github.com/owner/repo/pull/42",
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        artifact_type="playbook",
+        task_repo="jyrkihuhta/molly-armory",
+    )
+
+    # PR diff content that the deterministic playbook validator rejects:
+    # `mode: intruder` is not a valid Molly mode, and `mutations:` is a list
+    # of bare strings rather than mappings. Both are silent failures at
+    # runtime — exactly what the pre-merge gate must catch.
+    broken_patch = (
+        "+---\n"
+        "+playbook: bad-pb\n"
+        "+name: Bad PB\n"
+        "+leaf_type: rest_api\n"
+        "+checks:\n"
+        "+  - id: c1\n"
+        "+    name: c1\n"
+        "+    mode: intruder\n"
+        "+    category: ssrf\n"
+        "+    severity: high\n"
+        "+    mutations:\n"
+        "+      - <script>alert(1)</script>\n"
+        "+---\n"
+    )
+    pr_files = [{"filename": "playbooks/bad-pb.md", "patch": broken_patch}]
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+    mock_github.get_pr_diff = AsyncMock(return_value="diff content")
+    mock_github.get_pr_files = AsyncMock(return_value=pr_files)
+    mock_github.request_changes = AsyncMock(return_value={})
+    mock_github.merge_pr = AsyncMock(return_value={})
+
+    mock_settings = MagicMock()
+    mock_settings.dry_run = False
+    mock_settings.auto_merge = True
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch("factory.nodes.pm_review.get_settings", return_value=mock_settings),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        result = await pm_review_node(state)
+
+    # Decision must be downgraded to changes_requested.
+    assert result["subtasks"][0]["status"] == "changes_requested"
+    feedback = result["subtasks"][0]["review_feedback"]
+    assert "pre-merge validation failed" in feedback
+    assert "intruder" in feedback  # the validator's mode error is surfaced
+
+    # Crucially, merge_pr must NOT have been called — the broken PR stays open.
+    mock_github.merge_pr.assert_not_called()
+    # And we must have posted a review with the schema errors so the grinder
+    # knows what to fix on the next attempt.
+    mock_github.request_changes.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_pre_merge_gate_passes_clean_playbook() -> None:
+    """A schema-conformant playbook PR survives the pre-merge gate and
+    proceeds to auto-merge as before."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0099_Sub_02",
+        title="Add SSRF playbook",
+        status="review",
+        pr_number=43,
+        pr_url="https://github.com/owner/repo/pull/43",
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        artifact_type="playbook",
+        task_repo="jyrkihuhta/molly-armory",
+    )
+
+    clean_patch = (
+        "+---\n"
+        "+playbook: good-pb\n"
+        "+name: Good PB\n"
+        "+leaf_type: rest_api\n"
+        "+checks:\n"
+        "+  - id: c1\n"
+        "+    name: C1\n"
+        "+    mode: deterministic\n"
+        "+    category: ssrf\n"
+        "+    severity: high\n"
+        "+    mutations:\n"
+        "+      - body: '{\"url\": \"http://internal\"}'\n"
+        "+        note: ssrf attempt\n"
+        "+---\n"
+    )
+    pr_files = [{"filename": "playbooks/good-pb.md", "patch": clean_patch}]
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+    mock_github.get_pr_diff = AsyncMock(return_value="diff content")
+    mock_github.get_pr_files = AsyncMock(return_value=pr_files)
+    mock_github.request_changes = AsyncMock(return_value={})
+    mock_github.merge_pr = AsyncMock(return_value={})
+
+    mock_settings = MagicMock()
+    mock_settings.dry_run = False
+    mock_settings.auto_merge = True
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch("factory.nodes.pm_review.get_settings", return_value=mock_settings),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        result = await pm_review_node(state)
+
+    # Clean playbook → status becomes merged and auto-merge fires.
+    assert result["subtasks"][0]["status"] == "merged"
+    mock_github.merge_pr.assert_called_once_with(43)
+    mock_github.request_changes.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pm_review_node_missing_subtask_id_returns_empty() -> None:
     """pm_review_node returns empty dict when _current_subtask_id is not found."""
     pending_subtask = _make_subtask(

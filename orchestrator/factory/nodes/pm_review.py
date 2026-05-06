@@ -11,6 +11,7 @@ from ..config import get_settings
 from ..integrations.github_client import GitHubClient, _extract_pr_number
 from ..integrations.meshwiki_client import MeshWikiClient
 from ..state import FactoryState, SubTask
+from .validate_armory import ARMORY_TYPES, validate_armory_pr_files
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,59 @@ async def pm_review_node(state: FactoryState) -> dict:
         decision: str = result.get("decision", "changes_requested")
         feedback: str | None = result.get("feedback")
         incremental_cost = result.get("incremental_cost_usd", 0.0)
+
+        # ── Pre-merge armory gate ────────────────────────────────────────
+        # When the PM approves an armory-artifact PR, run the deterministic
+        # validator against the PR's changed files BEFORE auto-merging.
+        # If the artifact is structurally broken (wrong mode vocabulary,
+        # bare-string mutations, missing required fields, forbidden imports
+        # in tools), downgrade the decision to changes_requested so the
+        # broken file never lands in the armory. The post-merge
+        # validate_armory_node remains as defense in depth.
+        if decision == "approved":
+            artifact_type: str | None = state.get("artifact_type")
+            if artifact_type in ARMORY_TYPES:
+                pre_pr_number = subtask.get("pr_number") or _extract_pr_number(
+                    subtask.get("pr_url") or ""
+                )
+                if pre_pr_number:
+                    try:
+                        pr_files = await github_client.get_pr_files(pre_pr_number)
+                        gate_errors = validate_armory_pr_files(pr_files, artifact_type)
+                    except Exception as exc:
+                        logger.warning(
+                            "pm_review: pre-merge validation fetch failed for PR "
+                            "#%d (%s) — letting post-merge gate handle it",
+                            pre_pr_number,
+                            exc,
+                        )
+                        gate_errors = []
+                    if gate_errors:
+                        gate_feedback = (
+                            "Armory pre-merge validation failed — "
+                            "PR will not be merged:\n"
+                            + "\n".join(f"- {e}" for e in gate_errors)
+                            + "\n\nFix the schema violations above and re-push."
+                        )
+                        logger.info(
+                            "pm_review: pre-merge gate REJECTED PR #%d for subtask "
+                            "%s — overriding approved → changes_requested",
+                            pre_pr_number,
+                            subtask["id"],
+                        )
+                        try:
+                            await github_client.request_changes(
+                                pre_pr_number, gate_feedback
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "pm_review: failed to post pre-merge review on PR "
+                                "#%d: %s",
+                                pre_pr_number,
+                                exc,
+                            )
+                        decision = "changes_requested"
+                        feedback = gate_feedback
 
         if decision == "approved":
             if get_settings().auto_merge and subtask.get("pr_url"):

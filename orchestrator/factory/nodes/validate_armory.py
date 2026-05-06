@@ -29,7 +29,7 @@ from ..state import FactoryState, SubTask
 
 logger = logging.getLogger(__name__)
 
-_ARMORY_TYPES: frozenset[str] = frozenset({"tool", "playbook", "wordlist"})
+ARMORY_TYPES: frozenset[str] = frozenset({"tool", "playbook", "wordlist"})
 
 # The vocabulary that the contract test (molly-armory/contract-test/) validates.
 # - "deterministic" — runs via Intruder mutation sweep
@@ -74,7 +74,7 @@ async def validate_armory_node(state: FactoryState) -> dict:
     """
     artifact_type: str | None = state.get("artifact_type")
 
-    if artifact_type not in _ARMORY_TYPES:
+    if artifact_type not in ARMORY_TYPES:
         logger.debug(
             "validate_armory: artifact_type=%r is not an armory type — pass-through",
             artifact_type,
@@ -116,12 +116,7 @@ async def validate_armory_node(state: FactoryState) -> dict:
                 updated_subtasks.append(subtask)
                 continue
 
-            if artifact_type == "tool":
-                errors = _check_tool_files(pr_files)
-            elif artifact_type == "playbook":
-                errors = _check_playbook_files(pr_files)
-            else:
-                errors = []  # wordlist: no structural checks
+            errors = validate_armory_pr_files(pr_files, artifact_type)
 
             if errors:
                 any_failed = True
@@ -170,6 +165,31 @@ async def validate_armory_node(state: FactoryState) -> dict:
 # ---------------------------------------------------------------------------
 # Checkers
 # ---------------------------------------------------------------------------
+
+
+def validate_armory_pr_files(
+    pr_files: list[dict], artifact_type: str
+) -> list[str]:
+    """Run the armory schema/safety checks against a PR's changed files.
+
+    Public helper used by both ``validate_armory_node`` (post-merge gate)
+    and ``pm_review_node`` (pre-merge gate) so a single source of truth
+    decides what counts as a structurally-broken artifact.
+
+    Args:
+        pr_files: List of PR file objects from the GitHub API
+            (``filename`` and ``patch`` keys).
+        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``.
+            Anything else returns an empty list.
+
+    Returns:
+        List of human-readable error strings; empty means the PR passes.
+    """
+    if artifact_type == "tool":
+        return _check_tool_files(pr_files)
+    if artifact_type == "playbook":
+        return _check_playbook_files(pr_files)
+    return []  # wordlist + non-armory: no structural checks
 
 
 def _check_tool_files(pr_files: list[dict]) -> list[str]:
