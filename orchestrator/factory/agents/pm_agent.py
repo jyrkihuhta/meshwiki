@@ -545,7 +545,29 @@ class _RawOpenAIMessage:
     def __init__(self, data: dict[str, Any]) -> None:
         self.content = data.get("content")
         self.role = data.get("role", "assistant")
-        self.tool_calls = data.get("tool_calls") or []
+        # Wrap each raw tool_call dict in a small shim so the existing
+        # _ToolUseBlock adapter can access tc.id / tc.function.name / etc.
+        self.tool_calls = [
+            _RawOpenAIToolCall(tc) for tc in (data.get("tool_calls") or [])
+        ]
+
+
+class _RawOpenAIToolCall:
+    """Shim over a raw OpenAI tool_call JSON dict so it presents the
+    same attribute shape as the openai SDK's ToolCall object."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.id: str = data.get("id", "")
+        self.type: str = data.get("type", "function")
+        fn = data.get("function") or {}
+        self.function = _RawOpenAIFunction(fn)
+
+
+class _RawOpenAIFunction:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.name: str = data.get("name", "")
+        # OpenAI sends arguments as a JSON-encoded string
+        self.arguments: str = data.get("arguments", "{}")
 
 
 class _RawOpenAIUsage:
