@@ -18,6 +18,7 @@ from typing import Any
 
 import anthropic
 
+from ..agents.pm_agent import safe_messages_create
 from ..config import get_settings
 from ..integrations.meshwiki_client import MeshWikiClient
 from .base import BaseBot, BotResult
@@ -76,6 +77,7 @@ class TerminalReviewBot(BaseBot):
     """
 
     name = "terminal-review"
+    pauses_on_anthropic_block = True
 
     def __init__(
         self,
@@ -222,7 +224,8 @@ class TerminalReviewBot(BaseBot):
             page_name,
             len(log_text),
         )
-        response = await client.messages.create(
+        response = await safe_messages_create(
+            client,
             model=self._model,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],

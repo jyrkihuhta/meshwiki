@@ -18,6 +18,7 @@ from typing import Any
 
 import anthropic
 
+from ..agents.pm_agent import safe_messages_create
 from ..config import get_settings
 from ..integrations.meshwiki_client import MeshWikiClient
 from .base import BaseBot, BotResult
@@ -91,6 +92,7 @@ class InsightBot(BaseBot):
     """Weekly bot that synthesizes grinder observations and proposes improvement tasks."""
 
     name = "insight"
+    pauses_on_anthropic_block = True
 
     def __init__(
         self,
@@ -262,7 +264,8 @@ class InsightBot(BaseBot):
         )
 
         try:
-            response = await client.messages.create(
+            response = await safe_messages_create(
+                client,
                 model=self._model,
                 max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],

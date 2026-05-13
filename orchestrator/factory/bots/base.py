@@ -78,38 +78,70 @@ class BaseBot(ABC):
                 self._task.cancel()
         logger.info("bot[%s]: stopped", self.name)
 
+    #: Bots that ONLY do work via Anthropic should set this True. When the
+    #: shared circuit breaker is tripped, _loop() will skip their run cycle
+    #: entirely and log a single quiet "paused" line per cycle instead of
+    #: producing N back-to-back "failed to analyze" errors.
+    pauses_on_anthropic_block: bool = False
+
     async def _loop(self) -> None:
         """Internal scheduling loop: run → sleep → repeat until stopped."""
+        # Local import to avoid a cycle (pm_agent.py imports from state).
+        from ..agents.pm_agent import (
+            anthropic_block_reason,
+            anthropic_blocked_seconds_remaining,
+        )
+
         while not self._stop_event.is_set():
             started = time.monotonic()
-            try:
-                result = await self.run()
-                elapsed = time.monotonic() - started
-                self.total_runs += 1
-                self.total_actions += result.actions_taken
-                self.last_result = result
-                self._last_ran_wall = time.time()
+            blocked_secs = anthropic_blocked_seconds_remaining()
+            if self.pauses_on_anthropic_block and blocked_secs > 0:
+                # Anthropic circuit breaker is tripped — this bot can't make
+                # progress without an Anthropic call. Skip the cycle quietly
+                # and check again next tick.
+                self.last_result = BotResult(
+                    ran_at=started,
+                    actions_taken=0,
+                    errors=[],
+                    details=(
+                        f"paused: Anthropic blocked for {blocked_secs:.0f}s more "
+                        f"({anthropic_block_reason() or 'no reason recorded'})"
+                    ),
+                )
                 logger.info(
-                    "bot[%s]: ran in %.2fs — actions=%d errors=%d%s",
+                    "bot[%s]: paused — Anthropic blocked for %.0fs more",
                     self.name,
-                    elapsed,
-                    result.actions_taken,
-                    len(result.errors),
-                    f" details={result.details!r}" if result.details else "",
+                    blocked_secs,
                 )
-                if result.errors:
-                    for err in result.errors:
-                        logger.warning("bot[%s]: error — %s", self.name, err)
-                await self._update_bot_page(result)
-            except Exception as exc:  # noqa: BLE001
-                elapsed = time.monotonic() - started
-                logger.error(
-                    "bot[%s]: unhandled exception after %.2fs: %s",
-                    self.name,
-                    elapsed,
-                    exc,
-                    exc_info=True,
-                )
+            else:
+                try:
+                    result = await self.run()
+                    elapsed = time.monotonic() - started
+                    self.total_runs += 1
+                    self.total_actions += result.actions_taken
+                    self.last_result = result
+                    self._last_ran_wall = time.time()
+                    logger.info(
+                        "bot[%s]: ran in %.2fs — actions=%d errors=%d%s",
+                        self.name,
+                        elapsed,
+                        result.actions_taken,
+                        len(result.errors),
+                        f" details={result.details!r}" if result.details else "",
+                    )
+                    if result.errors:
+                        for err in result.errors:
+                            logger.warning("bot[%s]: error — %s", self.name, err)
+                    await self._update_bot_page(result)
+                except Exception as exc:  # noqa: BLE001
+                    elapsed = time.monotonic() - started
+                    logger.error(
+                        "bot[%s]: unhandled exception after %.2fs: %s",
+                        self.name,
+                        elapsed,
+                        exc,
+                        exc_info=True,
+                    )
 
             try:
                 await asyncio.wait_for(

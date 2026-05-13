@@ -21,6 +21,7 @@ from typing import Any
 
 import anthropic
 
+from ..agents.pm_agent import safe_messages_create
 from ..config import get_settings
 from ..integrations.github_client import GitHubClient, _extract_pr_number
 from ..integrations.meshwiki_client import MeshWikiClient
@@ -66,6 +67,7 @@ class CIFixerBot(BaseBot):
     """
 
     name = "ci-fixer"
+    pauses_on_anthropic_block = True
 
     def __init__(self, interval_seconds: int | None = None) -> None:
         super().__init__()
@@ -239,7 +241,8 @@ class CIFixerBot(BaseBot):
             check_name=check_name, failure_text=failure_text
         )
         try:
-            resp = await client.messages.create(
+            resp = await safe_messages_create(
+                client,
                 model=self._model,
                 max_tokens=256,
                 messages=[{"role": "user", "content": prompt}],

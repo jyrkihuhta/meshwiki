@@ -15,6 +15,7 @@ from ..armory_prompts import get_armory_prompt
 from ..config import get_settings
 from ..cost import sandbox_time_to_usd, tokens_to_usd
 from ..state import FactoryState, SubTask
+from .pm_agent import safe_messages_create
 
 if TYPE_CHECKING:
     from ..integrations.meshwiki_client import MeshWikiClient
@@ -1144,7 +1145,8 @@ async def grind_subtask(
     )
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
+        response = await safe_messages_create(
+            client,
             model=settings.grinder_model,
             max_tokens=4096,
             system=GRINDER_SYSTEM_PROMPT,

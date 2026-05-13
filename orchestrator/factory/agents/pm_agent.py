@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import anthropic
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 # dispatching so we don't burn E2B slots on work that can't be reviewed.
 
 _anthropic_blocked_until: float = 0.0
+_anthropic_block_reason: str = ""
 
 
 def _is_anthropic_blocked() -> bool:
@@ -42,22 +45,112 @@ def anthropic_blocked_seconds_remaining() -> float:
     return max(0.0, _anthropic_blocked_until - time.monotonic())
 
 
-def _block_anthropic(seconds: float = 900.0) -> None:
-    global _anthropic_blocked_until
+def anthropic_block_reason() -> str:
+    """Return the reason the circuit breaker was last tripped (empty if never)."""
+    return _anthropic_block_reason
+
+
+def _block_anthropic(seconds: float = 900.0, reason: str = "") -> None:
+    """Trip the Anthropic circuit breaker for `seconds` (caps at 30 days)."""
+    global _anthropic_blocked_until, _anthropic_block_reason
+    seconds = min(max(seconds, 60.0), 30 * 86400.0)
     _anthropic_blocked_until = time.monotonic() + seconds
+    _anthropic_block_reason = reason[:300] if reason else ""
     logger.warning(
-        "pm_agent: Anthropic circuit breaker engaged — blocked for %.0fs", seconds
+        "anthropic circuit breaker engaged — blocked for %.0fs (reason: %s)",
+        seconds,
+        reason[:120] if reason else "(none)",
     )
+
+
+# Patterns that identify a hard billing / usage-limit error in the message body.
+# Anthropic returns these with assorted status codes depending on the limit type:
+#   - 402: credit balance is too low
+#   - 429: rate / token-per-minute limits with the message containing limit keywords
+#   - 400 invalid_request_error: "You have reached your specified API usage limits"
+_BILLING_KEYWORDS = (
+    "credit",
+    "spend",
+    "billing",
+    "quota",
+    "usage limit",
+    "specified api usage",
+    "monthly limit",
+    "usage limits",
+    "regain access",
+)
 
 
 def _is_billing_error(exc: anthropic.APIStatusError) -> bool:
     """Return True if the error is a hard billing/spend limit (not a transient overload)."""
     if exc.status_code == 402:
         return True
-    if exc.status_code == 429:
-        msg = str(exc).lower()
-        return any(w in msg for w in ("credit", "spend", "billing", "quota", "limit"))
+    msg = str(exc).lower()
+    if exc.status_code in (400, 401, 429):
+        # 400 only when invalid_request_error with usage-limit wording — be specific
+        if exc.status_code == 400 and "invalid_request_error" not in msg:
+            return False
+        return any(w in msg for w in _BILLING_KEYWORDS)
     return False
+
+
+# Message format: "regain access on 2026-06-01 at 00:00 UTC"
+_REGAIN_RE = re.compile(
+    r"regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC",
+    re.IGNORECASE,
+)
+
+
+def _extract_regain_seconds(exc: anthropic.APIStatusError) -> float:
+    """Parse a regain-access timestamp from the error message.
+
+    Returns seconds until that time (clamped non-negative), or 0.0 if not parseable.
+    Used to set the circuit breaker cooldown to the exact moment Anthropic says
+    access returns, rather than guessing with a fixed value.
+    """
+    m = _REGAIN_RE.search(str(exc))
+    if not m:
+        return 0.0
+    try:
+        ts = datetime.fromisoformat(f"{m.group(1)} {m.group(2)}:00").replace(
+            tzinfo=timezone.utc
+        )
+        return max(0.0, ts.timestamp() - time.time())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+async def safe_messages_create(
+    client: anthropic.AsyncAnthropic, **kwargs: Any
+) -> Any:
+    """Wrap ``client.messages.create`` so any direct Anthropic call site trips
+    the shared circuit breaker on billing errors.
+
+    Callers should also check ``_is_anthropic_blocked()`` before invoking this
+    — if the breaker is already tripped, calling here will raise
+    ``AnthropicBlockedError`` immediately so we don't incur another failed
+    request.
+    """
+    if _is_anthropic_blocked():
+        remaining = anthropic_blocked_seconds_remaining()
+        raise AnthropicBlockedError(
+            f"Anthropic circuit breaker active ({remaining:.0f}s remaining): "
+            f"{_anthropic_block_reason or 'no reason recorded'}"
+        )
+    try:
+        return await client.messages.create(**kwargs)
+    except anthropic.APIStatusError as exc:
+        if _is_billing_error(exc):
+            seconds = _extract_regain_seconds(exc) or 900.0
+            _block_anthropic(seconds=seconds, reason=str(exc)[:300])
+        raise
+
+
+class AnthropicBlockedError(RuntimeError):
+    """Raised when a caller attempts an Anthropic API call while the circuit
+    breaker is tripped. Bots should catch this and skip their cycle gracefully
+    instead of producing a generic error.
+    """
 
 
 PM_SYSTEM_PROMPT = """
@@ -445,7 +538,8 @@ async def _messages_create_with_retry(
                     await asyncio.sleep(wait)
                     last_exc = exc
                 elif _is_billing_error(exc):
-                    _block_anthropic(seconds=900.0)
+                    seconds = _extract_regain_seconds(exc) or 900.0
+                    _block_anthropic(seconds=seconds, reason=str(exc)[:300])
                     last_exc = exc
                     break  # fall through to fallback chain
                 else:
@@ -823,7 +917,8 @@ async def review_with_pm(
             "Be lenient on style; flag only functional gaps or missing acceptance criteria."
         )
         try:
-            triage_response = await client.messages.create(
+            triage_response = await safe_messages_create(
+                client,
                 model=triage_model,
                 max_tokens=512,
                 messages=[{"role": "user", "content": triage_prompt}],
@@ -863,7 +958,8 @@ async def review_with_pm(
     tool_calls_remaining = 10
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
+        response = await safe_messages_create(
+            client,
             model=settings.pm_review_model,
             max_tokens=4096,
             system=PM_SYSTEM_PROMPT,
