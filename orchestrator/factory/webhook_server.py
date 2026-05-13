@@ -15,6 +15,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .bots.bookkeeper import BookkeeperBot
 from .bots.ci_fixer import CIFixerBot
+from .bots.class_gap_researcher import ClassGapResearcherBot
 from .bots.insight import InsightBot
 from .bots.registry import BotRegistry
 from .bots.scheduler import SchedulerBot
@@ -183,6 +184,13 @@ async def lifespan(app: FastAPI):
             "factory: stale-pr bot enabled (interval=%ds, failure_minutes=%d)",
             settings.stale_pr_interval_seconds,
             settings.stale_pr_failure_minutes,
+        )
+    if settings.class_gap_researcher_enabled:
+        bot_registry.register(ClassGapResearcherBot())
+        logger.info(
+            "factory: class-gap-researcher bot enabled (interval=%ds, model=%s)",
+            settings.class_gap_researcher_interval_seconds,
+            settings.class_gap_researcher_model,
         )
     app.state.bot_registry = bot_registry
 

@@ -130,6 +130,18 @@ class Settings(BaseSettings):
     insight_model: str = (
         "claude-haiku-4-5-20251001"  # FACTORY_INSIGHT_MODEL — LLM for synthesis
     )
+    class_gap_researcher_enabled: bool = (
+        False  # FACTORY_CLASS_GAP_RESEARCHER_ENABLED — enable the gap-research bot
+    )
+    class_gap_researcher_interval_seconds: int = (
+        604800  # FACTORY_CLASS_GAP_RESEARCHER_INTERVAL_SECONDS — weekly by default
+    )
+    class_gap_researcher_model: str = (
+        "MiniMax-M2.7"  # FACTORY_CLASS_GAP_RESEARCHER_MODEL — non-Anthropic by default
+    )
+    class_gap_researcher_suggestions_per_run: int = (
+        3  # FACTORY_CLASS_GAP_RESEARCHER_SUGGESTIONS_PER_RUN — how many gaps per tick
+    )
     daily_budget_usd: float = (
         0.0  # FACTORY_DAILY_BUDGET_USD — max USD to spend per calendar day (0 = disabled)
     )
