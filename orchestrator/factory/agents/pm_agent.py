@@ -480,25 +480,82 @@ async def _call_openai_compatible(
     extra_headers: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Call an OpenAI-compatible endpoint with Anthropic-style kwargs."""
-    import openai
+    """Call an OpenAI-compatible endpoint with Anthropic-style kwargs.
 
-    client = openai.AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout,
-        default_headers=extra_headers or {},
-    )
+    Uses ``httpx`` directly rather than the ``openai`` Python package — the
+    package isn't pinned as a dependency and the request shape is simple
+    enough to build manually. Same wire format MiniMax / OpenRouter /
+    OpenAI all accept.
+    """
+    import httpx
+
     oai_messages = _convert_to_oai_messages(kwargs)
     oai_tools = _anthropic_tools_to_openai(kwargs.get("tools", []))
-    oai_resp = await client.chat.completions.create(
-        model=model,
-        max_tokens=kwargs.get("max_tokens", 4096),
-        messages=oai_messages,
-        tools=oai_tools if oai_tools else openai.NOT_GIVEN,
-        tool_choice="auto" if oai_tools else openai.NOT_GIVEN,
-    )
-    return _OpenAIResponseAdapter(oai_resp, model)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+        "messages": oai_messages,
+    }
+    if oai_tools:
+        body["tools"] = oai_tools
+        body["tool_choice"] = "auto"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return _OpenAIResponseAdapter(_RawOpenAIResponse(data), model)
+
+
+class _RawOpenAIResponse:
+    """Shim over a raw OpenAI-compatible JSON response so it presents the
+    handful of attributes the adapter reaches for (choices, usage)."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._raw = data
+        self.choices = [
+            _RawOpenAIChoice(c) for c in data.get("choices", [])
+        ]
+        self.usage = _RawOpenAIUsage(data.get("usage") or {})
+
+    def __getattr__(self, name: str) -> Any:
+        return self._raw.get(name)
+
+
+class _RawOpenAIChoice:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.message = _RawOpenAIMessage(data.get("message") or {})
+        self.finish_reason = data.get("finish_reason")
+
+
+class _RawOpenAIMessage:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.content = data.get("content")
+        self.role = data.get("role", "assistant")
+        self.tool_calls = data.get("tool_calls") or []
+
+
+class _RawOpenAIUsage:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.prompt_tokens = int(data.get("prompt_tokens", 0) or 0)
+        self.completion_tokens = int(data.get("completion_tokens", 0) or 0)
+        self.total_tokens = int(data.get("total_tokens", 0) or 0)
+        # Anthropic-style alias used by some cost-accounting paths
+        self.input_tokens = self.prompt_tokens
+        self.output_tokens = self.completion_tokens
 
 
 async def _messages_create_with_retry(
