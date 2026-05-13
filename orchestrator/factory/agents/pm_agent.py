@@ -509,22 +509,33 @@ async def _messages_create_with_retry(
 ) -> Any:
     """Call client.messages.create with retry, circuit breaker, and provider fallback.
 
+    Provider selection:
+    - If the requested ``model`` starts with ``claude-``, try Anthropic first
+      and fall back to OpenRouter → MiniMax on retryable errors / circuit
+      breaker tripped.
+    - Otherwise (e.g. ``MiniMax-M2.7``), skip Anthropic entirely and route
+      directly to the matching provider. This lets operators set
+      ``FACTORY_PM_REVIEW_MODEL=MiniMax-M2.7`` to make MiniMax the primary
+      without touching code.
+
     Retry strategy:
     - 529 overloaded: up to ``max_overload_attempts`` times with 30s backoff.
-    - 402/429 billing: trip the circuit breaker and fall through to fallbacks.
+    - 402/429/400-with-usage-limit billing: trip the circuit breaker and
+      fall through to fallbacks.
     - Circuit breaker active: skip Anthropic entirely on this call.
-
-    Fallback chain (first available wins):
-    1. OpenRouter (``FACTORY_OPENROUTER_API_KEY``)
-    2. MiniMax (``FACTORY_MINIMAX_API_KEY``)
     """
     settings = get_settings()
     last_exc: BaseException | None = None
 
-    if not _is_anthropic_blocked():
+    # Strip 'model' from forwarded kwargs — every downstream caller takes it
+    # as an explicit kwarg, and having it in **kwargs would collide.
+    requested_model = kwargs.pop("model", "")
+    anthropic_primary = requested_model.startswith("claude-")
+
+    if anthropic_primary and not _is_anthropic_blocked():
         for attempt in range(max_overload_attempts):
             try:
-                return await client.messages.create(**kwargs)
+                return await client.messages.create(model=requested_model, **kwargs)
             except anthropic.APIStatusError as exc:
                 if exc.status_code == 529 and attempt < max_overload_attempts - 1:
                     wait = 30 * (2**attempt)
@@ -544,19 +555,39 @@ async def _messages_create_with_retry(
                     break  # fall through to fallback chain
                 else:
                     raise
-    else:
+    elif anthropic_primary:
         logger.info("pm_agent: Anthropic circuit breaker active — using fallback")
-
-    # ── Fallback 1: OpenRouter ────────────────────────────────────────────────
-    if settings.openrouter_api_key:
-        logger.warning(
-            "pm_agent: falling back to OpenRouter (model=%s)",
-            settings.pm_openrouter_model,
+    else:
+        logger.info(
+            "pm_agent: routing direct to non-Anthropic provider (model=%s)",
+            requested_model,
         )
+
+    # ── Provider chain: pick MiniMax first if the requested model matches it,
+    #    else OpenRouter, else MiniMax with its default model. The kwargs
+    #    object has 'model' already stripped above so it's safe to forward.
+    minimax_requested = requested_model.lower().startswith("minimax")
+
+    if minimax_requested and settings.minimax_api_key:
+        logger.info("pm_agent: calling MiniMax (model=%s)", requested_model)
+        return await _call_openai_compatible(
+            api_key=settings.minimax_api_key,
+            base_url="https://api.minimax.io/v1",
+            model=requested_model,
+            timeout=60.0,
+            **kwargs,
+        )
+
+    if settings.openrouter_api_key:
+        # If the operator asked for a non-Anthropic model and we have an
+        # OpenRouter key, send the operator's requested model through OR;
+        # otherwise use the configured fallback model.
+        or_model = requested_model if not anthropic_primary else settings.pm_openrouter_model
+        logger.warning("pm_agent: routing via OpenRouter (model=%s)", or_model)
         return await _call_openai_compatible(
             api_key=settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
-            model=settings.pm_openrouter_model,
+            model=or_model,
             timeout=120.0,
             extra_headers={
                 "HTTP-Referer": settings.meshwiki_url,
@@ -565,9 +596,8 @@ async def _messages_create_with_retry(
             **kwargs,
         )
 
-    # ── Fallback 2: MiniMax ───────────────────────────────────────────────────
     if settings.minimax_api_key:
-        logger.warning("pm_agent: falling back to MiniMax")
+        logger.warning("pm_agent: falling back to MiniMax default")
         return await _call_openai_compatible(
             api_key=settings.minimax_api_key,
             base_url="https://api.minimax.io/v1",
