@@ -947,7 +947,12 @@ async def review_with_pm(
             "Be lenient on style; flag only functional gaps or missing acceptance criteria."
         )
         try:
-            triage_response = await safe_messages_create(
+            # Use _messages_create_with_retry (not safe_messages_create) so the
+            # triage model name drives the provider routing — when triage_model
+            # is non-Anthropic (e.g. "MiniMax-M2.7"), this routes direct to
+            # the matching provider rather than failing with an unknown-model
+            # error against the Anthropic API.
+            triage_response = await _messages_create_with_retry(
                 client,
                 model=triage_model,
                 max_tokens=512,
