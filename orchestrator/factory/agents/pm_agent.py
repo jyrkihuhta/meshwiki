@@ -1072,7 +1072,11 @@ async def review_with_pm(
     tool_calls_remaining = 10
 
     while tool_calls_remaining > 0:
-        response = await safe_messages_create(
+        # Use _messages_create_with_retry (not safe_messages_create) so the
+        # configured pm_review_model can be a non-Anthropic provider (e.g.
+        # MiniMax-M2.7). safe_messages_create only knows the direct-Anthropic
+        # path and would trip the circuit breaker for non-Anthropic models.
+        response = await _messages_create_with_retry(
             client,
             model=settings.pm_review_model,
             max_tokens=4096,
