@@ -36,6 +36,7 @@ from meshwiki.auth import (
     verify_password,
 )
 from meshwiki.config import settings
+from meshwiki.core import page_cache
 from meshwiki.core.dependencies import (
     get_revision_store,
     get_storage,
@@ -213,6 +214,7 @@ _revision_store = (
 )
 storage = FileStorage(settings.data_dir, revision_store=_revision_store)
 set_storage(storage)
+page_cache.invalidate()  # clear cache from any prior storage instance (e.g. test reloads)
 if _revision_store is not None:
     set_revision_store(_revision_store)
 
@@ -226,7 +228,7 @@ if settings.factory_enabled:
 # Template context helper
 async def get_page_tree() -> list[dict]:
     """Get hierarchical page tree for sidebar navigation."""
-    pages = await storage.list_pages_with_metadata()
+    pages = await page_cache.get_pages_metadata()
     return build_page_tree_sync(pages)
 
 
@@ -706,7 +708,7 @@ async def view_page(request: Request, name: str):
     if isinstance(page_type, list):
         page_type = page_type[0] if page_type else ""
     if page_type == "epic":
-        all_pages_for_epic = await storage.list_pages_with_metadata()
+        all_pages_for_epic = await page_cache.get_pages_metadata()
         child_tasks = []
         for p in all_pages_for_epic:
             if p.metadata is None:
@@ -730,7 +732,7 @@ async def view_page(request: Request, name: str):
         page_metadata["_child_tasks"] = child_tasks
 
     # Fetch recent pages for <<RecentChanges>> macro.
-    all_pages_for_recent = await storage.list_pages_with_metadata()
+    all_pages_for_recent = await page_cache.get_pages_metadata()
     recent_pages = sorted(
         [p for p in all_pages_for_recent if p.metadata.modified],
         key=lambda p: p.metadata.modified,
@@ -801,7 +803,7 @@ async def page_content_fragment(name: str, request: Request):
     )
     page_metadata: dict = frontmatter if frontmatter else _storage_extra
 
-    all_pages_for_recent = await storage.list_pages_with_metadata()
+    all_pages_for_recent = await page_cache.get_pages_metadata()
     recent_pages = sorted(
         [p for p in all_pages_for_recent if p.metadata.modified],
         key=lambda p: p.metadata.modified,
@@ -845,6 +847,7 @@ async def delete_page(name: str):
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail="Page not found")
+    page_cache.invalidate()
     log.info("page_deleted", page=name)
     page_writes_total.labels(operation="delete").inc()
     return RedirectResponse(url="/?toast=deleted", status_code=302)
@@ -880,6 +883,7 @@ async def save_page(request: Request, name: str, content: str = Form("")):
                     pending_transition = (old_status, new_status)
 
     page = await storage.save_page(name, content)
+    page_cache.invalidate()
     log.info("page_saved", page=name)
     page_writes_total.labels(operation="save").inc()
 

@@ -8,6 +8,7 @@ import asyncio
 import time
 from typing import Any
 
+from meshwiki.core import page_cache
 from meshwiki.core.graph import get_engine
 from meshwiki.core.logging import get_logger
 
@@ -83,6 +84,7 @@ class ConnectionManager:
                 if engine is not None and engine.has_pending_events():
                     events = engine.poll_events()
                     for event in events:
+                        page_cache.invalidate()
                         msg = _event_to_dict(event)
                         await self._broadcast(msg)
             except asyncio.CancelledError:
