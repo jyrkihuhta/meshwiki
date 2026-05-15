@@ -997,9 +997,14 @@ async def api_autocomplete(request: Request, q: str = ""):
     """Return matching page names for wiki link autocomplete."""
     if not q:
         return HTMLResponse("")
-    pages = await storage.list_pages()
+    engine = get_engine()
+    if engine is not None:
+        page_infos = engine.list_pages()
+        all_names = [p.name for p in page_infos]
+    else:
+        all_names = await storage.list_pages()
     q_lower = q.lower()
-    matches = [p for p in pages if q_lower in p.lower()][:10]
+    matches = [p for p in all_names if q_lower in p.lower()][:10]
     items = "".join(
         f'<li class="autocomplete-item" data-value="{name}">{name}</li>'
         for name in matches
