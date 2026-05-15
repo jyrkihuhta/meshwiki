@@ -176,6 +176,26 @@ class MeshWikiClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def update_metadata(
+        self, page_name: str, fields: dict[str, Any]
+    ) -> None:
+        """Patch frontmatter fields on a wiki page without touching the body
+        or running a status transition.
+
+        Reads the page, applies the field updates via the same
+        ``_patch_frontmatter`` helper used by :meth:`append_to_page`, then
+        PUTs the new content back. Used for low-cost periodic updates such
+        as worker heartbeats.
+        """
+        page = await self.get_page(page_name)
+        if page is None:
+            raise ValueError(f"Page not found: {page_name!r}")
+        current_content = page.get("content", "")
+        new_content = _patch_frontmatter(current_content, fields)
+        if new_content == current_content:
+            return
+        await self.create_page(page_name, new_content)
+
     async def rename_page(self, old_name: str, new_name: str) -> None:
         """Move a wiki page to a new name/location.
 

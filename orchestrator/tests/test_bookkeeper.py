@@ -15,12 +15,15 @@ from factory.bots.bookkeeper import BookkeeperBot, _parse_updated_at
 # ---------------------------------------------------------------------------
 
 
-def _make_bot(stale_hours: float = 2.0) -> BookkeeperBot:
+def _make_bot(
+    stale_hours: float = 2.0, heartbeat_stale_seconds: int = 300
+) -> BookkeeperBot:
     """Return a BookkeeperBot configured with a 60s interval and given stale threshold."""
     with patch("factory.bots.bookkeeper.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(
             bookkeeper_interval_seconds=60,
             bookkeeper_stale_hours=stale_hours,
+            worker_heartbeat_stale_seconds=heartbeat_stale_seconds,
         )
         bot = BookkeeperBot(interval_seconds=60, stale_hours=stale_hours)
     return bot
@@ -542,3 +545,121 @@ async def test_run_returns_bot_result() -> None:
     assert result.actions_taken == 0
     assert result.errors == []
     assert result.ran_at >= 0
+
+
+# ---------------------------------------------------------------------------
+# Rule 1b: stale heartbeat → failed
+# ---------------------------------------------------------------------------
+
+
+def _task_with_heartbeat(name: str, age_seconds: int, worker_id: str = "w-1") -> dict:
+    """Return an in_progress task whose last_heartbeat is age_seconds ago."""
+    hb = datetime.now(tz=timezone.utc) - timedelta(seconds=age_seconds)
+    return {
+        "name": name,
+        "metadata": {
+            "status": "in_progress",
+            "modified": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f"),
+            "last_heartbeat": hb.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "worker_id": worker_id,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_fix_stale_heartbeats_transitions_stale_task() -> None:
+    """A task whose last_heartbeat is older than threshold is transitioned to failed."""
+    bot = _make_bot(heartbeat_stale_seconds=300)
+    # 10 min stale heartbeat (modified is fresh, so Rule 1 wouldn't catch it)
+    task = _task_with_heartbeat("Task_HB1", age_seconds=600)
+
+    wiki = AsyncMock()
+    wiki.list_tasks = AsyncMock(return_value=[task])
+    wiki.transition_task = AsyncMock()
+    wiki.get_page = AsyncMock(
+        return_value={"name": "Task_HB1", "content": "---\nstatus: in_progress\n---\n"}
+    )
+    wiki.create_page = AsyncMock()
+
+    actions, errors = await bot._fix_stale_heartbeats(wiki, stale_seconds=300)
+
+    assert actions == 1
+    assert errors == []
+    wiki.transition_task.assert_awaited_once_with("Task_HB1", "failed")
+
+
+@pytest.mark.asyncio
+async def test_fix_stale_heartbeats_skips_fresh_task() -> None:
+    """A task with a recent heartbeat is not transitioned."""
+    bot = _make_bot(heartbeat_stale_seconds=300)
+    task = _task_with_heartbeat("Task_HB2", age_seconds=60)  # 1 min ago
+
+    wiki = AsyncMock()
+    wiki.list_tasks = AsyncMock(return_value=[task])
+    wiki.transition_task = AsyncMock()
+
+    actions, errors = await bot._fix_stale_heartbeats(wiki, stale_seconds=300)
+
+    assert actions == 0
+    assert errors == []
+    wiki.transition_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fix_stale_heartbeats_skips_task_without_heartbeat() -> None:
+    """A task with no last_heartbeat is left for Rule 1 to handle."""
+    bot = _make_bot(heartbeat_stale_seconds=300)
+    task = {
+        "name": "Task_NoHB",
+        "metadata": {"status": "in_progress"},  # no last_heartbeat
+    }
+
+    wiki = AsyncMock()
+    wiki.list_tasks = AsyncMock(return_value=[task])
+    wiki.transition_task = AsyncMock()
+
+    actions, errors = await bot._fix_stale_heartbeats(wiki, stale_seconds=300)
+
+    assert actions == 0
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_fix_stale_heartbeats_list_tasks_error() -> None:
+    """list_tasks failure is captured in errors, not raised."""
+    bot = _make_bot(heartbeat_stale_seconds=300)
+    wiki = AsyncMock()
+    wiki.list_tasks = AsyncMock(side_effect=httpx.HTTPError("boom"))
+
+    actions, errors = await bot._fix_stale_heartbeats(wiki, stale_seconds=300)
+
+    assert actions == 0
+    assert len(errors) == 1
+    assert "boom" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_fix_stale_heartbeats_transition_error_captured() -> None:
+    """If transition_task raises, the error is captured and the loop continues."""
+    bot = _make_bot(heartbeat_stale_seconds=300)
+    t1 = _task_with_heartbeat("Task_X", age_seconds=600)
+    t2 = _task_with_heartbeat("Task_Y", age_seconds=600)
+
+    wiki = AsyncMock()
+    wiki.list_tasks = AsyncMock(return_value=[t1, t2])
+
+    async def _flaky_transition(name: str, status: str) -> None:
+        if name == "Task_X":
+            raise httpx.HTTPError("422")
+
+    wiki.transition_task = AsyncMock(side_effect=_flaky_transition)
+    wiki.get_page = AsyncMock(
+        return_value={"name": "_", "content": "---\nstatus: in_progress\n---\n"}
+    )
+    wiki.create_page = AsyncMock()
+
+    actions, errors = await bot._fix_stale_heartbeats(wiki, stale_seconds=300)
+
+    assert actions == 1  # Task_Y succeeded
+    assert len(errors) == 1
+    assert "Task_X" in errors[0]

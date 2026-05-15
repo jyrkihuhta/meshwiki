@@ -86,6 +86,7 @@ class BookkeeperBot(BaseBot):
         self._stale_hours = (
             stale_hours if stale_hours is not None else settings.bookkeeper_stale_hours
         )
+        self._heartbeat_stale_seconds = settings.worker_heartbeat_stale_seconds
 
     async def run(self) -> BotResult:
         """Execute one bookkeeper reconciliation cycle."""
@@ -99,6 +100,12 @@ class BookkeeperBot(BaseBot):
             )
             actions += stuck_actions
             errors.extend(stuck_errors)
+
+            heartbeat_actions, heartbeat_errors = await self._fix_stale_heartbeats(
+                wiki, self._heartbeat_stale_seconds
+            )
+            actions += heartbeat_actions
+            errors.extend(heartbeat_errors)
 
             merged_actions, merged_errors = await self._fix_merged_prs(wiki, github)
             actions += merged_actions
@@ -189,6 +196,71 @@ class BookkeeperBot(BaseBot):
                 actions += 1
             except Exception as exc:
                 err = f"failed to transition {page_name} to failed: {exc}"
+                logger.error("bookkeeper: %s", err)
+                errors.append(err)
+
+        return actions, errors
+
+    # ------------------------------------------------------------------
+    # Rule 1b: stale heartbeat → failed (silent stall detection)
+    # ------------------------------------------------------------------
+
+    async def _fix_stale_heartbeats(
+        self,
+        wiki: MeshWikiClient,
+        stale_seconds: int,
+    ) -> tuple[int, list[str]]:
+        """Transition in_progress tasks whose heartbeat is too old to ``failed``.
+
+        Complements Rule 1 with a tighter, more reliable signal. Rule 1 watches
+        the ``modified`` timestamp and waits hours; Rule 1b watches
+        ``last_heartbeat`` (written every 60s by ``WorkerHeartbeatBot``) and
+        fires in minutes. Catches silent stalls — orchestrator alive but the
+        specific graph task is hung on an LLM call or a dead sandbox.
+
+        Tasks without a ``last_heartbeat`` are skipped: that's either a task
+        from before heartbeats were enabled, or a task whose first heartbeat
+        cycle hasn't completed yet. Rule 1's 2h window catches those.
+        """
+        actions = 0
+        errors: list[str] = []
+
+        try:
+            tasks = await wiki.list_tasks(status="in_progress")
+        except Exception as exc:
+            errors.append(f"list_tasks(in_progress) failed: {exc}")
+            return actions, errors
+
+        now = datetime.now(tz=timezone.utc)
+        for task in tasks:
+            page_name: str = task.get("name", "")
+            if not page_name:
+                continue
+            metadata: dict = task.get("metadata", {})
+            heartbeat_raw = metadata.get("last_heartbeat")
+            heartbeat = _parse_updated_at(heartbeat_raw)
+            if heartbeat is None:
+                continue  # never heartbeated — leave to Rule 1
+            age_seconds = (now - heartbeat).total_seconds()
+            if age_seconds < stale_seconds:
+                continue
+            logger.warning(
+                "bookkeeper: %s heartbeat %.0fs stale (worker_id=%s) — "
+                "transitioning to failed",
+                page_name,
+                age_seconds,
+                metadata.get("worker_id", "?"),
+            )
+            note = (
+                f"\n- **{_now_utc_str()} UTC** — Bookkeeper: transitioned to "
+                f"`failed` (heartbeat stale for {int(age_seconds)}s, "
+                f"worker_id={metadata.get('worker_id', '?')})"
+            )
+            try:
+                await self._transition_with_log(wiki, page_name, "failed", note)
+                actions += 1
+            except Exception as exc:
+                err = f"failed to transition {page_name} to failed (heartbeat): {exc}"
                 logger.error("bookkeeper: %s", err)
                 errors.append(err)
 

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -21,6 +22,7 @@ from .bots.registry import BotRegistry
 from .bots.scheduler import SchedulerBot
 from .bots.stale_pr_bot import StalePRBot
 from .bots.terminal_review import TerminalReviewBot
+from .bots.worker_heartbeat import WorkerHeartbeatBot
 from .config import FACTORY_MAX_CONCURRENT_SANDBOXES, get_settings, validate_settings
 from .graph import build_graph
 from .hbr import get_hbr
@@ -238,10 +240,18 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     validate_settings(settings)
 
+    # Per-orchestrator instance ID. Written to each in-flight task's page
+    # frontmatter by WorkerHeartbeatBot. If this orchestrator dies and a
+    # different one inherits its tasks, the new worker_id signals the
+    # transition; bookkeeper uses last_heartbeat staleness to release.
+    app.state.worker_id = str(uuid.uuid4())
+    logger.info("factory: worker_id=%s", app.state.worker_id)
+
     # Build bot registry
     bot_registry = BotRegistry()
     bot_registry.register(BookkeeperBot())
     bot_registry.register(TerminalReviewBot())
+    bot_registry.register(WorkerHeartbeatBot(worker_id=app.state.worker_id))
     if settings.scheduler_enabled:
         bot_registry.register(SchedulerBot())
         logger.info(

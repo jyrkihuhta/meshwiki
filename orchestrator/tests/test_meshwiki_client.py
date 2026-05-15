@@ -134,3 +134,73 @@ async def test_list_tasks_filtered_by_status(client: MeshWikiClient) -> None:
     result = await client.list_tasks(status="in_progress")
     assert result == tasks
     assert "status=in_progress" in str(route.calls[0].request.url)
+
+
+# ---------------------------------------------------------------------------
+# update_metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_metadata_patches_frontmatter(client: MeshWikiClient) -> None:
+    """update_metadata reads the page, patches frontmatter, writes back."""
+    current = (
+        "---\n"
+        "status: in_progress\n"
+        "assignee: factory\n"
+        "---\n"
+        "Body text remains.\n"
+    )
+    respx.get(f"{BASE_URL}/api/v1/pages/Task_HB").mock(
+        return_value=httpx.Response(
+            200, json={"name": "Task_HB", "content": current}
+        )
+    )
+    respx.put(f"{BASE_URL}/api/v1/pages/Task_HB").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+
+    await client.update_metadata(
+        "Task_HB",
+        {"worker_id": "abc-123", "last_heartbeat": "2026-05-15T10:00:00Z"},
+    )
+    last = respx.calls.last
+    import json
+
+    payload = json.loads(last.request.read())
+    assert payload["name"] == "Task_HB"
+    body = payload["content"]
+    assert "worker_id: abc-123" in body
+    assert "last_heartbeat:" in body
+    # Pre-existing fields preserved
+    assert "status: in_progress" in body
+    assert "assignee: factory" in body
+    # Body content preserved
+    assert "Body text remains." in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_metadata_missing_page(client: MeshWikiClient) -> None:
+    """update_metadata raises ValueError when the page doesn't exist."""
+    respx.get(f"{BASE_URL}/api/v1/pages/Missing").mock(
+        return_value=httpx.Response(404)
+    )
+
+    with pytest.raises(ValueError, match="Page not found"):
+        await client.update_metadata("Missing", {"worker_id": "x"})
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_metadata_skips_write_when_unchanged(
+    client: MeshWikiClient,
+) -> None:
+    """If fields already match, no POST is issued (saves a round-trip)."""
+    current = "---\nworker_id: abc-123\n---\n"
+    respx.get(f"{BASE_URL}/api/v1/pages/T").mock(
+        return_value=httpx.Response(200, json={"name": "T", "content": current})
+    )
+    # No POST mock — would fail if a write was attempted
+    await client.update_metadata("T", {"worker_id": "abc-123"})

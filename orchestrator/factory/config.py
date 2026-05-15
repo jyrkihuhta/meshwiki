@@ -76,6 +76,17 @@ class Settings(BaseSettings):
         # every node, so a hard cancel after timeout still leaves resumable
         # state — this is purely to reduce wasted work on a planned restart.
     )
+    worker_heartbeat_interval_seconds: int = (
+        60  # FACTORY_WORKER_HEARTBEAT_INTERVAL_SECONDS — cadence at which the
+        # heartbeat bot writes worker_id+last_heartbeat to each in-flight
+        # graph task's MeshWiki page
+    )
+    worker_heartbeat_stale_seconds: int = (
+        300  # FACTORY_WORKER_HEARTBEAT_STALE_SECONDS — bookkeeper transitions
+        # in_progress tasks with a heartbeat older than this to failed.
+        # Tighter than bookkeeper_stale_hours (2h) because heartbeats are a
+        # liveness signal, not a "task hasn't changed" signal.
+    )
     bookkeeper_stale_hours: float = (
         2.0  # FACTORY_BOOKKEEPER_STALE_HOURS — age threshold for stuck in_progress tasks
     )
