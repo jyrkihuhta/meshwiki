@@ -136,7 +136,7 @@
   var ws = new WebSocket(proto + "//" + location.host + "/ws/graph");
   var debounce;
 
-  var currentPage = {{ page.name | tojson }};
+  var currentPage = {{ page.name.replace(' ', '_') | tojson }};
   ws.addEventListener("message", function (ev) {
     try {
       var msg = JSON.parse(ev.data);
