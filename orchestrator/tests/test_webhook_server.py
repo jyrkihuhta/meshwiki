@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from factory.webhook_server import _clear_stuck_grinders, _drain_graph_tasks, app
+from factory.webhook_server import (
+    _clear_stuck_grinders,
+    _drain_graph_tasks,
+    _resume_interrupted_tasks,
+    app,
+)
 
 
 @pytest.fixture
@@ -389,3 +394,135 @@ async def test_drain_graph_tasks_mixed_fast_and_slow() -> None:
     assert slow_task.cancelled() or isinstance(
         slow_task.exception(), asyncio.CancelledError
     )
+
+
+# ---------------------------------------------------------------------------
+# _resume_interrupted_tasks — Layer 1 no-checkpoint fallback
+# ---------------------------------------------------------------------------
+
+
+class _FakeMeshWikiClient:
+    """Test double for MeshWikiClient: returns canned tasks, records transitions."""
+
+    def __init__(self, tasks: list[dict]) -> None:
+        self.tasks = tasks
+        self.transitions: list[tuple[str, str, dict | None]] = []
+
+    def __call__(self, *_a, **_kw):  # MeshWikiClient(url, key) instantiation
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def list_tasks(self, status: str | None = None, **_kw) -> list[dict]:
+        return [t for t in self.tasks if t["metadata"].get("status") == status]
+
+    async def transition_task(
+        self, name: str, status: str, extra_fields: dict | None = None
+    ) -> dict:
+        self.transitions.append((name, status, extra_fields))
+        return {"name": name, "metadata": {"status": status}}
+
+
+def _factory_task(name: str, status: str, uuid: str | None = None) -> dict:
+    md = {"status": status, "assignee": "factory"}
+    if uuid:
+        md["uuid"] = uuid
+    return {"name": name, "metadata": md}
+
+
+@pytest.mark.asyncio
+async def test_resume_no_checkpoint_in_progress_marked_failed(monkeypatch) -> None:
+    """An in_progress task with no checkpoint is auto-transitioned to failed."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_A", "in_progress")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)  # no checkpoint
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert len(fake.transitions) == 1
+    name, status, fields = fake.transitions[0]
+    assert name == "Task_A"
+    assert status == "failed"
+    assert "factory_note" in (fields or {})
+
+
+@pytest.mark.asyncio
+async def test_resume_no_checkpoint_review_left_alone(monkeypatch) -> None:
+    """A review-status task with no checkpoint is NOT auto-failed (stale-pr owns it)."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_B", "review")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert fake.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_resume_with_checkpoint_does_not_auto_fail(monkeypatch) -> None:
+    """When a checkpoint IS found, the task is resumed (no transition)."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_C", "in_progress")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    graph.ainvoke = AsyncMock(return_value=None)
+    saver = MagicMock()
+    # Return a non-None checkpoint tuple so the resume path is taken
+    saver.aget_tuple = AsyncMock(return_value=MagicMock())
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert fake.transitions == []  # no auto-fail
+
+
+@pytest.mark.asyncio
+async def test_resume_transition_failure_is_logged_not_fatal(monkeypatch) -> None:
+    """If transition_task raises, the resume loop continues to the next task."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([
+        _factory_task("Task_D", "in_progress"),
+        _factory_task("Task_E", "in_progress"),
+    ])
+
+    async def _boom(name, status, extra_fields=None):
+        fake.transitions.append((name, status, extra_fields))
+        if name == "Task_D":
+            raise RuntimeError("422 not allowed")
+        return {"name": name, "metadata": {"status": status}}
+
+    fake.transition_task = _boom
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    # Should not raise even though Task_D's transition blows up
+    await _resume_interrupted_tasks(graph, saver, settings)
+    # Both tasks were attempted
+    assert {t[0] for t in fake.transitions} == {"Task_D", "Task_E"}

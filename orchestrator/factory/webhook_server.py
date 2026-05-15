@@ -121,9 +121,49 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
                 config = {"configurable": {"thread_id": page_name}}
                 checkpoint_tuple = await saver.aget_tuple(config)
             if checkpoint_tuple is None:
-                logger.info(
-                    "factory: no checkpoint for %s — skipping resume", page_name
+                # No saved state to resume from. For `in_progress` tasks this
+                # means the task was claimed but the orchestrator never wrote
+                # a checkpoint before dying — almost always a crash before the
+                # first graph node completed. Mark them `failed` so the next
+                # scheduler tick re-queues fresh attempts instead of waiting
+                # the bookkeeper's 2h stale window. For `review` tasks we
+                # leave the page alone — a PR is live and stale-pr / ci-fixer
+                # bots own that lifecycle.
+                current_status = (
+                    (task.get("metadata") or {}).get("status") or task.get("status")
                 )
+                if current_status == "in_progress":
+                    logger.info(
+                        "factory: no checkpoint for %s — marking failed "
+                        "(orchestrator crashed pre-checkpoint)",
+                        page_name,
+                    )
+                    try:
+                        await client.transition_task(
+                            page_name,
+                            "failed",
+                            extra_fields={
+                                "factory_note": (
+                                    "Auto-failed on orchestrator startup: "
+                                    "no LangGraph checkpoint found for this "
+                                    "in_progress task. Re-queue by editing "
+                                    "status to planned."
+                                ),
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "factory: could not transition %s to failed: %s",
+                            page_name,
+                            exc,
+                        )
+                else:
+                    logger.info(
+                        "factory: no checkpoint for %s (status=%s) — "
+                        "skipping resume",
+                        page_name,
+                        current_status,
+                    )
                 continue
 
             await _clear_stuck_grinders(graph, config, page_name)
