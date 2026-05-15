@@ -133,7 +133,9 @@
 <script>
 (function () {
   var proto = location.protocol === "https:" ? "wss:" : "ws:";
-  var ws = new WebSocket(proto + "//" + location.host + "/ws/graph");
+  // Store on window so base.html's htmx:beforeSwap handler can close it on navigation.
+  window._meshwikiWS = new WebSocket(proto + "//" + location.host + "/ws/graph");
+  var ws = window._meshwikiWS;
   var debounce;
 
   var currentPage = {{ page.name.replace(' ', '_') | tojson }};

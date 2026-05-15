@@ -13,7 +13,7 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="/static/js/hover_card.js"></script>
 </head>
-<body>
+<body hx-boost="true">
     {% macro render_tree(nodes, level=0) %}
     <ul class="page-tree-list" role="list">
         {% for node in nodes %}
@@ -73,7 +73,7 @@
                 <a href="/page/Home/edit">New Page</a>
                 <button type="button" id="theme-toggle" class="btn btn-theme" aria-label="Toggle dark mode">Dark</button>
                 {% if request.session.get("authenticated") %}
-                <form method="post" action="/logout" style="display:inline">
+                <form method="post" action="/logout" style="display:inline" hx-boost="false">
                     <button type="submit" class="btn btn-theme">Logout</button>
                 </form>
                 {% endif %}
@@ -97,45 +97,48 @@
     <div id="loading-bar" class="loading-bar"></div>
     <div id="toast-container" class="toast-container" aria-live="polite"></div>
     <script>
-    (function(){
-        // Theme toggle
-        var btn = document.getElementById('theme-toggle');
-        if (!btn) return;
-        var current = document.documentElement.getAttribute('data-theme') || 'light';
-        btn.textContent = current === 'dark' ? 'Light' : 'Dark';
-        btn.addEventListener('click', function() {
-            var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-            document.documentElement.setAttribute('data-theme', theme);
-            localStorage.setItem('meshwiki-theme', theme);
-            btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-            // Switch highlight.js theme
-            var hljsLink = document.getElementById('hljs-theme');
-            if (hljsLink) {
-                hljsLink.href = theme === 'dark'
-                    ? 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css'
-                    : 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+    // ── One-time setup: persists across hx-boost navigations ─────────────────
+    // document.body element is NOT replaced on boost swaps (only innerHTML is),
+    // so _mwInited persists and prevents duplicate listener registration.
+    if (!document.body._mwInited) {
+        document.body._mwInited = true;
+
+        // Re-highlight code blocks after any HTMX content swap
+        document.body.addEventListener('htmx:afterSwap', function(e) {
+            if (typeof hljs !== 'undefined') {
+                e.target.querySelectorAll('pre code').forEach(function(block) {
+                    hljs.highlightElement(block);
+                });
             }
         });
-    })();
-    // Mobile nav toggle
-    (function(){
-        var toggle = document.querySelector('.nav-toggle');
-        var nav = document.querySelector('.nav');
-        if (toggle && nav) toggle.addEventListener('click', function() {
-            nav.classList.toggle('nav--open');
+
+        // Toast from HTMX HX-Trigger header
+        document.body.addEventListener('showToast', function(e) {
+            if (e.detail) showToast(e.detail.message, e.detail.type);
         });
-    })();
-    // Highlight code blocks on page load
-    if (typeof hljs !== 'undefined') hljs.highlightAll();
-    // Re-highlight after HTMX swaps (e.g. editor preview)
-    document.body.addEventListener('htmx:afterSwap', function(e) {
-        if (typeof hljs !== 'undefined') {
-            e.target.querySelectorAll('pre code').forEach(function(block) {
-                hljs.highlightElement(block);
-            });
-        }
-    });
-    // Toast notifications
+
+        // Loading bar
+        document.body.addEventListener('htmx:beforeRequest', function() {
+            var bar = document.getElementById('loading-bar');
+            if (bar) bar.className = 'loading-bar active';
+        });
+        document.body.addEventListener('htmx:afterRequest', function() {
+            var bar = document.getElementById('loading-bar');
+            if (bar) { bar.className = 'loading-bar done'; setTimeout(function() { bar.className = 'loading-bar'; }, 500); }
+        });
+
+        // Close the page-view WebSocket before each boosted navigation so stale
+        // handlers don't trigger fragment refreshes on the incoming page.
+        document.body.addEventListener('htmx:beforeSwap', function() {
+            if (window._meshwikiWS) {
+                try { window._meshwikiWS.close(1000); } catch(e) {}
+                window._meshwikiWS = null;
+            }
+        });
+    }
+
+    // ── Per-page setup: runs on initial load and after every hx-boost swap ───
+    // Toast notifications helper (redefined each time — cheap and safe)
     window.showToast = function(message, type) {
         var container = document.getElementById('toast-container');
         var el = document.createElement('div');
@@ -147,7 +150,40 @@
             el.addEventListener('animationend', function() { el.remove(); });
         }, 4000);
     };
-    // Handle toast from redirect query param
+
+    // Theme toggle (element is replaced on each swap, so re-bind each time)
+    (function(){
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        var current = document.documentElement.getAttribute('data-theme') || 'light';
+        btn.textContent = current === 'dark' ? 'Light' : 'Dark';
+        btn.addEventListener('click', function() {
+            var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('meshwiki-theme', theme);
+            btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
+            var hljsLink = document.getElementById('hljs-theme');
+            if (hljsLink) {
+                hljsLink.href = theme === 'dark'
+                    ? 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css'
+                    : 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+            }
+        });
+    })();
+
+    // Mobile nav toggle
+    (function(){
+        var toggle = document.querySelector('.nav-toggle');
+        var nav = document.querySelector('.nav');
+        if (toggle && nav) toggle.addEventListener('click', function() {
+            nav.classList.toggle('nav--open');
+        });
+    })();
+
+    // Highlight code blocks on this page
+    if (typeof hljs !== 'undefined') hljs.highlightAll();
+
+    // Handle toast from redirect query param (e.g. ?toast=saved)
     (function(){
         var url = new URL(window.location);
         var toast = url.searchParams.get('toast');
@@ -158,29 +194,13 @@
             showToast(messages[toast] || toast, 'success');
         }
     })();
-    // Handle toast from HTMX HX-Trigger header
-    document.body.addEventListener('showToast', function(e) {
-        if (e.detail) showToast(e.detail.message, e.detail.type);
-    });
-    // Loading bar for HTMX requests
-    (function(){
-        var bar = document.getElementById('loading-bar');
-        document.body.addEventListener('htmx:beforeRequest', function() {
-            bar.className = 'loading-bar active';
-        });
-        document.body.addEventListener('htmx:afterRequest', function() {
-            bar.className = 'loading-bar done';
-            setTimeout(function() { bar.className = 'loading-bar'; }, 500);
-        });
-    })();
+
     // Page tree current page highlighting and expansion state persistence
     (function(){
         var sidebar = document.getElementById('page-tree-sidebar') || document.getElementById('toc-sidebar');
         if (!sidebar) return;
         var currentPath = window.location.pathname;
         var storageKey = 'page-tree-expanded:' + currentPath;
-        
-        // Restore expanded state from sessionStorage
         try {
             var savedState = JSON.parse(sessionStorage.getItem(storageKey) || '[]');
             savedState.forEach(function(pageName) {
@@ -188,8 +208,6 @@
                 if (details) details.setAttribute('open', '');
             });
         } catch(e) {}
-        
-        // Highlight current page and expand its ancestors
         var links = sidebar.querySelectorAll('.page-tree-link');
         links.forEach(function(link) {
             var href = link.getAttribute('href');
@@ -199,21 +217,14 @@
                 if (details) details.setAttribute('open', '');
             }
         });
-        
-        // Save expansion state when details are toggled
         sidebar.addEventListener('toggle', function(e) {
             if (e.target.tagName !== 'DETAILS') return;
             var openPages = [];
             sidebar.querySelectorAll('.page-tree-details[open]').forEach(function(d) {
                 var link = d.querySelector('.page-tree-link');
-                if (link) {
-                    var href = link.getAttribute('href');
-                    openPages.push(href);
-                }
+                if (link) openPages.push(link.getAttribute('href'));
             });
-            try {
-                sessionStorage.setItem(storageKey, JSON.stringify(openPages));
-            } catch(e) {}
+            try { sessionStorage.setItem(storageKey, JSON.stringify(openPages)); } catch(e) {}
         });
     })();
     </script>
