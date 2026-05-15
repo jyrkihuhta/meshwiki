@@ -136,10 +136,11 @@
   var ws = new WebSocket(proto + "//" + location.host + "/ws/graph");
   var debounce;
 
+  var currentPage = {{ page.name | tojson }};
   ws.addEventListener("message", function (ev) {
     try {
       var msg = JSON.parse(ev.data);
-      if (msg.type === "page_updated") {
+      if (msg.type === "page_updated" && msg.page === currentPage) {
         // Debounce: wait 800ms after the last event before refreshing.
         clearTimeout(debounce);
         debounce = setTimeout(function () {
