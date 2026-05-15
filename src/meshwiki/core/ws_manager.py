@@ -5,12 +5,18 @@ connected WebSocket clients via per-client asyncio queues.
 """
 
 import asyncio
+import time
 from typing import Any
 
 from meshwiki.core.graph import get_engine
 from meshwiki.core.logging import get_logger
 
 log = get_logger(__name__)
+
+# Minimum seconds between broadcasts of the same page_updated event.
+# Prevents event floods (e.g. inotify IN_ATTRIB storms on Docker bind mounts)
+# from spamming fragment refreshes in connected browsers.
+_PAGE_EVENT_DEDUP_SECS = 10.0
 
 
 def _event_to_dict(event: Any) -> dict[str, Any]:
@@ -32,6 +38,7 @@ class ConnectionManager:
         self._next_id: int = 0
         self._poll_task: asyncio.Task | None = None
         self._running: bool = False
+        self._last_page_broadcast: dict[str, float] = {}
 
     def connect(self) -> tuple[int, asyncio.Queue[dict[str, Any]]]:
         """Register a new client. Returns (client_id, queue)."""
@@ -86,6 +93,13 @@ class ConnectionManager:
 
     async def _broadcast(self, msg: dict[str, Any]) -> None:
         """Send a message to all connected clients."""
+        if msg.get("type") == "page_updated":
+            page = msg.get("page", "")
+            now = time.monotonic()
+            if now - self._last_page_broadcast.get(page, 0.0) < _PAGE_EVENT_DEDUP_SECS:
+                return
+            self._last_page_broadcast[page] = now
+
         for client_id, queue in list(self._clients.items()):
             try:
                 queue.put_nowait(msg)
