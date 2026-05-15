@@ -16,7 +16,7 @@ log = get_logger(__name__)
 # Minimum seconds between broadcasts of the same page_updated event.
 # Prevents event floods (e.g. inotify IN_ATTRIB storms on Docker bind mounts)
 # from spamming fragment refreshes in connected browsers.
-_PAGE_EVENT_DEDUP_SECS = 10.0
+_PAGE_EVENT_DEDUP_SECS = 60.0
 
 
 def _event_to_dict(event: Any) -> dict[str, Any]:
