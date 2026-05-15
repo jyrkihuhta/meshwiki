@@ -422,6 +422,73 @@ async def hbr_status(request: Request) -> dict:
     return result
 
 
+@app.get("/tasks")
+async def tasks(
+    request: Request,
+    status: str | None = None,
+    assignee: str | None = None,
+    repo: str | None = None,
+    parent_task: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Factory task inventory: counts by status + most recently modified.
+
+    Query params:
+      - status / assignee / repo / parent_task: filter the underlying
+        MeshWiki task query (forwarded to ``MeshWikiClient.list_tasks``).
+      - limit: how many recently-modified tasks to include in the
+        ``recent`` list (default 20). The full ``items`` list is always
+        returned so callers can paginate client-side.
+
+    Response shape::
+
+        {
+          "total": 73,
+          "by_status": {"planned": 8, "in_progress": 2, ...},
+          "recent": [
+            {"name": "...", "status": "...", "title": "...", "modified": "..."},
+            ...
+          ],
+          "items": [<full task dicts as returned by MeshWiki>]
+        }
+    """
+    settings = get_settings()
+    async with MeshWikiClient(
+        settings.meshwiki_url, settings.meshwiki_api_key
+    ) as client:
+        items = await client.list_tasks(
+            status=status, assignee=assignee, repo=repo, parent_task=parent_task,
+        )
+
+    by_status: dict[str, int] = {}
+    for t in items:
+        s = (t.get("metadata") or {}).get("status") or "unknown"
+        by_status[s] = by_status.get(s, 0) + 1
+
+    def _modified(t: dict) -> str:
+        return (t.get("metadata") or {}).get("modified") or ""
+
+    recent = sorted(items, key=_modified, reverse=True)[: max(0, limit)]
+    recent_view = [
+        {
+            "name": t.get("name"),
+            "status": (t.get("metadata") or {}).get("status"),
+            "title": (t.get("metadata") or {}).get("title"),
+            "repo": (t.get("metadata") or {}).get("repository")
+            or (t.get("metadata") or {}).get("repo"),
+            "modified": _modified(t),
+        }
+        for t in recent
+    ]
+
+    return {
+        "total": len(items),
+        "by_status": by_status,
+        "recent": recent_view,
+        "items": items,
+    }
+
+
 @app.post("/webhook")
 async def receive_webhook(
     request: Request,

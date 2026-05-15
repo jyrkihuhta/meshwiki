@@ -134,6 +134,99 @@ def test_webhook_valid_hmac(client: TestClient, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /tasks
+# ---------------------------------------------------------------------------
+
+
+_FAKE_TASKS = [
+    {"name": "Task_0001", "metadata": {
+        "status": "planned", "title": "A", "modified": "2026-05-10T00:00:00",
+    }},
+    {"name": "Task_0002", "metadata": {
+        "status": "in_progress", "title": "B", "modified": "2026-05-15T07:42:00",
+        "repository": "jyrkihuhta/molly-armory",
+    }},
+    {"name": "Task_0003", "metadata": {
+        "status": "planned", "title": "C", "modified": "2026-05-14T12:00:00",
+    }},
+    {"name": "Task_0004", "metadata": {
+        "status": "merged", "title": "D", "modified": "2026-05-13T00:00:00",
+    }},
+]
+
+
+def test_tasks_summary_and_recent_order(client: TestClient, monkeypatch) -> None:
+    """GET /tasks returns counts by status + recent items in modified-desc order."""
+    from factory import webhook_server as ws
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **_kw): return list(_FAKE_TASKS)
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _FakeClient)
+
+    resp = client.get("/tasks?limit=2")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 4
+    assert body["by_status"] == {"planned": 2, "in_progress": 1, "merged": 1}
+    # limit=2, sorted by modified desc → Task_0002 (May 15) then Task_0003 (May 14)
+    assert [r["name"] for r in body["recent"]] == ["Task_0002", "Task_0003"]
+    assert body["recent"][0]["repo"] == "jyrkihuhta/molly-armory"
+
+
+def test_tasks_filter_forwarded_to_list_tasks(client: TestClient, monkeypatch) -> None:
+    """Query params propagate to MeshWikiClient.list_tasks."""
+    from factory import webhook_server as ws
+
+    captured: dict = {}
+
+    class _CapturingClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **kw):
+            captured.update(kw)
+            return [_FAKE_TASKS[1]]  # only the in_progress one
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _CapturingClient)
+
+    resp = client.get("/tasks?status=in_progress&repo=jyrkihuhta/molly-armory")
+    assert resp.status_code == 200
+    assert captured == {
+        "status": "in_progress",
+        "assignee": None,
+        "repo": "jyrkihuhta/molly-armory",
+        "parent_task": None,
+    }
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["by_status"] == {"in_progress": 1}
+
+
+def test_tasks_handles_missing_metadata(client: TestClient, monkeypatch) -> None:
+    """Tasks with no metadata bucket under 'unknown' and don't crash sorting."""
+    from factory import webhook_server as ws
+
+    class _SparseClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **_kw):
+            return [
+                {"name": "Sparse_1"},
+                {"name": "Sparse_2", "metadata": {}},
+            ]
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _SparseClient)
+    resp = client.get("/tasks")
+    assert resp.status_code == 200
+    assert resp.json()["by_status"] == {"unknown": 2}
+
+
+# ---------------------------------------------------------------------------
 # _clear_stuck_grinders
 # ---------------------------------------------------------------------------
 
