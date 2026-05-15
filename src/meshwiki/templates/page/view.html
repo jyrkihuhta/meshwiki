@@ -46,6 +46,7 @@
                 <h4 class="frontmatter-card-header">Properties<button class="frontmatter-card-toggle" aria-label="Toggle properties"></button></h4>
                 <dl class="frontmatter-dl">
                     {% for key, values in frontmatter.items() %}
+                    {% if key not in ('children', 'uuid', 'created', 'modified', 'name') %}
                     <div class="frontmatter-row">
                         <dt>{{ key }}</dt>
                         <dd>
@@ -60,6 +61,7 @@
                             {% endif %}
                         </dd>
                     </div>
+                    {% endif %}
                     {% endfor %}
                 </dl>
             </aside>
@@ -138,7 +140,7 @@
   var ws = window._meshwikiWS;
   var debounce;
 
-  var currentPage = {{ page.name.replace(' ', '_') | tojson }};
+  var currentPage = {{ page.name | tojson }};
   ws.addEventListener("message", function (ev) {
     try {
       var msg = JSON.parse(ev.data);
