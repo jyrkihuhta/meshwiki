@@ -150,6 +150,48 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
             resume_task.add_done_callback(_log_exc)
 
 
+async def _drain_graph_tasks(timeout_seconds: float) -> None:
+    """Wait for in-flight ``graph:*`` asyncio tasks to finish their current node.
+
+    Called from the lifespan shutdown path so a SIGTERM (e.g. ``docker restart``)
+    doesn't kill graph runs mid-LLM-call. LangGraph writes a checkpoint after
+    every node, so tasks that don't finish in time are cancelled but resume
+    cleanly from the last completed node on the next startup via
+    ``_resume_interrupted_tasks``.
+    """
+    pending = [
+        t
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("graph:") and not t.done()
+    ]
+    if not pending:
+        logger.info("factory: shutdown — no in-flight graph tasks to drain")
+        return
+
+    logger.info(
+        "factory: shutdown — draining %d in-flight graph task(s) "
+        "with timeout=%.1fs",
+        len(pending),
+        timeout_seconds,
+    )
+    done, still_running = await asyncio.wait(pending, timeout=timeout_seconds)
+    logger.info(
+        "factory: shutdown — %d graph task(s) completed gracefully, "
+        "%d cancelled (will resume on next startup)",
+        len(done),
+        len(still_running),
+    )
+    # Cancel anything that didn't finish so the event loop can exit cleanly.
+    for t in still_running:
+        t.cancel()
+    # Give cancelled tasks a brief window to unwind before lifespan returns.
+    if still_running:
+        try:
+            await asyncio.wait(still_running, timeout=2.0)
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Open the SQLite checkpoint DB, build the graph, start bots, close on shutdown."""
@@ -208,7 +250,12 @@ async def lifespan(app: FastAPI):
         await _resume_interrupted_tasks(app.state.graph, saver, settings)
         await bot_registry.start_all()
         yield
+        # Shutdown order:
+        # 1. Stop bots first so they don't dispatch *new* work mid-drain.
+        # 2. Drain in-flight graph tasks (wait for checkpoint-boundary completion).
+        # 3. Close the SQLite saver via the async-with exit.
         await bot_registry.stop_all()
+        await _drain_graph_tasks(settings.graph_shutdown_timeout_seconds)
     logger.info("factory: SQLite checkpointer closed")
 
 

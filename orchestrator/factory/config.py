@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     bookkeeper_interval_seconds: int = (
         300  # FACTORY_BOOKKEEPER_INTERVAL_SECONDS — how often the bookkeeper runs
     )
+    graph_shutdown_timeout_seconds: float = (
+        30.0  # FACTORY_GRAPH_SHUTDOWN_TIMEOUT_SECONDS — on shutdown, wait this
+        # long for in-flight graph asyncio tasks to reach a checkpoint
+        # boundary before cancelling. LangGraph writes a checkpoint after
+        # every node, so a hard cancel after timeout still leaves resumable
+        # state — this is purely to reduce wasted work on a planned restart.
+    )
     bookkeeper_stale_hours: float = (
         2.0  # FACTORY_BOOKKEEPER_STALE_HOURS — age threshold for stuck in_progress tasks
     )

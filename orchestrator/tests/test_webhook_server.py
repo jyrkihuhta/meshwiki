@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from factory.webhook_server import _clear_stuck_grinders, app
+from factory.webhook_server import _clear_stuck_grinders, _drain_graph_tasks, app
 
 
 @pytest.fixture
@@ -311,3 +312,80 @@ async def test_clear_stuck_grinders_empty_state() -> None:
     await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
 
     graph.aupdate_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _drain_graph_tasks — Layer 3 graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_no_tasks() -> None:
+    """Drain returns immediately when no graph tasks are active."""
+    # No tasks named `graph:*` running — should be a no-op.
+    await _drain_graph_tasks(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_waits_for_completion() -> None:
+    """A fast-completing graph task finishes gracefully within the timeout."""
+    async def fast_node():
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    task = asyncio.create_task(fast_node(), name="graph:fast-task")
+    await _drain_graph_tasks(timeout_seconds=1.0)
+    assert task.done()
+    assert not task.cancelled()
+    assert task.result() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_cancels_on_timeout() -> None:
+    """A graph task that exceeds the timeout is cancelled, not left dangling."""
+    async def slow_node():
+        await asyncio.sleep(5)
+        return "should-not-reach"
+
+    task = asyncio.create_task(slow_node(), name="graph:slow-task")
+    await _drain_graph_tasks(timeout_seconds=0.1)
+    assert task.done() or task.cancelled()
+    # Should be cancelled, not have produced a result
+    assert task.cancelled() or isinstance(task.exception(), asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_ignores_non_graph_tasks() -> None:
+    """Tasks without a `graph:` prefix are not drained."""
+    async def bot_loop():
+        await asyncio.sleep(10)
+
+    bot = asyncio.create_task(bot_loop(), name="bot:bookkeeper")
+    try:
+        # Drain should ignore the bot task and return quickly
+        await asyncio.wait_for(_drain_graph_tasks(timeout_seconds=2.0), timeout=0.5)
+        assert not bot.done()
+    finally:
+        bot.cancel()
+        try:
+            await bot
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_mixed_fast_and_slow() -> None:
+    """Some tasks finish in time, others are cancelled — drain handles both."""
+    async def fast(): await asyncio.sleep(0.05)
+    async def slow(): await asyncio.sleep(5)
+
+    fast_task = asyncio.create_task(fast(), name="graph:a")
+    slow_task = asyncio.create_task(slow(), name="graph:b")
+
+    await _drain_graph_tasks(timeout_seconds=0.5)
+
+    assert fast_task.done() and not fast_task.cancelled()
+    assert slow_task.done()  # cancelled or finished
+    assert slow_task.cancelled() or isinstance(
+        slow_task.exception(), asyncio.CancelledError
+    )
