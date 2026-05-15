@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from meshwiki.auth import (
@@ -100,6 +101,9 @@ templates_path = Path(__file__).parent / "templates"
 static_path = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(templates_path))
+if not settings.debug:
+    templates.env.auto_reload = False
+    templates.env.cache_size = 400
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 
@@ -168,7 +172,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # Middleware stack (added in reverse — last added runs outermost):
-# LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware → AuthMiddleware
+# GZipMiddleware → LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware → AuthMiddleware
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
 app.add_middleware(
@@ -176,6 +180,7 @@ app.add_middleware(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 def timeago_filter(dt: datetime | None) -> str:
