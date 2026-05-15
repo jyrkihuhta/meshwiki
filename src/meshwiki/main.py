@@ -738,11 +738,25 @@ async def view_page(request: Request, name: str):
 
     # Fetch recent pages for <<RecentChanges>> macro.
     all_pages_for_recent = await page_cache.get_pages_metadata()
-    recent_pages = sorted(
-        [p for p in all_pages_for_recent if p.metadata.modified],
-        key=lambda p: p.metadata.modified,
-        reverse=True,
-    )
+    _engine = get_engine()
+    if _engine is not None:
+        # Use filesystem mtime from Rust engine (in-memory, covers all pages).
+        _ts: dict[str, float] = {
+            p.name: p.last_modified
+            for p in _engine.list_pages()
+            if p.last_modified is not None
+        }
+        recent_pages = sorted(
+            all_pages_for_recent,
+            key=lambda p: _ts.get(p.name, 0.0),
+            reverse=True,
+        )
+    else:
+        recent_pages = sorted(
+            [p for p in all_pages_for_recent if p.metadata.modified],
+            key=lambda p: p.metadata.modified,
+            reverse=True,
+        )
 
     # Fetch all page contents for <<Include>> macro.
     page_contents: dict[str, str] = {}
@@ -809,11 +823,23 @@ async def page_content_fragment(name: str, request: Request):
     page_metadata: dict = frontmatter if frontmatter else _storage_extra
 
     all_pages_for_recent = await page_cache.get_pages_metadata()
-    recent_pages = sorted(
-        [p for p in all_pages_for_recent if p.metadata.modified],
-        key=lambda p: p.metadata.modified,
-        reverse=True,
-    )
+    if engine is not None:
+        _ts2: dict[str, float] = {
+            p.name: p.last_modified
+            for p in engine.list_pages()
+            if p.last_modified is not None
+        }
+        recent_pages = sorted(
+            all_pages_for_recent,
+            key=lambda p: _ts2.get(p.name, 0.0),
+            reverse=True,
+        )
+    else:
+        recent_pages = sorted(
+            [p for p in all_pages_for_recent if p.metadata.modified],
+            key=lambda p: p.metadata.modified,
+            reverse=True,
+        )
 
     page_contents: dict[str, str] = {}
     if "<<Include(" in page.content:

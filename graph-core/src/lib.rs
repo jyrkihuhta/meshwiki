@@ -35,7 +35,7 @@ pub use watcher::{FileWatcher, WatcherHandle};
 /// Represents a wiki page in the graph.
 ///
 /// This is the Python-facing page info struct that contains
-/// the page name, file path, and frontmatter metadata.
+/// the page name, file path, frontmatter metadata, and last modification time.
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PageInfo {
@@ -51,6 +51,11 @@ pub struct PageInfo {
     /// Values are lists to support multi-value fields (e.g., tags)
     #[pyo3(get)]
     pub metadata: HashMap<String, Vec<String>>,
+
+    /// Last modification time as a Unix timestamp (seconds since epoch).
+    /// None if the modification time could not be determined.
+    #[pyo3(get)]
+    pub last_modified: Option<f64>,
 }
 
 #[pymethods]
@@ -61,6 +66,7 @@ impl PageInfo {
             name,
             file_path,
             metadata: HashMap::new(),
+            last_modified: None,
         }
     }
 
@@ -75,6 +81,7 @@ impl PageInfo {
             name,
             file_path,
             metadata,
+            last_modified: None,
         }
     }
 
@@ -88,10 +95,16 @@ impl PageInfo {
 
 impl From<&PageNode> for PageInfo {
     fn from(node: &PageNode) -> Self {
+        let last_modified = node
+            .last_modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs_f64());
         PageInfo {
             name: node.name.clone(),
             file_path: node.file_path.to_string_lossy().to_string(),
             metadata: node.metadata.clone(),
+            last_modified,
         }
     }
 }
