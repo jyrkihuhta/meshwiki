@@ -467,7 +467,7 @@ def page_exists_sync(name: str) -> bool:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Home page - list all pages."""
-    all_pages = await storage.list_pages_with_metadata()
+    all_pages = await page_cache.get_pages_metadata()
     recent_pages = sorted(
         [p for p in all_pages if p.metadata.modified],
         key=lambda p: p.metadata.modified,
@@ -996,7 +996,7 @@ async def api_page_preview(name: str):
 @app.post("/api/preview", response_class=HTMLResponse)
 async def api_preview(content: str = Form("")):
     """Render markdown preview for the editor."""
-    recent_pages = await storage.list_pages_with_metadata()
+    recent_pages = await page_cache.get_pages_metadata()
     html = parse_wiki_content(
         content,
         page_exists=page_exists_sync,
@@ -1092,7 +1092,7 @@ async def search_page(request: Request, q: str = "", tag: str = ""):
 @app.get("/tags", response_class=HTMLResponse)
 async def tags_page(request: Request):
     """Tag index page with counts."""
-    pages = await storage.list_pages_with_metadata()
+    pages = await page_cache.get_pages_metadata()
     tag_counts: dict[str, int] = {}
     for page in pages:
         for tag in page.metadata.tags:
@@ -1141,7 +1141,7 @@ async def factory_tasks(
     the factory_api_key auth requirement doesn't block unauthenticated browsers.
     """
     statuses_filter = {status} if status else None
-    pages = await storage.list_pages_with_metadata()
+    pages = await page_cache.get_pages_metadata()
     results = []
     for page in pages:
         extra = page.metadata.model_extra or {}

@@ -9,6 +9,20 @@ from httpx import ASGITransport, AsyncClient
 pytest_plugins = ["pytest_asyncio"]
 
 
+@pytest.fixture(autouse=True)
+def _clear_page_cache():
+    """Invalidate the page cache before and after every test.
+
+    Tests that patch storage.base_path would otherwise serve stale
+    cache entries populated by earlier tests in the same session.
+    """
+    from meshwiki.core import page_cache
+
+    page_cache.invalidate()
+    yield
+    page_cache.invalidate()
+
+
 @pytest.fixture()
 def wiki_app(tmp_path):
     """Create a fresh app instance pointing at a temp directory.
