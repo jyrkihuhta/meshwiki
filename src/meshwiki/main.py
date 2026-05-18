@@ -219,7 +219,7 @@ _revision_store = (
 )
 storage = FileStorage(settings.data_dir, revision_store=_revision_store)
 set_storage(storage)
-page_cache.invalidate()  # clear cache from any prior storage instance (e.g. test reloads)
+page_cache.hard_invalidate()  # clear cache from any prior storage instance (e.g. test reloads)
 if _revision_store is not None:
     set_revision_store(_revision_store)
 
@@ -895,7 +895,7 @@ async def delete_page(name: str):
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail="Page not found")
-    page_cache.invalidate()
+    page_cache.hard_invalidate()
     log.info("page_deleted", page=name)
     page_writes_total.labels(operation="delete").inc()
     return RedirectResponse(url="/?toast=deleted", status_code=302)
@@ -931,7 +931,7 @@ async def save_page(request: Request, name: str, content: str = Form("")):
                     pending_transition = (old_status, new_status)
 
     page = await storage.save_page(name, content)
-    page_cache.invalidate()
+    page_cache.hard_invalidate()
     log.info("page_saved", page=name)
     page_writes_total.labels(operation="save").inc()
 

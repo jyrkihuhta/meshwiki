@@ -18,9 +18,9 @@ def _clear_page_cache():
     """
     from meshwiki.core import page_cache
 
-    page_cache.invalidate()
+    page_cache.hard_invalidate()
     yield
-    page_cache.invalidate()
+    page_cache.hard_invalidate()
 
 
 @pytest.fixture()
