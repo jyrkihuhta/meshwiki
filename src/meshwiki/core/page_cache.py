@@ -24,6 +24,7 @@ _ENABLED: bool = os.getenv("MESHWIKI_PAGE_CACHE", "1") != "0"
 
 _lock: asyncio.Lock = asyncio.Lock()
 _pages_cache: list[Any] | None = None  # list[Page], typed loosely to avoid import cycle
+_tree_cache: list[Any] | None = None  # list[dict] page tree for sidebar
 
 
 async def get_pages_metadata() -> list["Page"]:
@@ -56,7 +57,22 @@ async def get_pages_metadata() -> list["Page"]:
     return _pages_cache  # type: ignore[return-value]
 
 
+async def get_page_tree() -> list[dict]:
+    """Return the sidebar page tree, from cache or computed from page list."""
+    global _tree_cache
+    if not _ENABLED or _tree_cache is None:
+        from meshwiki.main import build_page_tree_sync
+
+        pages = await get_pages_metadata()
+        tree = build_page_tree_sync(pages)
+        if _ENABLED:
+            _tree_cache = tree
+        return tree
+    return _tree_cache
+
+
 def invalidate() -> None:
-    """Clear the cached page list. Thread/coroutine-safe (just a pointer swap)."""
-    global _pages_cache
+    """Clear the cached page list and tree. Thread/coroutine-safe (just pointer swaps)."""
+    global _pages_cache, _tree_cache
     _pages_cache = None
+    _tree_cache = None

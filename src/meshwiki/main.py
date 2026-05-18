@@ -473,7 +473,7 @@ async def index(request: Request):
         key=lambda p: p.metadata.modified,
         reverse=True,
     )[:10]
-    page_tree = await get_page_tree()
+    page_tree = await page_cache.get_page_tree()
     return templates.TemplateResponse(
         request,
         "page/list.html",
@@ -506,7 +506,9 @@ async def edit_page(request: Request, name: str, template: str = ""):
         request,
         "page/edit.html",
         get_context(
-            page=page, raw_content=raw_content, page_tree=await get_page_tree()
+            page=page,
+            raw_content=raw_content,
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -541,7 +543,7 @@ async def page_history(request: Request, name: str, page: int = 1):
             total=total,
             page=page,
             per_page=per_page,
-            page_tree=await get_page_tree(),
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -572,7 +574,7 @@ async def page_revision(request: Request, name: str, rev: int):
             html_content=html_content,
             prev_rev=prev_rev,
             next_rev=next_rev,
-            page_tree=await get_page_tree(),
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -643,7 +645,7 @@ async def page_diff(request: Request, name: str, rev_range: str):
             revision_a=revision_a,
             revision_b=revision_b,
             diff=diff,
-            page_tree=await get_page_tree(),
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -797,7 +799,7 @@ async def view_page(request: Request, name: str):
             backlinks=backlinks,
             outlinks=outlinks,
             frontmatter=frontmatter,
-            page_tree=await get_page_tree(),
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -1085,7 +1087,12 @@ async def search_page(request: Request, q: str = "", tag: str = ""):
     return templates.TemplateResponse(
         request,
         "search.html",
-        get_context(results=results, query=q, tag=tag, page_tree=await get_page_tree()),
+        get_context(
+            results=results,
+            query=q,
+            tag=tag,
+            page_tree=await page_cache.get_page_tree(),
+        ),
     )
 
 
@@ -1101,7 +1108,7 @@ async def tags_page(request: Request):
     return templates.TemplateResponse(
         request,
         "tags.html",
-        get_context(tags=tags_sorted, page_tree=await get_page_tree()),
+        get_context(tags=tags_sorted, page_tree=await page_cache.get_page_tree()),
     )
 
 
@@ -1114,7 +1121,7 @@ async def graph_view(request: Request):
     return templates.TemplateResponse(
         request,
         "graph.html",
-        get_context(page_tree=await get_page_tree()),
+        get_context(page_tree=await page_cache.get_page_tree()),
     )
 
 
@@ -1348,7 +1355,7 @@ async def login_page(request: Request):
     if request.session.get("authenticated"):
         return RedirectResponse(url="/", status_code=302)
     return templates.TemplateResponse(
-        request, "login.html", get_context(page_tree=await get_page_tree())
+        request, "login.html", get_context(page_tree=await page_cache.get_page_tree())
     )
 
 
