@@ -135,6 +135,15 @@
                 window._meshwikiWS = null;
             }
         });
+
+        // Re-render Mermaid diagrams after each hx-boost navigation (DOMContentLoaded
+        // doesn't re-fire on swap, so startOnLoad: true alone is not enough).
+        document.body.addEventListener('htmx:afterSettle', function() {
+            if (typeof mermaid !== 'undefined') {
+                var nodes = document.querySelectorAll('.mermaid:not([data-processed])');
+                if (nodes.length) mermaid.run({ nodes: Array.from(nodes) });
+            }
+        });
     }
 
     // ── Per-page setup: runs on initial load and after every hx-boost swap ───
@@ -233,7 +242,8 @@
     <script>
     (function(){
         var savedTheme = localStorage.getItem('meshwiki-theme') || 'light';
-        mermaid.initialize({ startOnLoad: true, theme: savedTheme === 'dark' ? 'dark' : 'default' });
+        mermaid.initialize({ startOnLoad: false, theme: savedTheme === 'dark' ? 'dark' : 'default' });
+        mermaid.run();
         // Re-render diagrams when the user toggles dark/light mode.
         var themeBtn = document.getElementById('theme-toggle');
         if (themeBtn) {
