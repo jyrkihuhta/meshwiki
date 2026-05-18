@@ -26,13 +26,13 @@ async def test_cache_hit_on_second_call(tmp_path):
     mock_pages = []
     call_count = 0
 
-    async def fake_list():
+    def fake_list_sync():
         nonlocal call_count
         call_count += 1
         return mock_pages
 
     mock_storage = AsyncMock()
-    mock_storage.list_pages_with_metadata = fake_list
+    mock_storage.list_pages_with_metadata_sync = fake_list_sync
 
     with patch("meshwiki.core.dependencies._storage", mock_storage):
         result1 = await pc.get_pages_metadata()
@@ -50,13 +50,13 @@ async def test_invalidate_clears_cache():
 
     call_count = 0
 
-    async def fake_list():
+    def fake_list_sync():
         nonlocal call_count
         call_count += 1
         return []
 
     mock_storage = AsyncMock()
-    mock_storage.list_pages_with_metadata = fake_list
+    mock_storage.list_pages_with_metadata_sync = fake_list_sync
 
     with patch("meshwiki.core.dependencies._storage", mock_storage):
         await pc.get_pages_metadata()
@@ -79,13 +79,13 @@ async def test_cache_disabled_via_env(monkeypatch):
 
     call_count = 0
 
-    async def fake_list():
+    def fake_list_sync():
         nonlocal call_count
         call_count += 1
         return []
 
     mock_storage = AsyncMock()
-    mock_storage.list_pages_with_metadata = fake_list
+    mock_storage.list_pages_with_metadata_sync = fake_list_sync
 
     with patch("meshwiki.core.dependencies._storage", mock_storage):
         await pc.get_pages_metadata()

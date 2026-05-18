@@ -32,7 +32,10 @@ async def get_pages_metadata() -> list["Page"]:
     if not _ENABLED:
         from meshwiki.core.dependencies import get_storage
 
-        return await get_storage().list_pages_with_metadata()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, get_storage().list_pages_with_metadata_sync
+        )
 
     if _pages_cache is not None:
         return _pages_cache
@@ -42,7 +45,14 @@ async def get_pages_metadata() -> list["Page"]:
             return _pages_cache
         from meshwiki.core.dependencies import get_storage
 
-        _pages_cache = await get_storage().list_pages_with_metadata()
+        loop = asyncio.get_running_loop()
+        storage = get_storage()
+        # list_pages_with_metadata_sync does synchronous disk I/O (glob + read
+        # every .md file).  Running in a thread so it doesn't block the event
+        # loop and starve other requests / health checks during the scan.
+        _pages_cache = await loop.run_in_executor(
+            None, storage.list_pages_with_metadata_sync
+        )
     return _pages_cache  # type: ignore[return-value]
 
 

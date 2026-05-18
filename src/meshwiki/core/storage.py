@@ -308,8 +308,8 @@ class FileStorage(Storage):
         content_matches.sort(key=lambda x: x["name"].lower())
         return name_matches + content_matches
 
-    async def list_pages_with_metadata(self) -> list[Page]:
-        """List all pages with full metadata."""
+    def list_pages_with_metadata_sync(self) -> list[Page]:
+        """Synchronous disk scan — call via run_in_executor to avoid blocking the event loop."""
         pages = []
         for path in self.base_path.glob("**/*.md"):
             name = self._path_to_name(path)
@@ -317,6 +317,10 @@ class FileStorage(Storage):
             metadata, body = self._parse_frontmatter(raw)
             pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
         return sorted(pages, key=lambda p: p.name.lower())
+
+    async def list_pages_with_metadata(self) -> list[Page]:
+        """List all pages with full metadata."""
+        return self.list_pages_with_metadata_sync()
 
     async def search_by_tag(self, tag: str) -> list[Page]:
         """Filter pages by tag."""
