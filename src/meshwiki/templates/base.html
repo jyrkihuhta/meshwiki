@@ -136,16 +136,21 @@
             }
         });
 
-        // Re-render Mermaid diagrams after each hx-boost navigation.
-        // Use document (not body) because htmx fires htmx:afterSettle on the
-        // trigger element (<a>), which is detached after the swap and won't
-        // bubble to body — but all bubbling events reach document.
-        document.addEventListener('htmx:afterSettle', function() {
-            if (typeof mermaid !== 'undefined') {
+        // Re-render Mermaid diagrams whenever .mermaid nodes appear in the DOM.
+        // MutationObserver is more reliable than htmx events because it fires
+        // exactly when nodes are inserted, regardless of htmx event routing.
+        // Debounced so a burst of DOM mutations (e.g. during hx-boost swap)
+        // results in a single mermaid.run() call.
+        var _mermaidTimer = null;
+        var _mermaidObserver = new MutationObserver(function() {
+            clearTimeout(_mermaidTimer);
+            _mermaidTimer = setTimeout(function() {
+                if (typeof mermaid === 'undefined') return;
                 var nodes = document.querySelectorAll('.mermaid:not([data-processed])');
                 if (nodes.length) mermaid.run({ nodes: Array.from(nodes) });
-            }
+            }, 50);
         });
+        _mermaidObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     // ── Per-page setup: runs on initial load and after every hx-boost swap ───
@@ -193,13 +198,6 @@
 
     // Highlight code blocks on this page
     if (typeof hljs !== 'undefined') hljs.highlightAll();
-
-    // Render any Mermaid diagrams on the current page (runs on every page load /
-    // hx-boost swap because this code is in the per-page section of the body).
-    if (typeof mermaid !== 'undefined') {
-        var _mermaidNodes = document.querySelectorAll('.mermaid:not([data-processed])');
-        if (_mermaidNodes.length) mermaid.run({ nodes: Array.from(_mermaidNodes) });
-    }
 
     // Handle toast from redirect query param (e.g. ?toast=saved)
     (function(){
