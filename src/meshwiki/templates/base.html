@@ -10,6 +10,7 @@
     <link id="hljs-theme" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <script>(function(){var t=localStorage.getItem('meshwiki-theme');if(t==='dark'){var l=document.getElementById('hljs-theme');if(l)l.href='https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';}})()</script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="/static/js/hover_card.js"></script>
 </head>
@@ -136,21 +137,14 @@
             }
         });
 
-        // Re-render Mermaid diagrams whenever .mermaid nodes appear in the DOM.
-        // MutationObserver is more reliable than htmx events because it fires
-        // exactly when nodes are inserted, regardless of htmx event routing.
-        // Debounced so a burst of DOM mutations (e.g. during hx-boost swap)
-        // results in a single mermaid.run() call.
-        var _mermaidTimer = null;
-        var _mermaidObserver = new MutationObserver(function() {
-            clearTimeout(_mermaidTimer);
-            _mermaidTimer = setTimeout(function() {
-                if (typeof mermaid === 'undefined') return;
-                var nodes = document.querySelectorAll('.mermaid:not([data-processed])');
-                if (nodes.length) mermaid.run({ nodes: Array.from(nodes) });
-            }, 50);
+        // After each hx-boost navigation, render any .mermaid nodes that arrived in
+        // the new page.  htmx:afterSettle fires after the DOM swap AND all inline
+        // scripts have re-executed, so mermaid is fully initialized by this point.
+        document.body.addEventListener('htmx:afterSettle', function() {
+            if (typeof mermaid === 'undefined') return;
+            var nodes = document.querySelectorAll('.mermaid:not([data-processed])');
+            if (nodes.length) mermaid.run({ nodes: Array.from(nodes) });
         });
-        _mermaidObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     // ── Per-page setup: runs on initial load and after every hx-boost swap ───
@@ -183,6 +177,10 @@
                 hljsLink.href = theme === 'dark'
                     ? 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css'
                     : 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+            }
+            if (typeof mermaid !== 'undefined') {
+                mermaid.initialize({ startOnLoad: false, theme: theme === 'dark' ? 'dark' : 'default' });
+                mermaid.run();
             }
         });
     })();
@@ -243,29 +241,22 @@
             try { sessionStorage.setItem(storageKey, JSON.stringify(openPages)); } catch(e) {}
         });
     })();
+
+    // Render mermaid diagrams on this page.
+    // mermaid.initialize() is guarded so it only runs once (first hard load).
+    // On hx-boost navigations the per-page inline scripts re-execute, so this
+    // mermaid.run() fires for any diagrams in the new page; htmx:afterSettle
+    // (bound once in _mwInited above) catches any that weren't yet in DOM.
+    if (typeof mermaid !== 'undefined') {
+        if (!window._mermaidInited) {
+            window._mermaidInited = true;
+            var _mTheme = localStorage.getItem('meshwiki-theme') || 'light';
+            mermaid.initialize({ startOnLoad: false, theme: _mTheme === 'dark' ? 'dark' : 'default' });
+        }
+        mermaid.run();
+    }
     </script>
     <script src="/static/js/metatable.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-    <script>
-    (function(){
-        var savedTheme = localStorage.getItem('meshwiki-theme') || 'light';
-        mermaid.initialize({ startOnLoad: false, theme: savedTheme === 'dark' ? 'dark' : 'default' });
-        mermaid.run();
-        // Re-render diagrams when the user toggles dark/light mode.
-        var themeBtn = document.getElementById('theme-toggle');
-        if (themeBtn) {
-            themeBtn.addEventListener('click', function() {
-                // The click handler in the inline script above already toggled the attribute;
-                // read the new value after it settles.
-                setTimeout(function() {
-                    var t = document.documentElement.getAttribute('data-theme');
-                    mermaid.initialize({ startOnLoad: false, theme: t === 'dark' ? 'dark' : 'default' });
-                    mermaid.run();
-                }, 50);
-            });
-        }
-    })();
-    </script>
     {% block extra_css %}{% endblock %}
     <script src="/static/js/clock_widget.js"></script>
     <script src="/static/js/copy_code.js"></script>
