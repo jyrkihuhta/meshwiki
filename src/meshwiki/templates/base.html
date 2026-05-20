@@ -112,9 +112,9 @@
                     hljs.highlightElement(block);
                 });
             }
-            // Restore frontmatter collapsed state after fragment swap
+            // Restore frontmatter collapsed state after fragment swap (collapsed by default)
             var card = e.target.querySelector ? e.target.querySelector('.frontmatter-card') : null;
-            if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') === '1') {
+            if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') !== '0') {
                 card.classList.add('frontmatter-card--collapsed');
             }
         });
@@ -226,10 +226,10 @@
         }
     })();
 
-    // Restore frontmatter card collapsed state
+    // Restore frontmatter card collapsed state (collapsed by default)
     (function(){
         var card = document.querySelector('.frontmatter-card');
-        if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') === '1') {
+        if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') !== '0') {
             card.classList.add('frontmatter-card--collapsed');
         }
     })();
