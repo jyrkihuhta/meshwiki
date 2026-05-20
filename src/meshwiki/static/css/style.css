@@ -532,7 +532,7 @@ pre:focus-within .copy-btn {
 /* Frontmatter Card */
 .frontmatter-card {
     float: right;
-    width: 240px;
+    width: 300px;
     margin: 0 0 1rem 1.5rem;
     border: 1px solid #c7d2d0;
     border-radius: 8px;
@@ -546,6 +546,9 @@ pre:focus-within .copy-btn {
 }
 
 .frontmatter-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -561,6 +564,40 @@ pre:focus-within .copy-btn {
 [data-theme="dark"] .frontmatter-card-header {
     background: #1f3733;
     border-bottom-color: #2a4a45;
+}
+
+.frontmatter-card--collapsed .frontmatter-card-header {
+    border-bottom: none;
+    border-radius: 8px;
+}
+
+.frontmatter-card-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 0;
+    line-height: 1;
+    font-size: 0.7rem;
+    transition: color 0.15s;
+}
+
+.frontmatter-card-toggle:hover {
+    color: var(--color-text);
+}
+
+.frontmatter-card-toggle::before {
+    content: "▾";
+    display: inline-block;
+    transition: transform 0.15s;
+}
+
+.frontmatter-card--collapsed .frontmatter-card-toggle::before {
+    transform: rotate(-90deg);
+}
+
+.frontmatter-card--collapsed .frontmatter-dl {
+    display: none;
 }
 
 .frontmatter-dl {
@@ -580,7 +617,7 @@ pre:focus-within .copy-btn {
 
 .frontmatter-row dt {
     flex-shrink: 0;
-    width: 70px;
+    width: 90px;
     font-weight: 500;
     color: var(--color-text-muted);
     text-transform: capitalize;

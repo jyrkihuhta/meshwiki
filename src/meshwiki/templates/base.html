@@ -112,6 +112,22 @@
                     hljs.highlightElement(block);
                 });
             }
+            // Restore frontmatter collapsed state after fragment swap
+            var card = e.target.querySelector ? e.target.querySelector('.frontmatter-card') : null;
+            if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') === '1') {
+                card.classList.add('frontmatter-card--collapsed');
+            }
+        });
+
+        // Frontmatter card toggle (delegated — survives fragment swaps)
+        document.body.addEventListener('click', function(e) {
+            var btn = e.target.closest('.frontmatter-card-toggle');
+            if (!btn) return;
+            var card = btn.closest('.frontmatter-card');
+            if (!card) return;
+            card.classList.toggle('frontmatter-card--collapsed');
+            localStorage.setItem('meshwiki-frontmatter-collapsed',
+                card.classList.contains('frontmatter-card--collapsed') ? '1' : '0');
         });
 
         // Toast from HTMX HX-Trigger header
@@ -207,6 +223,14 @@
             window.history.replaceState({}, '', url);
             var messages = {saved: 'Page saved', deleted: 'Page deleted', restored: 'Page restored'};
             showToast(messages[toast] || toast, 'success');
+        }
+    })();
+
+    // Restore frontmatter card collapsed state
+    (function(){
+        var card = document.querySelector('.frontmatter-card');
+        if (card && localStorage.getItem('meshwiki-frontmatter-collapsed') === '1') {
+            card.classList.add('frontmatter-card--collapsed');
         }
     })();
 

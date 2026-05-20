@@ -221,7 +221,7 @@ class TestFrontmatterDisplay:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/page/Plain")
             assert response.status_code == 200
-            assert "frontmatter-card" not in response.text
+            assert '<aside class="frontmatter-card">' not in response.text
 
     @pytest.mark.asyncio
     async def test_frontmatter_not_shown_without_engine(self, wiki_dir):
@@ -248,7 +248,7 @@ class TestFrontmatterDisplay:
             ) as client:
                 response = await client.get("/page/HomePage")
                 assert response.status_code == 200
-                assert "frontmatter-card" not in response.text
+                assert '<aside class="frontmatter-card">' not in response.text
 
 
 # ============================================================

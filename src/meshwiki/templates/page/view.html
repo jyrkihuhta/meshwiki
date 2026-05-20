@@ -43,7 +43,7 @@
              hx-swap="innerHTML">
             {% if frontmatter %}
             <aside class="frontmatter-card">
-                <h4 class="frontmatter-card-header">Properties</h4>
+                <h4 class="frontmatter-card-header">Properties<button class="frontmatter-card-toggle" aria-label="Toggle properties"></button></h4>
                 <dl class="frontmatter-dl">
                     {% for key, values in frontmatter.items() %}
                     <div class="frontmatter-row">
