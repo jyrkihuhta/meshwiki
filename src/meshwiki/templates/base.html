@@ -88,6 +88,7 @@
                     {{ render_tree(page_tree) }}
                 </nav>
             </aside>
+            <div class="sidebar-resizer" id="sidebar-resizer"></div>
             {% endif %}
 
             <main class="main {% block main_class %}{% endblock %}">
@@ -207,6 +208,37 @@
             var messages = {saved: 'Page saved', deleted: 'Page deleted', restored: 'Page restored'};
             showToast(messages[toast] || toast, 'success');
         }
+    })();
+
+    // Sidebar resize handle
+    (function(){
+        var resizer = document.getElementById('sidebar-resizer');
+        var sidebar = document.getElementById('page-tree-sidebar');
+        if (!resizer || !sidebar) return;
+        var saved = localStorage.getItem('meshwiki-sidebar-width');
+        if (saved) sidebar.style.width = saved;
+        resizer.addEventListener('mousedown', function(e) {
+            var startX = e.clientX;
+            var startWidth = sidebar.getBoundingClientRect().width;
+            resizer.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            function onMove(e) {
+                var w = Math.max(120, Math.min(600, startWidth + (e.clientX - startX)));
+                sidebar.style.width = w + 'px';
+            }
+            function onUp() {
+                resizer.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                localStorage.setItem('meshwiki-sidebar-width', sidebar.style.width);
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+            e.preventDefault();
+        });
     })();
 
     // Page tree current page highlighting and expansion state persistence
