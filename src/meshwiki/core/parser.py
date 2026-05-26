@@ -217,7 +217,8 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
     lines = ['<div class="metatable-wrapper">', '<table class="metatable">']
     lines.append("<thead><tr>")
     for col in result.columns:
-        lines.append(f"<th>{col}</th>")
+        escaped_col = html_escape(col, quote=True)
+        lines.append(f'<th data-col="{escaped_col}">{col}</th>')
     lines.append("</tr></thead>")
     lines.append("<tbody>")
 
@@ -225,27 +226,37 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
         # Skip completely empty rows
         if all(not row.get(col) for col in result.columns):
             continue
+        page_url = html_escape(row.page_name.replace(" ", "_"), quote=True)
         escaped_page = html_escape(row.page_name, quote=True)
         lines.append("<tr>")
         for col in result.columns:
             escaped_col = html_escape(col, quote=True)
             values = row.get(col)
-            if col == "name" and values:
-                page_name = values[0]
-                url_name = page_name.replace(" ", "_")
-                cell = f'<a href="/page/{url_name}" class="wiki-link">{page_name}</a>'
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}">{cell}</td>'
-                )
+            td_attrs = f'data-page="{escaped_page}" data-field="{escaped_col}" data-col="{escaped_col}"'
+            if col in ("name", "title") and values:
+                label = html_escape(values[0])
+                if col == "name":
+                    href = html_escape(values[0].replace(" ", "_"), quote=True)
+                else:
+                    href = page_url
+                cell = f'<a href="/page/{href}" class="wiki-link">{label}</a>'
+                lines.append(f"<td {td_attrs}>{cell}</td>")
+            elif col == "source" and values:
+                raw = values[0]
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(raw).netloc or raw
+                except Exception:
+                    domain = raw
+                escaped_raw = html_escape(raw, quote=True)
+                escaped_domain = html_escape(domain)
+                cell = f'<a href="{escaped_raw}" class="source-link" target="_blank" rel="noopener">{escaped_domain}</a>'
+                lines.append(f"<td {td_attrs}>{cell}</td>")
             elif values:
-                cell = ", ".join(values)
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true">{cell}</td>'
-                )
+                cell = html_escape(", ".join(values))
+                lines.append(f'<td {td_attrs} data-editable="true">{cell}</td>')
             else:
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true"></td>'
-                )
+                lines.append(f'<td {td_attrs} data-editable="true"></td>')
         lines.append("</tr>")
 
     lines.append("</tbody></table>")

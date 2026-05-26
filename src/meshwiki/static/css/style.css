@@ -855,12 +855,15 @@ pre:focus-within .copy-btn {
 /* MetaTable */
 .metatable-wrapper {
     margin: 1rem 0;
+    overflow-x: auto;
 }
 
 .metatable {
-    width: 100%;
+    width: auto;
+    max-width: 100%;
     border-collapse: collapse;
     font-size: 0.9375rem;
+    table-layout: auto;
 }
 
 .metatable thead th {
@@ -871,11 +874,40 @@ pre:focus-within .copy-btn {
     font-weight: 600;
     font-size: 0.875rem;
     text-transform: capitalize;
+    white-space: nowrap;
 }
 
 .metatable tbody td {
     border: 1px solid var(--color-border);
     padding: 0.5rem 0.75rem;
+    vertical-align: top;
+}
+
+/* Column-specific sizing */
+.metatable th[data-col="date"],
+.metatable td[data-col="date"] {
+    white-space: nowrap;
+    width: 6.5em;
+}
+
+.metatable th[data-col="title"],
+.metatable td[data-col="title"] {
+    min-width: 16em;
+    max-width: 36em;
+}
+
+.metatable th[data-col="source"],
+.metatable td[data-col="source"] {
+    white-space: nowrap;
+    width: 11em;
+    max-width: 11em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.metatable .source-link {
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
 }
 
 .metatable tbody tr:nth-child(even) {
