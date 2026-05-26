@@ -237,12 +237,18 @@ async def get_page_tree() -> list[dict]:
     return build_page_tree_sync(pages)
 
 
+# Tags whose pages are hidden from the sidebar (too numerous / leaf-level content)
+_SIDEBAR_HIDDEN_TAGS: frozenset[str] = frozenset({"intel-entry", "intel-month"})
+
+
 def _is_hidden_page(page: Page) -> bool:
     """Return True for pages that should not appear in the sidebar."""
     if "/" in page.name:
         return True
     extra = page.metadata.model_extra or {}
-    return extra.get("sidebar") is False
+    if extra.get("sidebar") is False:
+        return True
+    return bool(set(page.metadata.tags) & _SIDEBAR_HIDDEN_TAGS)
 
 
 def build_page_tree_sync(pages: list[Page]) -> list[dict]:
@@ -328,6 +334,9 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
     def _subtree(page_name: str, level: int, ancestors: frozenset[str]) -> dict | None:
         if page_name in ancestors:
             log.warning("page_tree_cycle_detected", page=page_name)
+            return None
+        candidate = page_map.get(page_name)
+        if candidate is not None and _is_hidden_page(candidate):
             return None
         node = _node(page_name, level)
         path = ancestors | {page_name}
