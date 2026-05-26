@@ -468,8 +468,10 @@ def page_exists_sync(name: str) -> bool:
 async def index(request: Request):
     """Home page - list all pages."""
     all_pages = await page_cache.get_pages_metadata()
+    # Root pages: no `parent` frontmatter (leaf/sub-pages are navigable via hierarchy)
+    root_pages = [p for p in all_pages if not p.metadata.model_extra.get("parent")]
     recent_pages = sorted(
-        [p for p in all_pages if p.metadata.modified],
+        [p for p in root_pages if p.metadata.modified],
         key=lambda p: p.metadata.modified,
         reverse=True,
     )[:10]
@@ -478,7 +480,10 @@ async def index(request: Request):
         request,
         "page/list.html",
         get_context(
-            all_pages=all_pages, recent_pages=recent_pages, page_tree=page_tree
+            all_pages=root_pages,
+            sub_page_count=len(all_pages) - len(root_pages),
+            recent_pages=recent_pages,
+            page_tree=page_tree,
         ),
     )
 
