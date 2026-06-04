@@ -22,6 +22,7 @@ MODEL_RATES: dict[str, tuple[float, float]] = {
     "anthropic/claude-sonnet-4": (3e-6, 15e-6),
     "anthropic/claude-haiku-4-5": (0.8e-6, 4e-6),
     # MiniMax models
+    "MiniMax-M3": (0.3e-6, 1.1e-6),  # verify pricing at minimaxi.com/en/news/minimax-api-pricing
     "MiniMax-M2.7": (0.3e-6, 1.1e-6),
     # Legacy models kept for historical cost records
     "claude-3-5-sonnet-20241022": (3e-6, 15e-6),

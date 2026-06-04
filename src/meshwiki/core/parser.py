@@ -245,6 +245,7 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
                 raw = values[0]
                 try:
                     from urllib.parse import urlparse
+
                     domain = urlparse(raw).netloc or raw
                 except Exception:
                     domain = raw

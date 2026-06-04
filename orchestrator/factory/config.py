@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     log_level: str = "info"  # FACTORY_LOG_LEVEL
     repo_root: str = Field(default_factory=lambda: str(Path.cwd()))  # FACTORY_REPO_ROOT
     grinder_provider: str = "e2b"  # FACTORY_GRINDER_PROVIDER
-    grinder_model: str = "MiniMax-M2.7"  # FACTORY_GRINDER_MODEL
+    grinder_model: str = "MiniMax-M3"  # FACTORY_GRINDER_MODEL
     checkpoint_db: str = Field(
         default_factory=_default_checkpoint_db
     )  # FACTORY_CHECKPOINT_DB
@@ -155,7 +155,7 @@ class Settings(BaseSettings):
         604800  # FACTORY_CLASS_GAP_RESEARCHER_INTERVAL_SECONDS — weekly by default
     )
     class_gap_researcher_model: str = (
-        "MiniMax-M2.7"  # FACTORY_CLASS_GAP_RESEARCHER_MODEL — non-Anthropic by default
+        "MiniMax-M3"  # FACTORY_CLASS_GAP_RESEARCHER_MODEL — non-Anthropic by default
     )
     class_gap_researcher_suggestions_per_run: int = (
         3  # FACTORY_CLASS_GAP_RESEARCHER_SUGGESTIONS_PER_RUN — how many gaps per tick
