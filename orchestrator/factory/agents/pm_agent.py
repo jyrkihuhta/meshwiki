@@ -680,7 +680,7 @@ async def _messages_create_with_retry(
         return await _call_openai_compatible(
             api_key=settings.minimax_api_key,
             base_url="https://api.minimax.io/v1",
-            model="MiniMax-M2.7",
+            model="MiniMax-M3",
             timeout=60.0,
             **kwargs,
         )

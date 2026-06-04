@@ -55,13 +55,13 @@ class Settings(BaseSettings):
         False  # FACTORY_AUTO_MERGE — merge PRs after PM approval, skip human review
     )
     pm_decompose_model: str = (
-        "claude-sonnet-4-6"  # FACTORY_PM_DECOMPOSE_MODEL — task decomposition
+        "MiniMax-M3"  # FACTORY_PM_DECOMPOSE_MODEL — task decomposition
     )
     pm_review_model: str = (
-        "claude-sonnet-4-6"  # FACTORY_PM_REVIEW_MODEL — full review model
+        "MiniMax-M3"  # FACTORY_PM_REVIEW_MODEL — full review model
     )
     pm_triage_model: str = (
-        "claude-haiku-4-5-20251001"  # FACTORY_PM_TRIAGE_MODEL — fast triage; empty = skip triage
+        "MiniMax-M3"  # FACTORY_PM_TRIAGE_MODEL — fast triage; empty = skip triage
     )
     pm_review_max_diff_lines: int = (
         500  # FACTORY_PM_REVIEW_MAX_DIFF_LINES — truncate diff beyond this
@@ -100,7 +100,7 @@ class Settings(BaseSettings):
         5  # FACTORY_TERMINAL_REVIEW_BATCH_SIZE — max pages to analyze per run
     )
     terminal_review_model: str = (
-        "claude-haiku-4-5-20251001"  # FACTORY_TERMINAL_REVIEW_MODEL — LLM model for analysis
+        "MiniMax-M3"  # FACTORY_TERMINAL_REVIEW_MODEL — LLM model for analysis
     )
     scheduler_enabled: bool = (
         False  # FACTORY_SCHEDULER_ENABLED — enable autonomous backlog scheduler
@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         2  # FACTORY_CI_FIXER_MAX_ATTEMPTS — max annotation attempts per PR
     )
     ci_fixer_model: str = (
-        "claude-haiku-4-5-20251001"  # FACTORY_CI_FIXER_MODEL — LLM for failure analysis
+        "MiniMax-M3"  # FACTORY_CI_FIXER_MODEL — LLM for failure analysis
     )
     insight_enabled: bool = (
         False  # FACTORY_INSIGHT_ENABLED — enable weekly insight/proposal bot
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
         604800  # FACTORY_INSIGHT_INTERVAL_SECONDS — weekly by default
     )
     insight_model: str = (
-        "claude-haiku-4-5-20251001"  # FACTORY_INSIGHT_MODEL — LLM for synthesis
+        "MiniMax-M3"  # FACTORY_INSIGHT_MODEL — LLM for synthesis
     )
     class_gap_researcher_enabled: bool = (
         False  # FACTORY_CLASS_GAP_RESEARCHER_ENABLED — enable the gap-research bot

@@ -18,7 +18,7 @@ from typing import Any
 
 import anthropic
 
-from ..agents.pm_agent import safe_messages_create
+from ..agents.pm_agent import _messages_create_with_retry
 from ..config import get_settings
 from ..integrations.meshwiki_client import MeshWikiClient
 from .base import BaseBot, BotResult
@@ -264,7 +264,7 @@ class InsightBot(BaseBot):
         )
 
         try:
-            response = await safe_messages_create(
+            response = await _messages_create_with_retry(
                 client,
                 model=self._model,
                 max_tokens=2048,
