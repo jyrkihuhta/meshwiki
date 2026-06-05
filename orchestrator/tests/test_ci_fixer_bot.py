@@ -177,11 +177,14 @@ async def test_process_posts_comment_and_annotates_wiki():
         "SUGGESTED_FIX: Add beautifulsoup4 to pyproject.toml dev deps\n"
     ))]
     anthropic_client = AsyncMock()
-    anthropic_client.messages.create = AsyncMock(return_value=mock_resp)
 
     wiki.transition_task = AsyncMock()
     item = {"task_name": "MyTask", "pr_number": 5, "attempts": 0, "has_parent": False}
-    acted = await bot._process(item, wiki, gh, anthropic_client)
+    with patch(
+        "factory.bots.ci_fixer._messages_create_with_retry",
+        new=AsyncMock(return_value=mock_resp),
+    ):
+        acted = await bot._process(item, wiki, gh, anthropic_client)
 
     assert acted is True
     gh.create_pr_comment.assert_awaited_once()

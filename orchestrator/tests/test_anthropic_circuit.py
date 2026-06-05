@@ -206,7 +206,7 @@ async def test_safe_messages_create_trips_breaker_on_billing_error():
     msg = (
         "Error code: 400 - {'type': 'error', 'error': {'type': "
         "'invalid_request_error', 'message': 'You have reached your specified "
-        "API usage limits. You will regain access on 2026-06-01 at 00:00 UTC.'}}"
+        "API usage limits. You will regain access on 2027-01-01 at 00:00 UTC.'}}"
     )
     client = MagicMock()
     client.messages.create = AsyncMock(side_effect=_make_status_error(400, msg))

@@ -160,18 +160,13 @@ async def test_decompose_with_pm_returns_subtasks() -> None:
     )
 
     mock_create = AsyncMock(side_effect=[first_response, second_response])
-    mock_messages = MagicMock()
-    mock_messages.create = mock_create
-
-    mock_anthropic_client = MagicMock()
-    mock_anthropic_client.messages = mock_messages
 
     meshwiki_client = AsyncMock()
     meshwiki_client.get_page = AsyncMock(return_value=None)
 
     with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+        "factory.agents.pm_agent._messages_create_with_retry",
+        new=mock_create,
     ):
         result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
@@ -193,18 +188,13 @@ async def test_decompose_stops_on_end_turn() -> None:
     )
 
     mock_create = AsyncMock(return_value=end_turn_response)
-    mock_messages = MagicMock()
-    mock_messages.create = mock_create
-
-    mock_anthropic_client = MagicMock()
-    mock_anthropic_client.messages = mock_messages
 
     meshwiki_client = AsyncMock()
     meshwiki_client.get_page = AsyncMock(return_value=None)
 
     with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+        "factory.agents.pm_agent._messages_create_with_retry",
+        new=mock_create,
     ):
         result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
@@ -247,11 +237,6 @@ async def test_decompose_reads_wiki_page_via_tool() -> None:
     mock_create = AsyncMock(
         side_effect=[first_response, second_response, third_response]
     )
-    mock_messages = MagicMock()
-    mock_messages.create = mock_create
-
-    mock_anthropic_client = MagicMock()
-    mock_anthropic_client.messages = mock_messages
 
     meshwiki_client = AsyncMock()
     # Context page reads return None; the tool call read returns content
@@ -264,8 +249,8 @@ async def test_decompose_reads_wiki_page_via_tool() -> None:
     )
 
     with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+        "factory.agents.pm_agent._messages_create_with_retry",
+        new=mock_create,
     ):
         result = await decompose_with_pm(state, meshwiki_client, github_client=None)
 
@@ -284,19 +269,14 @@ async def test_decompose_with_pm_includes_redecompose_context() -> None:
     )
 
     mock_create = AsyncMock(return_value=end_turn_response)
-    mock_messages = MagicMock()
-    mock_messages.create = mock_create
-
-    mock_anthropic_client = MagicMock()
-    mock_anthropic_client.messages = mock_messages
 
     meshwiki_client = AsyncMock()
     meshwiki_client.get_page = AsyncMock(return_value=None)
 
     context = "Previous subtask A failed: command not found: black"
     with patch(
-        "factory.agents.pm_agent.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic_client,
+        "factory.agents.pm_agent._messages_create_with_retry",
+        new=mock_create,
     ):
         await decompose_with_pm(
             state, meshwiki_client, github_client=None, redecompose_context=context
