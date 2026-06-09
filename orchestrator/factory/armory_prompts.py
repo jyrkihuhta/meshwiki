@@ -98,6 +98,7 @@ frontmatter; checks defined elsewhere are silently ignored.
 playbook: <slug>          # unique snake_case identifier, e.g. jwt-algorithm-confusion
 name: <Human Name>        # display name
 leaf_type: <type>         # endpoint category this applies to, e.g. auth_endpoint, rest_api, graphql_api
+target: <handle>          # REQUIRED for target-specific playbooks (see rule below)
 applies_to:               # list of tags; playbook fires on any leaf whose
   - auth                  # tech_fingerprint contains any of these tags
   - jwt
@@ -189,6 +190,14 @@ brain LLM, which can pick up `note:` strings as inline reasoning hooks.
 ### Validation rules (enforced by the validator):
 
 - `playbook`, `name`, `leaf_type` required in frontmatter.
+- `target:` REQUIRED whenever the playbook is target-specific (mutations
+  reference a target's proprietary API paths, headers, tokens, or data
+  model — e.g. Doppler's `/v3/` endpoints, Boozt's `/fi/fi/` locale paths,
+  Acronis's `/api/2/tenants/` hierarchy). Omit only for genuinely generic
+  playbooks whose mutations work against any REST API. Setting `target:
+  doppler` means the playbook ONLY fires on Doppler leaves; without it the
+  playbook fires on every target that matches `applies_to`, producing
+  massive false-positive noise on unrelated targets.
 - `checks:` must be a non-empty list in the frontmatter.
 - Each check requires `id`, `name`, `mode`, `category`, `severity`.
 - `mode` must be one of: `deterministic`, `analytical`, `idea`, `oob`.
