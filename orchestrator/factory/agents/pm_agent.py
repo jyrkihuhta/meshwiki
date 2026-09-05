@@ -18,6 +18,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MINIMAX_BASE_URL = "https://api.minimax.io/v1"
+
+
+def _pm_client_and_model() -> tuple[anthropic.AsyncAnthropic, str]:
+    """PM's Anthropic-SDK client — MiniMax primary when configured, falling
+    back to direct Anthropic. Mirrors the provider selection already used for
+    the grinder in ``grind_subtask`` (MiniMax exposes an Anthropic
+    Messages-API-compatible endpoint at a different base_url).
+    """
+    settings = get_settings()
+    if settings.minimax_api_key:
+        return (
+            anthropic.AsyncAnthropic(api_key=settings.minimax_api_key, base_url=_MINIMAX_BASE_URL),
+            settings.pm_model,
+        )
+    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None), "claude-sonnet-4-6"
+
+
 PM_SYSTEM_PROMPT = """
 You are the PM/Architect for MeshWiki, an autonomous software development factory.
 
@@ -214,7 +232,7 @@ async def decompose_with_pm(
     Returns:
         List of SubTask TypedDicts produced by the PM agent.
     """
-    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
+    client, pm_model = _pm_client_and_model()
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
 
@@ -246,7 +264,7 @@ async def decompose_with_pm(
 
     while tool_calls_remaining > 0:
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
+            model=pm_model,
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
@@ -338,7 +356,7 @@ async def review_with_pm(
         Dict with ``decision`` ("approved" | "changes_requested") and
         optional ``feedback`` string.
     """
-    client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key or None)
+    client, pm_model = _pm_client_and_model()
 
     pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
         subtask.get("pr_url", "")
@@ -370,7 +388,7 @@ async def review_with_pm(
 
     while tool_calls_remaining > 0:
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
+            model=pm_model,
             max_tokens=4096,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
