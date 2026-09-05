@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -38,6 +39,16 @@ _pages_cache: list[Any] | None = None  # list[Page], typed loosely to avoid impo
 _tree_cache: list[Any] | None = None  # list[dict] page tree for sidebar
 _stale: bool = False
 _refresh_task: asyncio.Task[None] | None = None
+
+# Minimum seconds between rebuild *starts*. A rebuild scans every page on
+# disk (list_pages_with_metadata_sync) — expensive at wiki scale. This is a
+# second line of defense beyond ws_manager's per-page event dedup: that dedup
+# is keyed per page, so a storm that touches many *different* pages at once
+# (e.g. a bind-mount metadata event sweeping the whole directory) still slips
+# through it, since each distinct page passes its own fresh dedup window.
+# Found 2026-09-05 — see PLAN.md M2 for the full incident.
+_MIN_REBUILD_INTERVAL_SECS = 5.0
+_last_rebuild_started: float = 0.0
 _generation: int = 0  # incremented by hard_invalidate; background tasks abort if stale
 
 
@@ -85,14 +96,24 @@ async def get_page_tree() -> list[dict]:
     return _tree_cache
 
 
-async def _rebuild(gen: int) -> None:
+async def _rebuild(gen: int, delay: float = 0.0) -> None:
     """Background task: rebuild pages + tree and replace the cache atomically.
 
     Silently discards the result if ``gen`` no longer matches ``_generation``
     (i.e. hard_invalidate() was called while we were rebuilding).
+
+    ``delay`` (if >0) is slept off *before* the scan, so bursts of invalidate()
+    calls that arrive while this task is pending coalesce into it instead of
+    each scheduling their own — see _MIN_REBUILD_INTERVAL_SECS above.
     """
-    global _pages_cache, _tree_cache, _stale, _refresh_task
+    global _pages_cache, _tree_cache, _stale, _refresh_task, _last_rebuild_started
     try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if gen != _generation:
+            return  # superseded by hard_invalidate() while we were waiting
+        _last_rebuild_started = time.monotonic()
+
         from meshwiki.core.dependencies import get_storage
         from meshwiki.main import build_page_tree_sync
 
@@ -128,9 +149,11 @@ def invalidate() -> None:
     if _pages_cache is None:
         return  # nothing to serve stale; let the next read block as usual
     if _refresh_task is None or _refresh_task.done():
+        elapsed = time.monotonic() - _last_rebuild_started
+        delay = max(0.0, _MIN_REBUILD_INTERVAL_SECS - elapsed)
         try:
             loop = asyncio.get_running_loop()
-            _refresh_task = loop.create_task(_rebuild(_generation))
+            _refresh_task = loop.create_task(_rebuild(_generation, delay))
         except RuntimeError:
             pass  # no running loop (e.g. module-level call in tests)
 
@@ -142,11 +165,12 @@ def hard_invalidate() -> None:
     discards its result instead of overwriting the freshly-cleared cache.
     Use only when swapping the underlying storage instance (e.g. test reloads).
     """
-    global _pages_cache, _tree_cache, _stale, _refresh_task, _generation
+    global _pages_cache, _tree_cache, _stale, _refresh_task, _generation, _last_rebuild_started
     _generation += 1
     _pages_cache = None
     _tree_cache = None
     _stale = False
+    _last_rebuild_started = 0.0
     if _refresh_task is not None and not _refresh_task.done():
         _refresh_task.cancel()
     _refresh_task = None
