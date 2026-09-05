@@ -19,7 +19,13 @@ services:
       retries: 3
 
   meshwiki-staging:
-    image: ghcr.io/jyrkihuhta/meshwiki:${MESHWIKI_VERSION:-latest}
+    # Deliberately its own fixed tag, not ${MESHWIKI_VERSION:-latest} — that
+    # var is shared with the meshwiki (prod) service above via the same
+    # /opt/meshwiki/.env docker-compose auto-loads, and prod's deploy job
+    # pins it to a specific sha- tag after every deploy. Sharing it here
+    # would make staging silently track whatever prod last deployed instead
+    # of its own `staging`-tagged build. See PLAN.md M2, 2026-09-05.
+    image: ghcr.io/jyrkihuhta/meshwiki:staging
     restart: unless-stopped
     volumes:
       - /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
@@ -71,7 +77,8 @@ services:
         condition: service_healthy
 
   orchestrator-staging:
-    image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:${ORCHESTRATOR_VERSION:-latest}
+    # Own fixed tag — see the same note on meshwiki-staging above.
+    image: ghcr.io/jyrkihuhta/meshwiki-orchestrator:staging
     restart: unless-stopped
     env_file: /opt/meshwiki/orchestrator-staging.env
     volumes:
