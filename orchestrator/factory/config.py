@@ -160,6 +160,13 @@ class Settings(BaseSettings):
     class_gap_researcher_suggestions_per_run: int = (
         3  # FACTORY_CLASS_GAP_RESEARCHER_SUGGESTIONS_PER_RUN — how many gaps per tick
     )
+    class_gap_researcher_allow_target_specific: bool = (
+        False  # FACTORY_CLASS_GAP_RESEARCHER_ALLOW_TARGET_SPECIFIC — staging is
+        # scope-locked to target-dummy practice targets, where a target-specific
+        # playbook buys nothing (no real proprietary API/quirk to exploit); leave
+        # off there. Flip on for a future production deployment against real
+        # bug-bounty targets, where target-specific quirks are worth tracking.
+    )
     daily_budget_usd: float = (
         0.0  # FACTORY_DAILY_BUDGET_USD — max USD to spend per calendar day (0 = disabled)
     )

@@ -488,6 +488,7 @@ async def test_pm_review_node_pre_merge_gate_passes_clean_playbook() -> None:
         "+playbook: good-pb\n"
         "+name: Good PB\n"
         "+leaf_type: rest_api\n"
+        "+scope: generic\n"
         "+checks:\n"
         "+  - id: c1\n"
         "+    name: C1\n"

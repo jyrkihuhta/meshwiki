@@ -29,7 +29,7 @@ from ..state import FactoryState, SubTask
 
 logger = logging.getLogger(__name__)
 
-ARMORY_TYPES: frozenset[str] = frozenset({"tool", "playbook", "wordlist"})
+ARMORY_TYPES: frozenset[str] = frozenset({"tool", "playbook", "wordlist", "toolspec"})
 
 # The vocabulary that the contract test (molly-armory/contract-test/) validates.
 # - "deterministic" — runs via Intruder mutation sweep
@@ -45,8 +45,17 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 )
 # `playbook` is the top-level required key — Playbook.from_doc() crashes with
 # KeyError if missing. `name` and `leaf_type` are needed for tech-fingerprint
-# matching to actually fire the playbook.
-_PLAYBOOK_REQUIRED_FM: tuple[str, ...] = ("playbook", "name", "leaf_type")
+# matching to actually fire the playbook. `scope` distinguishes generic
+# (fires on any matching leaf) from target-specific (fires on one target
+# only, and REQUIRES `target:` — see _check_playbook_files).
+_PLAYBOOK_REQUIRED_FM: tuple[str, ...] = ("playbook", "name", "leaf_type", "scope")
+_VALID_PLAYBOOK_SCOPES: frozenset[str] = frozenset({"generic", "target-specific"})
+# `toolspec` is the top-level required key, mirroring `playbook`.
+# `capability_name` is what a later `artifact_type: tool` task would use as
+# ToolBase.capability_name if this idea gets forged for real.
+_TOOLSPEC_REQUIRED_FM: tuple[str, ...] = (
+    "toolspec", "name", "capability_name", "status", "category",
+)
 _CHECK_REQUIRED_KEYS: tuple[str, ...] = ("id", "name", "mode", "category", "severity")
 # Modes whose checks are routed through Intruder and therefore need at least
 # one mutation that actually mutates something (body/header+value/url_override).
@@ -189,8 +198,8 @@ def validate_armory_pr_files(
     Args:
         pr_files: List of PR file objects from the GitHub API
             (``filename`` and ``patch`` keys).
-        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``.
-            Anything else returns an empty list.
+        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``,
+            ``"toolspec"``. Anything else returns an empty list.
 
     Returns:
         List of human-readable error strings; empty means the PR passes.
@@ -199,6 +208,8 @@ def validate_armory_pr_files(
         return _check_tool_files(pr_files)
     if artifact_type == "playbook":
         return _check_playbook_files(pr_files)
+    if artifact_type == "toolspec":
+        return _check_toolspec_files(pr_files)
     return []  # wordlist + non-armory: no structural checks
 
 
@@ -310,10 +321,76 @@ def _check_playbook_files(pr_files: list[dict]) -> list[str]:
                             errors.append(
                                 f"`{filename}`: missing required frontmatter field `{field}`"
                             )
+                    scope = fm.get("scope")
+                    if scope is not None and scope not in _VALID_PLAYBOOK_SCOPES:
+                        errors.append(
+                            f"`{filename}`: invalid scope `{scope}` (must be one of: "
+                            f"{', '.join(sorted(_VALID_PLAYBOOK_SCOPES))})"
+                        )
+                    if scope == "target-specific" and not fm.get("target"):
+                        errors.append(
+                            f"`{filename}`: scope=target-specific requires a `target:` "
+                            "field naming which leaf this fires on"
+                        )
                     # Real playbooks put `checks:` IN the frontmatter, not a
                     # fenced block. Validate them with the same rules.
                     if "checks" in fm:
                         errors.extend(_validate_checks(filename, fm["checks"]))
+
+    return errors
+
+
+def _check_toolspec_files(pr_files: list[dict]) -> list[str]:
+    """Validate frontmatter in changed toolspec files.
+
+    A toolspec is prose-only (Problem / Proposed Capability / Example Usage
+    / References sections) with no code to lint — this only checks the
+    frontmatter contract that ``class_gap_researcher`` and any later
+    promotion-to-tool task rely on.
+
+    Args:
+        pr_files: List of PR file objects from the GitHub API.
+
+    Returns:
+        List of error strings (empty means all clear).
+    """
+    errors: list[str] = []
+
+    for f in pr_files:
+        filename: str = f.get("filename", "")
+        if not filename.endswith(".md"):
+            continue
+
+        patch: str = f.get("patch", "") or ""
+        added_lines = [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        added_text = "\n".join(added_lines)
+
+        fm_match = re.match(r"^---\n(.*?)^---", added_text, re.DOTALL | re.MULTILINE)
+        if not fm_match:
+            continue
+        try:
+            fm = yaml.safe_load(fm_match.group(1)) or {}
+        except yaml.YAMLError as exc:
+            errors.append(f"`{filename}`: invalid frontmatter YAML — {exc}")
+            continue
+
+        if not isinstance(fm, dict):
+            continue
+        for field in _TOOLSPEC_REQUIRED_FM:
+            if field not in fm:
+                errors.append(
+                    f"`{filename}`: missing required frontmatter field `{field}`"
+                )
+        status = fm.get("status")
+        if status is not None and status != "proposed":
+            errors.append(
+                f"`{filename}`: toolspec status must be `proposed` (got `{status}`) "
+                "— promoting to a working tool is a separate artifact_type: tool task"
+            )
 
     return errors
 
