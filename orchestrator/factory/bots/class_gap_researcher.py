@@ -34,7 +34,14 @@ from .base import BaseBot, BotResult
 logger = logging.getLogger(__name__)
 
 ARMORY_REPO_DEFAULT = "jyrkihuhta/molly-armory"
-KNOWN_TARGETS = ("whatnot", "boozt", "doppler")
+# The staging Molly instance is hard scope-locked to target-dummy as of
+# 2026-09-05 (deck PLAN.md M2) — real targets (whatnot/boozt/doppler/acronis)
+# are paused and no longer what this bot should suggest target-specific
+# playbooks against. The bot already strongly prefers generic (target-
+# agnostic) playbooks over target-specific ones, so this list mostly matters
+# for the armory-coverage dedup scan and validating LLM output, not for
+# steering suggestions toward any one target.
+KNOWN_TARGETS = ("notekeeper", "taskboard", "dashql", "couponshop", "ssrfbox", "jwtlab")
 
 _SYSTEM_PROMPT = """You are a security research bot identifying gaps in \
 Molly's playbook armory.
@@ -51,9 +58,9 @@ that accepts JSON, on EVERY target, not just one.
 tech-only applies_to tags (e.g. [rest-api, webhook, integration]) and \
 relative paths in url_override (`/oauth/authorize`, `/auth/saml/acs`) \
 fires across all matching leaves at zero per-target cost. Target-specific \
-playbooks (with `whatnot` / `boozt` / `doppler` in applies_to, or absolute \
-URLs hard-coded into mutations) only help one target and lock the playbook \
-to assumptions that may not hold elsewhere. Suggest target-specific \
+playbooks (with `notekeeper` / `taskboard` / `dashql` in applies_to, or \
+absolute URLs hard-coded into mutations) only help one target and lock the \
+playbook to assumptions that may not hold elsewhere. Suggest target-specific \
 playbooks ONLY when the attack literally depends on a target-specific \
 quirk (e.g. a specific framework version, a known custom endpoint).
 
@@ -63,7 +70,10 @@ testing capability across the listed targets.
 
 Constraints on every suggestion:
 - DISTINCT from anything in the existing list (not a sub-variant or renaming)
-- Reportable on HackerOne or similar programs (not information-only)
+- Detectable with clear, evidence-backed pass/fail criteria — a real \
+response delta, not a bare status-code guess (this range is for proving out \
+playbook mechanics safely; the same discipline as reporting on HackerOne \
+applies even though these aren't bounty programs)
 - Specific, testable detection criteria (status code, body pattern, OOB \
 callback, timing delta, differential response)
 - Prefer classes with public H1 disclosures or CVEs as evidence
@@ -73,7 +83,7 @@ Output ONLY a JSON array, no surrounding markdown or prose:
 
 [
   {
-    "target": "whatnot" or "boozt" or "doppler",
+    "target": "notekeeper" or "taskboard" or "dashql" or "couponshop" or "ssrfbox" or "jwtlab",
     "vuln_class": "kebab-case-class-name",
     "title": "Short human-readable title (one sentence)",
     "rationale": "Why this gap is worth filling - reportability, \
@@ -370,10 +380,18 @@ class ClassGapResearcherBot(BaseBot):
         user_msg = (
             f"## Already covered by an existing playbook\n\n{existing_lines}\n\n"
             f"## Already queued as a factory task (do not duplicate)\n\n{task_lines}\n\n"
-            f"## Targets in scope\n\n"
-            f"- whatnot — live-commerce auction platform (HackerOne)\n"
-            f"- boozt — Nordic e-commerce (HackerOne)\n"
-            f"- doppler — secrets management API (HackerOne)\n\n"
+            f"## Targets in scope (the target-dummy practice range)\n\n"
+            f"- notekeeper — notes API; IDOR on GET /notes/{{id}} (no ownership check)\n"
+            f"- taskboard — task tracker; mass assignment (role field on PUT /users/me) "
+            f"+ privilege escalation payoff\n"
+            f"- dashql — GraphQL dashboard; X-Role header trust bypass + introspection "
+            f"exposing admin-only operations\n"
+            f"- couponshop — coupon/orders API; TOCTOU race condition on redemption + "
+            f"IDOR on orders\n"
+            f"- ssrfbox — URL fetcher/importer; blind SSRF and blind XXE, both requiring "
+            f"OOB-callback detection\n"
+            f"- jwtlab — JWT auth service; algorithm confusion (alg:none, RS256→HS256 "
+            f"key confusion)\n\n"
             f"Suggest {self._suggestions_per_run} additional attack-class gaps. "
             "Output ONLY the JSON array."
         )
@@ -414,10 +432,15 @@ class ClassGapResearcherBot(BaseBot):
         )
 
     def _target_base_url(self, target: str) -> str:
+        # Matches target-dummy/molly-config.json — internal Docker network
+        # hostnames on the target-dummy_range network, not public URLs.
         mapping = {
-            "whatnot": "https://api.whatnot.com",
-            "boozt":   "https://www.boozt.com",
-            "doppler": "https://api.doppler.com",
+            "notekeeper": "http://notekeeper:5000",
+            "taskboard": "http://taskboard:5000",
+            "dashql": "http://dashql:5000",
+            "couponshop": "http://couponshop:5000",
+            "ssrfbox": "http://ssrfbox:5000",
+            "jwtlab": "http://jwtlab:5056",
         }
         return mapping.get(target, "")
 
