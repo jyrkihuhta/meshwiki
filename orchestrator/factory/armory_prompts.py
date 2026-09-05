@@ -1,8 +1,8 @@
 """Armory artifact prompts and constants for the factory grinder.
 
 Contains system-level documentation and constraints injected into grinder
-task prompts for Molly armory artifact types (tool, playbook, wordlist).
-Also exports FORBIDDEN_IMPORTS used by validate_armory_node.
+task prompts for Molly armory artifact types (tool, playbook, wordlist,
+toolspec). Also exports FORBIDDEN_IMPORTS used by validate_armory_node.
 """
 
 from __future__ import annotations
@@ -98,7 +98,8 @@ frontmatter; checks defined elsewhere are silently ignored.
 playbook: <slug>          # unique snake_case identifier, e.g. jwt-algorithm-confusion
 name: <Human Name>        # display name
 leaf_type: <type>         # endpoint category this applies to, e.g. auth_endpoint, rest_api, graphql_api
-target: <handle>          # REQUIRED for target-specific playbooks (see rule below)
+scope: generic            # REQUIRED: generic | target-specific (see rule below)
+target: <handle>          # REQUIRED when scope is target-specific
 applies_to:               # list of tags; playbook fires on any leaf whose
   - auth                  # tech_fingerprint contains any of these tags
   - jwt
@@ -189,15 +190,19 @@ brain LLM, which can pick up `note:` strings as inline reasoning hooks.
 
 ### Validation rules (enforced by the validator):
 
-- `playbook`, `name`, `leaf_type` required in frontmatter.
-- `target:` REQUIRED whenever the playbook is target-specific (mutations
-  reference a target's proprietary API paths, headers, tokens, or data
-  model — e.g. Doppler's `/v3/` endpoints, Boozt's `/fi/fi/` locale paths,
-  Acronis's `/api/2/tenants/` hierarchy). Omit only for genuinely generic
-  playbooks whose mutations work against any REST API. Setting `target:
-  doppler` means the playbook ONLY fires on Doppler leaves; without it the
-  playbook fires on every target that matches `applies_to`, producing
-  massive false-positive noise on unrelated targets.
+- `playbook`, `name`, `leaf_type`, `scope` required in frontmatter.
+- `scope: generic` — mutations work against any matching REST/GraphQL/JWT
+  API via tech-tag `applies_to`, not a specific target's quirks. This is
+  the default to reach for; it's what makes a playbook valuable across
+  every target Molly ever points at, present or future.
+- `scope: target-specific` — mutations reference one target's proprietary
+  API paths, headers, tokens, or data model (e.g. a target's own `/v3/`
+  endpoint namespace, a locale-prefixed path, a tenant-hierarchy URL
+  shape). REQUIRES a `target: <handle>` field naming which leaf it fires
+  on. Without `target:`, a target-specific playbook fires on every target
+  matching `applies_to`, producing massive false-positive noise on
+  unrelated targets — so `scope: target-specific` with no `target:` is a
+  validation error, not a lenient default.
 - `checks:` must be a non-empty list in the frontmatter.
 - Each check requires `id`, `name`, `mode`, `category`, `severity`.
 - `mode` must be one of: `deterministic`, `analytical`, `idea`, `oob`.
@@ -217,6 +222,7 @@ brain LLM, which can pick up `note:` strings as inline reasoning hooks.
 playbook: contract-minimal
 name: Minimal Example
 leaf_type: rest_api
+scope: generic
 applies_to:
   - rest
 checks:
@@ -273,6 +279,80 @@ config.php.bak
 """
 
 # ---------------------------------------------------------------------------
+# Toolspec format documentation
+# ---------------------------------------------------------------------------
+
+TOOLSPEC_FORMAT = """\
+## Molly Toolspec Format
+
+A toolspec is NOT a working tool — it's a tracked proposal for a new Molly
+capability that doesn't exist yet, living in `toolspecs/` until a human or
+a later `artifact_type: tool` task decides to forge it for real. Use this
+when the gap is "Molly's tool primitives can't do X yet" rather than
+"there's an untested attack class X on an existing endpoint type" (that's
+a playbook gap instead — see the Playbook Schema).
+
+A toolspec is a Markdown file (.md) with YAML frontmatter:
+
+```markdown
+---
+toolspec: <slug>              # unique snake_case identifier, e.g. jwt_confusion_forge
+name: <Human Name>            # display name
+capability_name: <slug>       # matches the eventual ToolBase.capability_name
+                               # if/when this is forged into a real tool
+status: proposed              # always "proposed" — toolspecs don't self-promote
+category: <string>            # e.g. auth-bypass, oob, race-condition, misconfiguration
+---
+
+## Problem
+
+What Molly cannot currently do, and why the existing built-in capabilities
+(http_mutation / llm_analysis / concurrent_batch — see capabilities.json)
+or existing forged tools in tools/ don't cover it. 2-4 sentences.
+
+## Proposed Capability
+
+What the tool would do, in terms of inputs and outputs, without writing the
+actual implementation. What playbooks/checks would gain the ability to use
+`requires_capabilities: [<capability_name>]` once this exists.
+
+## Example Usage
+
+A concrete scenario: which vulnerability class or target quirk this would
+newly make detectable, and roughly how a check's `mutations`/`technique`
+would invoke it.
+
+## References
+
+At least one external source: a tool that does something similar
+elsewhere, a CVE/H1 report describing the technique this would enable, or
+a paper.
+```
+
+### Validation rules:
+
+- `toolspec`, `name`, `capability_name`, `status`, `category` required in
+  frontmatter.
+- `status` MUST be `proposed` — a toolspec is a tracked idea, not a
+  build in progress. Promoting one to an actual tool is a separate,
+  later `artifact_type: tool` task (see Tool Protocol above).
+- `capability_name` must be DISTINCT from every existing entry in
+  `capabilities.json` and every `capability_name` already used by a file
+  in `tools/` — don't propose a toolspec for something already forged.
+- Body must contain non-empty Problem, Proposed Capability, Example Usage,
+  and References sections.
+
+### Pitfalls to avoid
+
+- **DO NOT** write a full Python implementation — that's what
+  `artifact_type: tool` is for. A toolspec is prose + frontmatter only.
+- **DO NOT** propose a toolspec for a gap that a `scope: generic` playbook
+  could already cover with the existing `http_mutation`/`llm_analysis`
+  capabilities — toolspecs are for genuinely new tool primitives, not an
+  excuse to avoid writing a playbook.
+"""
+
+# ---------------------------------------------------------------------------
 # Convenience accessor
 # ---------------------------------------------------------------------------
 
@@ -280,6 +360,7 @@ _ARTIFACT_PROMPTS: dict[str, str] = {
     "tool": TOOL_PROTOCOL,
     "playbook": PLAYBOOK_SCHEMA,
     "wordlist": WORDLIST_FORMAT,
+    "toolspec": TOOLSPEC_FORMAT,
 }
 
 
@@ -287,8 +368,9 @@ def get_armory_prompt(artifact_type: str | None) -> str:
     """Return the armory protocol/schema documentation for *artifact_type*.
 
     Args:
-        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``, or
-            ``None`` / ``"code"`` for MeshWiki tasks (returns empty string).
+        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``,
+            ``"toolspec"``, or ``None`` / ``"code"`` for MeshWiki tasks
+            (returns empty string).
 
     Returns:
         Multi-line documentation string to embed in the grinder task prompt,

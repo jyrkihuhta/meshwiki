@@ -21,6 +21,7 @@ from factory.armory_prompts import (
 from factory.nodes.validate_armory import (
     _check_playbook_files,
     _check_tool_files,
+    _check_toolspec_files,
     _matches_forbidden_import,
     validate_armory_node,
 )
@@ -59,6 +60,12 @@ def test_get_armory_prompt_playbook_mentions_checks() -> None:
 def test_get_armory_prompt_wordlist_mentions_format() -> None:
     prompt = get_armory_prompt("wordlist")
     assert "one entry per line" in prompt or "per line" in prompt
+
+
+def test_get_armory_prompt_toolspec_mentions_proposed_status() -> None:
+    prompt = get_armory_prompt("toolspec")
+    assert "capability_name" in prompt
+    assert "proposed" in prompt
 
 
 def test_get_armory_prompt_unknown_returns_empty() -> None:
@@ -189,6 +196,7 @@ _VALID_FRONTMATTER = """\
 playbook: my-playbook
 name: My Playbook
 leaf_type: auth_endpoint
+scope: generic
 applies_to:
   - auth
 ---
@@ -287,6 +295,147 @@ def test_check_playbook_files_ignores_non_playbook_files() -> None:
     assert _check_playbook_files(files) == []
 
 
+def test_check_playbook_files_missing_scope() -> None:
+    files = [_make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)]
+    errors = _check_playbook_files(files)
+    assert any("scope" in e for e in errors), errors
+
+
+def test_check_playbook_files_invalid_scope_value() -> None:
+    fm = """\
+---
+playbook: my-playbook
+name: My Playbook
+leaf_type: rest_api
+scope: sometimes
+checks:
+  - id: c1
+    name: C1
+    mode: analytical
+    category: misc
+    severity: medium
+---
+"""
+    files = [_make_md_file("playbooks/test.md", fm)]
+    errors = _check_playbook_files(files)
+    assert any("invalid scope" in e for e in errors), errors
+
+
+def test_check_playbook_files_target_specific_without_target_fails() -> None:
+    """scope: target-specific with no target: fires on every matching leaf,
+    across all targets — exactly the false-positive-noise bug scope exists
+    to prevent."""
+    fm = """\
+---
+playbook: my-playbook
+name: My Playbook
+leaf_type: rest_api
+scope: target-specific
+checks:
+  - id: c1
+    name: C1
+    mode: analytical
+    category: misc
+    severity: medium
+---
+"""
+    files = [_make_md_file("playbooks/test.md", fm)]
+    errors = _check_playbook_files(files)
+    assert any("target-specific requires a `target:`" in e for e in errors), errors
+
+
+def test_check_playbook_files_target_specific_with_target_passes() -> None:
+    fm = """\
+---
+playbook: my-playbook
+name: My Playbook
+leaf_type: rest_api
+scope: target-specific
+target: jwtlab
+checks:
+  - id: c1
+    name: C1
+    mode: analytical
+    category: misc
+    severity: medium
+---
+"""
+    files = [_make_md_file("playbooks/test.md", fm)]
+    assert _check_playbook_files(files) == []
+
+
+# ---------------------------------------------------------------------------
+# _check_toolspec_files
+# ---------------------------------------------------------------------------
+
+_VALID_TOOLSPEC = """\
+---
+toolspec: jwt-confusion-forge
+name: JWT Confusion Forge
+capability_name: jwt_confusion_forge
+status: proposed
+category: auth-bypass
+---
+
+## Problem
+
+Existing capabilities can't forge a JWT with an attacker-controlled
+signing algorithm.
+
+## Proposed Capability
+
+Given a JWT and a target public key, emit alg:none and RS256->HS256
+variants.
+
+## Example Usage
+
+Used by jwtlab algorithm-confusion checks to generate forged tokens.
+
+## References
+
+- https://example.com/h1-report
+"""
+
+
+def test_check_toolspec_files_valid_returns_empty() -> None:
+    files = [_make_md_file("toolspecs/jwt-confusion-forge.md", _VALID_TOOLSPEC)]
+    assert _check_toolspec_files(files) == []
+
+
+def test_check_toolspec_files_missing_required_fields() -> None:
+    fm = """\
+---
+name: Something
+---
+"""
+    files = [_make_md_file("toolspecs/bad.md", fm)]
+    errors = _check_toolspec_files(files)
+    assert any("toolspec" in e for e in errors)
+    assert any("capability_name" in e for e in errors)
+    assert any("status" in e for e in errors)
+    assert any("category" in e for e in errors)
+
+
+def test_check_toolspec_files_rejects_non_proposed_status() -> None:
+    fm = """\
+---
+toolspec: my-tool
+name: My Tool
+capability_name: my_tool
+status: forged
+category: misc
+---
+"""
+    files = [_make_md_file("toolspecs/bad.md", fm)]
+    errors = _check_toolspec_files(files)
+    assert any("must be `proposed`" in e for e in errors), errors
+
+
+def test_check_toolspec_files_ignores_non_md_files() -> None:
+    files = [_make_file("toolspecs/notes.txt", "+status: forged\n")]
+    assert _check_toolspec_files(files) == []
+
+
 # ---------------------------------------------------------------------------
 # Regression: actual crash modes that have hit Molly in production.
 # ---------------------------------------------------------------------------
@@ -298,6 +447,7 @@ _FRONTMATTER_WITH_CHECKS = """\
 playbook: my-playbook
 name: My Playbook
 leaf_type: rest_api
+scope: generic
 applies_to:
   - rest
 checks:
@@ -379,6 +529,7 @@ def test_check_playbook_files_accepts_idea_mode() -> None:
 playbook: ideas-only
 name: Ideas
 leaf_type: rest_api
+scope: generic
 checks:
   - id: dormant1
     name: Dormant
@@ -452,6 +603,7 @@ def test_check_playbook_files_accepts_note_only_mutations_for_analytical() -> No
 playbook: analytical-notes
 name: Analytical notes
 leaf_type: rest_api
+scope: generic
 checks:
   - id: c1
     name: c1
@@ -475,6 +627,7 @@ def test_check_playbook_files_accepts_mixed_mutations_with_one_real_payload() ->
 playbook: mixed
 name: Mixed
 leaf_type: rest_api
+scope: generic
 checks:
   - id: c1
     name: c1
@@ -498,6 +651,7 @@ def test_check_playbook_files_accepts_url_override_only_mutation() -> None:
 playbook: url-override
 name: URL override
 leaf_type: rest_api
+scope: generic
 checks:
   - id: c1
     name: c1
@@ -522,6 +676,7 @@ def test_check_playbook_files_accepts_unknown_severity() -> None:
 playbook: legacy
 name: Legacy
 leaf_type: rest_api
+scope: generic
 checks:
   - id: c1
     name: C1
@@ -668,6 +823,41 @@ async def test_validate_armory_skips_non_merged_subtasks() -> None:
     # Non-merged subtasks are skipped; no PR files fetched, passes through.
     assert result.get("graph_status") == "armory_validated"
     mock_gh.get_pr_files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validate_armory_toolspec_clean_passes() -> None:
+    state = _make_state(
+        artifact_type="toolspec",
+        task_repo="jyrkihuhta/molly-armory",
+        subtasks=[_make_subtask("task-0099")],
+    )
+    clean_files = [_make_md_file("toolspecs/jwt-confusion-forge.md", _VALID_TOOLSPEC)]
+    mock_gh = _mock_github(clean_files)
+
+    with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):
+        result = await validate_armory_node(state)
+
+    assert result.get("graph_status") == "armory_validated"
+
+
+@pytest.mark.asyncio
+async def test_validate_armory_toolspec_non_proposed_status_fails() -> None:
+    state = _make_state(
+        artifact_type="toolspec",
+        task_repo="jyrkihuhta/molly-armory",
+        subtasks=[_make_subtask("task-0099")],
+    )
+    bad_files = [_make_md_file(
+        "toolspecs/bad.md",
+        "---\ntoolspec: x\nname: X\ncapability_name: x\nstatus: forged\ncategory: misc\n---\n",
+    )]
+    mock_gh = _mock_github(bad_files)
+
+    with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):
+        result = await validate_armory_node(state)
+
+    assert result.get("graph_status") == "armory_validation_failed"
 
 
 @pytest.mark.asyncio

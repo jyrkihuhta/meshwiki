@@ -542,6 +542,15 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "for use in Molly's security-testing scans.  "
             "Place the file in the appropriate directory and update any index files." + root_note
         )
+    if artifact_type == "toolspec":
+        return (
+            "You are working on the Molly armory repository (molly-armory). "
+            "Your goal is to write a toolspec: a tracked PROPOSAL for a new Molly tool "
+            "capability, NOT a working implementation. It's a Markdown file with YAML "
+            "frontmatter (`toolspec`, `name`, `capability_name`, `status: proposed`, "
+            "`category`) plus Problem / Proposed Capability / Example Usage / References "
+            "sections. Do not write any Python — that's a separate, later task." + root_note
+        )
     # Default: MeshWiki
     return (
         "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
