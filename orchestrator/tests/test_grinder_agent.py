@@ -17,6 +17,7 @@ from factory.agents.grinder_agent import (
     build_grinder_task_prompt,
     grind_subtask,
     grind_subtask_e2b,
+    select_validation_command,
 )
 from factory.state import FactoryState, SubTask
 
@@ -807,6 +808,148 @@ def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
     assert "isort" in PLAYBOOK_SCHEMA
     # And it must point at the validator script fallback.
     assert "scripts/validate_playbooks.py" in PLAYBOOK_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# select_validation_command — targeted pytest for playbook/tool changes
+# ---------------------------------------------------------------------------
+
+
+def test_select_validation_command_meshwiki_uses_full_suite() -> None:
+    """MeshWiki subtasks still validate against the full src/tests suite."""
+    cmd = select_validation_command(
+        subtask={"files_touched": ["src/foo.py"]},
+        artifact_type="code",
+        task_repo_root=None,
+        is_meshwiki=True,
+    )
+    assert "python -m pytest src/tests/ -x -q" in cmd
+    assert "test_playbook_loader" not in cmd
+
+
+def test_select_validation_command_playbook_targets_loader_test() -> None:
+    """Playbook artifact tasks target tests/test_playbook_loader.py so the
+    validation step completes in under 30s instead of timing out on the
+    full suite (acceptance criterion 1)."""
+    sub = _make_prompt_subtask()
+    sub["files_touched"] = ["playbooks/ssrf-internal-api.md"]
+    cmd = select_validation_command(
+        subtask=sub,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/test_playbook_loader.py -q" in cmd
+    assert "do NOT fall" in cmd
+    assert "times out at" in cmd
+    # The prompt must tell the agent to skip --ignore=tests/fixtures
+    # when running the targeted invocation (acceptance criterion 3).
+    assert "is not needed" in cmd
+    assert "--ignore=tests/fixtures" in cmd
+
+
+def test_select_validation_command_playbook_handles_dotted_root() -> None:
+    """The loader-test command is selected regardless of whether
+    ``expected_files`` uses ``playbooks/`` or the configured
+    ``task_repo_root`` prefix."""
+    sub = _make_prompt_subtask()
+    sub["files_touched"] = ["molly/playbooks/foo.md"]
+    cmd = select_validation_command(
+        subtask=sub,
+        artifact_type="playbook",
+        task_repo_root="molly/playbooks",
+        is_meshwiki=False,
+    )
+    assert "tests/test_playbook_loader.py" in cmd
+
+
+def test_select_validation_command_playbook_empty_files_falls_back() -> None:
+    """Even with empty files_touched, the playbook artifact gets the
+    loader test — falling back to a wide suite silently is the bug we
+    are fixing."""
+    cmd = select_validation_command(
+        subtask=_make_prompt_subtask(),
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+    )
+    assert "tests/test_playbook_loader.py" in cmd
+
+
+def test_select_validation_command_playbook_skips_non_markdown_files() -> None:
+    """If files_touched contains only non-md files, fall back to the
+    canonical loader test rather than running nothing."""
+    sub = _make_prompt_subtask()
+    sub["files_touched"] = ["docs/notes.md", "src/example.py"]
+    cmd = select_validation_command(
+        subtask=sub,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+    )
+    assert "tests/test_playbook_loader.py" in cmd
+
+
+def test_select_validation_command_tool_targets_module_test() -> None:
+    """Tool artifact tasks map molly/tools/<name>.py -> tests/test_<name>.py
+    when files_touched declares the changed module."""
+    sub = _make_prompt_subtask()
+    sub["files_touched"] = ["molly/tools/ssrf.py"]
+    cmd = select_validation_command(
+        subtask=sub,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/test_ssrf.py -q" in cmd
+
+
+def test_select_validation_command_tool_falls_back_to_full_suite() -> None:
+    """When no specific tool module can be derived, the tool prompt
+    keeps the existing behaviour (full tests/ with -x) so we don't
+    regress coverage for ambiguous changes."""
+    cmd = select_validation_command(
+        subtask=_make_prompt_subtask(),
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/ -x -q" in cmd
+
+
+def test_select_validation_command_wordlist_keeps_full_suite() -> None:
+    """Wordlist (or other non-playbook/tool) artifacts keep the default
+    full-suite command — the timeout issue is specific to markdown and
+    tool artifacts."""
+    cmd = select_validation_command(
+        subtask=_make_prompt_subtask(),
+        artifact_type="wordlist",
+        task_repo_root="wordlists",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/ -x -q" in cmd
+
+
+def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
+    """End-to-end check that the rendered prompt for a playbook subtask
+    tells the agent to run the narrow command (acceptance criterion 3)."""
+    sub = _make_prompt_subtask("aaaa1111-sub-aaaa")
+    sub["files_touched"] = ["playbooks/example.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "python -m pytest tests/test_playbook_loader.py -q" in prompt
+    assert "do NOT fall" in prompt
+    assert "times out" in prompt
+    # Hardcoded full-suite line must NOT appear for playbook artifacts.
+    assert "5. Run: python -m pytest tests/ -x -q\n" not in prompt
 
 
 # ---------------------------------------------------------------------------

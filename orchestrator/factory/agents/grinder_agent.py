@@ -521,6 +521,119 @@ class GrinderToolExecutor:
         return f"Task {page_name} transitioned to {status}"
 
 
+def _playbook_test_targets(
+    subtask: dict[str, Any],
+    task_repo_root: str | None,
+) -> tuple[str, bool]:
+    """Derive a targeted pytest invocation for a playbook/task change.
+
+    Inspects ``subtask["files_touched"]`` (sourced from the ``expected_files``
+    frontmatter field by ``task_intake_node``) and returns the narrowest
+    pytest command that still validates the change. The full ``tests/``
+    suite is intentionally avoided because agents repeatedly time out at
+    120s on it for single-file markdown playbook changes, and several
+    suites require fixture resources that aren't always available in the
+    sandbox.
+
+    Args:
+        subtask: Active subtask dict (with optional ``files_touched``).
+        task_repo_root: Sub-path within the repo where the artifact lives
+            (e.g. ``"playbooks"``). ``None`` for MeshWiki.
+
+    Returns:
+        Tuple ``(command, ignore_fixtures)``. ``command`` is the full
+        ``python -m pytest ... -q`` invocation the agent should run.
+        ``ignore_fixtures`` is ``True`` when the targeted command should
+        add ``--ignore=tests/fixtures`` to skip fixture-data files that
+        are not real tests.
+    """
+    files = [
+        str(f).strip() for f in (subtask.get("files_touched") or []) if str(f).strip()
+    ]
+    ignore_fixtures = True
+    test_file: str | None = None
+
+    for raw in files:
+        path = raw.lstrip("./")
+        if not path.endswith(".md"):
+            continue
+        if path.startswith("playbooks/") or path.startswith(
+            (task_repo_root or "playbooks") + "/"
+        ):
+            test_file = "tests/test_playbook_loader.py"
+            break
+
+    if test_file is None:
+        test_file = "tests/test_playbook_loader.py"
+
+    return f"python -m pytest {test_file} -q", ignore_fixtures
+
+
+def _tool_test_targets(
+    subtask: dict[str, Any],
+    task_repo_root: str | None,
+) -> tuple[str, bool]:
+    """Derive a targeted pytest invocation for a tool change.
+
+    Mirrors :func:`_playbook_test_targets` for tool artifacts. Maps
+    ``molly/tools/<name>.py`` -> ``tests/test_<name>.py`` when the
+    subtask declares the modified file via ``expected_files``. Falls
+    back to ``tests/`` when no specific file can be derived.
+    """
+    files = [
+        str(f).strip() for f in (subtask.get("files_touched") or []) if str(f).strip()
+    ]
+    ignore_fixtures = True
+
+    for raw in files:
+        path = raw.lstrip("./")
+        if not (path.endswith(".py") and path.startswith("molly/tools/")):
+            continue
+        module = path.rsplit("/", 1)[-1].removesuffix(".py")
+        if module.startswith("__"):
+            continue
+        return f"python -m pytest tests/test_{module}.py -q", ignore_fixtures
+
+    return "python -m pytest tests/ -x -q", ignore_fixtures
+
+
+def select_validation_command(
+    subtask: dict[str, Any],
+    artifact_type: str | None,
+    task_repo_root: str | None,
+    is_meshwiki: bool,
+) -> str:
+    """Return the markdown ``step 5`` validation command for a subtask.
+
+    Encapsulates the "use a narrow pytest invocation for playbook-only
+    changes" rule. MeshWiki subtasks still use the full ``src/tests/``
+    suite because the sandbox has the fixtures available and the suite
+    is required for safe merges.
+    """
+    if is_meshwiki:
+        return "5. Run: python -m pytest src/tests/ -x -q\n"
+
+    if artifact_type == "playbook":
+        cmd, ignore = _playbook_test_targets(subtask, task_repo_root)
+        ignore_note = (
+            " (--ignore=tests/fixtures is not needed for this command)"
+            if ignore
+            else ""
+        )
+        return (
+            f"5. Run: {cmd}\n"
+            f"   Targeted invocation completes in under 30s; do NOT fall\n"
+            f"   back to `python -m pytest tests/ -x -q` — it times out at\n"
+            f"   120s on single-file playbook changes.{ignore_note}\n"
+        )
+
+    if artifact_type == "tool":
+        cmd, _ = _tool_test_targets(subtask, task_repo_root)
+        return f"5. Run: {cmd}\n"
+
+    return "5. Run: python -m pytest tests/ -x -q\n"
+
+
 def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> str:
     """Return a one-paragraph repo/artifact description for the grinder task prompt.
 
@@ -545,7 +658,9 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "exposes a `capability_name` class attribute, a `schema()` classmethod returning "
             "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
             "returns a result dict.  Tests live in `tests/`.  "
-            "Run tests with `python -m pytest tests/ -x -q`.  "
+            "Run a targeted invocation such as "
+            "`python -m pytest tests/test_<tool_module>.py -q` (step 5 below) — "
+            "do NOT run the full `tests/` suite, it times out for single-file changes.  "
             "Lint with `ruff check . && black --check .` from the repo root."
             + root_note
         )
@@ -720,7 +835,12 @@ def build_grinder_task_prompt(
             f"4. Run autofix: ruff check --fix {lint_target} && black {lint_target}\n"
             "   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
         )
-        test_step = "5. Run: python -m pytest tests/ -x -q\n"
+        test_step = select_validation_command(
+            subtask=subtask,
+            artifact_type=artifact_type,
+            task_repo_root=task_repo_root,
+            is_meshwiki=is_meshwiki,
+        )
 
     return (
         f"{repo_intro} "
