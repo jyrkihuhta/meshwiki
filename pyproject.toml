@@ -25,6 +25,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-playwright>=0.5",
     "beautifulsoup4>=4.12",
+    "cryptography>=42.0",
 ]
 
 [build-system]

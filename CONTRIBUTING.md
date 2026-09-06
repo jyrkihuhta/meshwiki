@@ -52,6 +52,30 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
 python -m pytest tests/ -v
 ```
 
+#### Required dev dependencies for the test suite
+
+`pytest` collection assumes a small set of dev-only packages are present
+in the environment. `./dev.sh` installs all of them, but if you run
+`pytest` directly (e.g. inside a container or a CI bootstrap layer that
+does not invoke `dev.sh`), make sure these are installed:
+
+```bash
+pip install -e ".[dev]"
+```
+
+The `dev` extra in `pyproject.toml` includes:
+
+- `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-playwright`
+- `beautifulsoup4` (used by editor/render tests)
+- `cryptography` (required by some test fixtures — was previously a
+  silent gap that caused `ModuleNotFoundError: No module named
+  'cryptography'` at collection time and forced ad-hoc `pip install`
+  mid-task)
+
+If you add a new test fixture or helper that imports a package not listed
+above, add it to `[project.optional-dependencies].dev` in
+`pyproject.toml` so the next contributor doesn't hit the same gap.
+
 All tests must pass before submitting a PR. CI enforces 80% minimum coverage on Python code.
 
 ## How to Contribute
