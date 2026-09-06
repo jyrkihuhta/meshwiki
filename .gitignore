@@ -7,7 +7,12 @@
 .terraform.lock.hcl
 
 # Python
+# Keep __pycache__/ and *.pyc out of the tree so `git rebase origin/staging`
+# works on branches that have just run pytest, without needing
+# `git stash && git rebase && git stash pop`. Matches all bytecodes produced
+# by cpython 3.x regardless of optimization level.
 __pycache__/
+__pycache__/**
 *.pyc
 *.pyo
 *.pyd
@@ -20,6 +25,9 @@ venv/
 dist/
 build/
 .coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # IDE
 .idea/
