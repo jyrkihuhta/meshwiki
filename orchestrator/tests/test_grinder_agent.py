@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -476,7 +477,9 @@ def test_grinder_tools_list() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_prompt_subtask(subtask_id: str = "abcd1234-sub-01", title: str = "Add X") -> dict:
+def _make_prompt_subtask(
+    subtask_id: str = "abcd1234-sub-01", title: str = "Add X"
+) -> dict:
     return {
         "id": subtask_id,
         "wiki_page": "Task_0001_X",
@@ -519,6 +522,82 @@ def test_build_grinder_task_prompt_fresh_run_uses_canonical_branch() -> None:
     assert "git push -u origin HEAD" in prompt
     assert "REWORK REQUIRED" not in prompt
     assert "NEVER create a new branch" not in prompt
+    # Step 9 must instruct the agent to write the body to a file and pass
+    # --body-file. Using --body "..." with markdown content (backticks,
+    # newlines, dollar signs) breaks bash interpretation of the string.
+    assert "--body-file" in prompt
+    assert "gh pr create" in prompt
+    # The concrete command shown to the agent must use --body-file, not
+    # --body "...". (The note may reference --body "..." as a warning.)
+    assert '--body-file /tmp/pr-body.md' in prompt
+    assert (
+        'gh pr create --base staging --head factory/eb21874d-sub-73fe18 --title "[Factory] ..." --body "..."'
+        not in prompt
+    )
+
+
+def test_create_pr_uses_body_file() -> None:
+    """_create_pr writes the body to a temp file and invokes
+    `gh pr create --body-file <path>` so markdown content (backticks,
+    newlines, dollar signs) is never interpreted by a shell.
+
+    Regression test for the observed failure mode where agents used
+    `gh pr create --body "..."` and bash tried to execute
+    `playbooks/foo.md`, `checks:`, `mode:`, etc.
+    """
+    from factory.agents.grinder_agent import GrinderToolExecutor
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        stdout = "https://github.com/owner/repo/pull/7"
+        stderr = ""
+
+    def _fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        captured["body_file_path"] = cmd[cmd.index("--body-file") + 1]
+        captured["body_on_disk"] = open(
+            captured["body_file_path"], encoding="utf-8"
+        ).read()
+        return _FakeProc()
+
+    agent = GrinderToolExecutor.__new__(GrinderToolExecutor)
+    agent.repo_root = "/tmp"
+
+    body = (
+        "## Summary\n"
+        "\n"
+        "- adds `playbooks/foo.md`\n"
+        "- checks: yes\n"
+        "- mode: strict\n"
+        "\n"
+        "References `$X` and `$(cmd)`.\n"
+    )
+
+    with patch(
+        "factory.agents.grinder_agent.get_settings",
+        return_value=MagicMock(pr_base_branch="staging"),
+    ):
+        with patch(
+            "factory.agents.grinder_agent.subprocess.run", side_effect=_fake_run
+        ):
+            url = agent._create_pr(
+                title="[Factory] add foo", body=body, branch_name="factory/task-x"
+            )
+
+    assert url == "https://github.com/owner/repo/pull/7"
+    cmd = captured["cmd"]
+    assert cmd[0:3] == ["gh", "pr", "create"]
+    assert "--body-file" in cmd
+    # Body was written verbatim to the file (including markdown special chars
+    # that would have broken bash if passed inline).
+    assert captured["body_on_disk"] == body
+    # The temp file is cleaned up by the helper after the subprocess returns.
+    assert not os.path.exists(captured["body_file_path"])
+    # The body must NOT have been passed inline via --body (which would
+    # defeat the purpose of the file-based approach for shell callers).
+    assert "--body" not in cmd
 
 
 def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
@@ -550,10 +629,7 @@ def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
     # Push must target the exact PR branch with --force-with-lease (since
     # we may rebase). Pushing HEAD without an explicit branch is a footgun
     # if the LLM has wandered onto a different branch.
-    assert (
-        "git push --force-with-lease origin factory/35b3cb7c-sub-3feb68"
-        in prompt
-    )
+    assert "git push --force-with-lease origin factory/35b3cb7c-sub-3feb68" in prompt
     assert "git push -u origin HEAD" not in prompt
     # The previous review feedback is surfaced verbatim so the grinder
     # knows what to fix.
