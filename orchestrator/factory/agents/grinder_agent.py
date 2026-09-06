@@ -677,12 +677,11 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
             "or the repo's playbook validator script (e.g. "
             "`scripts/validate_playbooks.py` if present).  "
-            "If you also touched the Python loader (e.g. `molly/loader.py`), validate it "
-            "with the targeted loader test "
-            "`python -m pytest tests/test_playbook_loader.py -q` from the armory repo — "
-            "it finishes in <30s. Do NOT fall back to `python -m pytest tests/ -x -q`, "
-            "which times out at 120s on the e2b sandbox. `--ignore=tests/fixtures` is "
-            "unnecessary for the targeted invocation."
+            "Playbook `.md` files have no Python test suite. The standard step 5 is therefore "
+            "a no-op for playbook-only changes — there is no full pytest run, which avoids "
+            "the 120-second sandbox timeout observed on the broad suite. If you also touched "
+            "the Python loader (e.g. `molly/loader.py`), the narrow loader test in the armory "
+            "repo (the test that exercises the loader) finishes in well under 30 seconds."
             + root_note
         )
     if artifact_type == "wordlist":

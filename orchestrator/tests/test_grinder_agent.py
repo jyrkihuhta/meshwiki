@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from factory.agents.grinder_agent import (
     GRINDER_SYSTEM_PROMPT,
     GRINDER_TOOLS,
@@ -602,98 +601,6 @@ def test_create_pr_uses_body_file() -> None:
     assert "--body" not in cmd
 
 
-def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
-    """A playbook task must NOT use the full `pytest tests/ -x -q` command —
-    that invocation times out at 120s for markdown-only changes and pulls in
-    fixture-heavy tests that aren't relevant to YAML validation.
-
-    Instead the prompt must point at the narrow validator tests
-    (``tests/test_m23_armory_validation.py`` + ``tests/test_armory_contract.py``)
-    which cover `_check_playbook_files` and the contract fixtures, run in
-    ~1 second, and have no heavy fixture dependencies.
-    """
-    sub = _make_prompt_subtask("pb-targeted-01")
-    prompt = build_grinder_task_prompt(
-        subtask=sub,
-        page_content="task body",
-        review_feedback="",
-        is_rework=False,
-        artifact_type="playbook",
-        task_repo_root="playbooks",
-        is_meshwiki=False,
-        base_branch="staging",
-    )
-
-    # The targeted command must appear, named verbatim so a regression that
-    # drifts the path shows up immediately.
-    assert "tests/test_m23_armory_validation.py" in prompt
-    assert "tests/test_armory_contract.py" in prompt
-
-    # The validity of the targeted invocation depends on NOT also forcing
-    # the agent to run the full slow suite. Step 5 must be the narrow
-    # invocation, not the blanket `pytest tests/ -x -q`.
-    step5_idx = prompt.index("5. ")
-    next_step_idx = prompt.index("6. ", step5_idx)
-    step5_block = prompt[step5_idx:next_step_idx]
-    assert "tests/test_m23_armory_validation.py" in step5_block
-    assert "tests/test_armory_contract.py" in step5_block
-    # The blanket full-suite pytest command must not appear as the primary
-    # step-5 directive for a playbook-only change. (It may appear as a
-    # conditional fallback — that text is allowed and tested separately.)
-    assert "5. Run: python -m pytest tests/ -x -q\n" not in step5_block
-
-
-def test_build_grinder_task_prompt_playbook_mentions_targeted_fallback() -> None:
-    """The playbook prompt must explicitly tell the agent when to fall back
-    to the full pytest suite (only if non-playbook code was touched)."""
-    sub = _make_prompt_subtask("pb-fallback-01")
-    prompt = build_grinder_task_prompt(
-        subtask=sub,
-        page_content="task body",
-        review_feedback="",
-        is_rework=False,
-        artifact_type="playbook",
-        task_repo_root="playbooks",
-        is_meshwiki=False,
-        base_branch="staging",
-    )
-
-    # Fallback clause must be present and mention what triggers it.
-    assert "fall back" in prompt.lower() or "fallback" in prompt.lower()
-    assert "non-playbook" in prompt or "loader" in prompt
-
-    # Acceptance criterion: the prompt explicitly instructs the agent to
-    # SKIP `--ignore=tests/fixtures` (it's irrelevant for the targeted
-    # validator tests and slows collection). The token must appear, but
-    # only in the "do not use it" context.
-    assert "--ignore=tests/fixtures" in prompt
-    assert "skip" in prompt.lower() or "not needed" in prompt.lower()
-
-
-def test_build_grinder_task_prompt_non_playbook_keeps_full_pytest() -> None:
-    """Tool / wordlist / MeshWiki tasks must NOT be switched to the targeted
-    playbook-only invocation — their full suite is the right validation step.
-    Regression guard so the new playbook branch doesn't bleed into other
-    artifact types.
-    """
-    sub = _make_prompt_subtask("tool-regression-01")
-    prompt = build_grinder_task_prompt(
-        subtask=sub,
-        page_content="task body",
-        review_feedback="",
-        is_rework=False,
-        artifact_type="tool",
-        task_repo_root="tools",
-        is_meshwiki=False,
-        base_branch="staging",
-    )
-
-    # Tool tasks still use the blanket command.
-    assert "5. Run: python -m pytest tests/ -x -q" in prompt
-    # And must NOT advertise the narrow playbook validator tests.
-    assert "tests/test_m23_armory_validation.py" not in prompt
-
-
 def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
     """A rework must explicitly forbid creating new semantic branches and
     push back to the canonical factory/<id> branch with --force-with-lease.
@@ -931,8 +838,12 @@ def test_select_validation_command_wordlist_keeps_full_suite() -> None:
 
 
 def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
-    """End-to-end check that the rendered prompt for a playbook subtask
-    tells the agent to run the narrow command (acceptance criterion 3)."""
+    """After PR #176 merged, playbook artifacts skip pytest entirely
+    (no Python test suite on `.md` playbooks). The 120-second sandbox
+    timeout that motivated this task is now avoided by skipping pytest,
+    which trivially satisfies acceptance criteria 1 and 2. The full
+    `python -m pytest tests/ -x -q` invocation must NOT appear as the
+    primary step 5 directive for a playbook-only change."""
     sub = _make_prompt_subtask("aaaa1111-sub-aaaa")
     sub["files_touched"] = ["playbooks/example.md"]
     prompt = build_grinder_task_prompt(
@@ -945,11 +856,36 @@ def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
         is_meshwiki=False,
         base_branch="staging",
     )
-    assert "python -m pytest tests/test_playbook_loader.py -q" in prompt
-    assert "do NOT fall" in prompt
-    assert "times out" in prompt
+    # PR #176: playbook artifacts have no Python test suite — step 5 is
+    # the no-op explanation, not a pytest invocation.
+    assert "No pytest run" in prompt
     # Hardcoded full-suite line must NOT appear for playbook artifacts.
     assert "5. Run: python -m pytest tests/ -x -q\n" not in prompt
+    # And the broader targeted loader test must NOT be inserted either —
+    # the agent only runs it locally if it touches the Python loader.
+    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+
+
+def test_artifact_intro_playbook_documents_targeted_pytest() -> None:
+    """The playbook intro paragraph must point at the actual cloned repo
+    (armory), not a sibling orchestrator repo, and must mention the
+    narrow loader test as the optional fallback when the agent touches
+    Python loader code. Regression guard for the PM review fix #2."""
+    from factory.agents.grinder_agent import _artifact_intro
+
+    intro = _artifact_intro("playbook", "playbooks")
+    # Must point at the armory repo (the sandbox clones it to /tmp/repo),
+    # NOT at a sibling orchestrator/ directory that doesn't exist there.
+    assert "molly-armory" in intro
+    assert "orchestrator repo" not in intro
+    # Must reference the narrow loader test as the optional fallback.
+    assert "loader" in intro.lower()
+    assert "well under 30" in intro
+    # Must mention the warned-against full-suite sandbox timeout so the
+    # agent doesn't fall back to `python -m pytest tests/ -x -q`.
+    assert "120-second" in intro or "120s" in intro or "120 " in intro
+    # PR #176's linter-skip guidance must still be present.
+    assert "DO NOT run `ruff check` or `black --check`" in intro
 
 
 # ---------------------------------------------------------------------------
