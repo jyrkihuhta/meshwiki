@@ -554,9 +554,14 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "You are working on the Molly armory repository (molly-armory). "
             "Your goal is to create or update a YAML playbook for Molly's security-testing pipeline.  "
             "Playbooks define attack patterns: capabilities required, mutation templates, "
-            "and expected response conditions.  Validate YAML syntax after writing.  "
-            "Lint with `ruff check . && black --check .` from the repo root."
-            + root_note
+            "and expected response conditions.  "
+            "DO NOT run `ruff check` or `black --check` on playbook `.md` files — they are "
+            "Markdown with YAML frontmatter, not Python, and both linters will report spurious "
+            "`No Python files found` / `Cannot parse: 1:3: ---` errors that waste a round-trip.  "
+            "Instead, validate the frontmatter with a YAML-only parser (e.g. `python -c "
+            "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
+            "or the repo's playbook validator script (e.g. "
+            "`scripts/validate_playbooks.py` if present)." + root_note
         )
     if artifact_type == "wordlist":
         return (
@@ -687,6 +692,21 @@ def build_grinder_task_prompt(
             "   (Tools are installed globally — do NOT use .venv/bin/ prefix. black/isort are for .py files ONLY; do not run them on .js, .css, or other file types.)\n"
         )
         test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
+    elif artifact_type == "playbook":
+        lint_target = task_repo_root.rstrip("/") if task_repo_root else "playbooks"
+        autofix_step = (
+            f"4. SKIP `ruff check` / `black --check` / `isort` on playbook `.md` files — they are "
+            f"Markdown with YAML frontmatter, not Python. Both linters produce spurious "
+            f"`No Python files found` / `Cannot parse: 1:3: ---` errors that waste a round-trip.\n"
+            f"   Instead, validate each playbook with a frontmatter-only YAML parser:\n"
+            f"     for f in {lint_target}/*.md; do\n"
+            f"       python -c \"import yaml,sys; d=yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1]); "
+            f"assert d.get('playbook') and d.get('name') and d.get('leaf_type') and d.get('scope')\" \"$f\" \\\n"
+            f'         || echo "FAIL: $f"\n'
+            f"     done\n"
+            f"   If the repo provides `scripts/validate_playbooks.py` (or equivalent), use that instead.\n"
+        )
+        test_step = "5. No pytest run — playbook files have no Python test suite.\n"
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (

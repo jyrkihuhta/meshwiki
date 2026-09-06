@@ -247,6 +247,26 @@ Body prose explaining what this playbook tests and why.
 - **DO NOT** ship a playbook with only check `id`s and the rest of the
   fields populated as `?` — that's a sign the YAML is structurally
   wrong (probably emitted as a list of strings rather than mappings).
+
+### Local validation (skip Python linters)
+
+Playbook `.md` files are NOT Python. Do not run `ruff check` /
+`black --check` / `isort` on them — both linters report spurious
+`No Python files found` / `Cannot parse: 1:3: ---` errors that waste
+a round-trip on every grinder iteration.
+
+To validate locally use a frontmatter-only YAML parser:
+
+```bash
+python -c "import yaml,sys; \
+  d=yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1]); \
+  assert d.get('playbook') and d.get('name') and d.get('leaf_type') and d.get('scope')" \
+  playbooks/foo.md
+```
+
+If the repo provides `scripts/validate_playbooks.py` (or equivalent
+validator script), use that instead — it's the source of truth and
+will catch the schema rules listed above.
 """
 
 # ---------------------------------------------------------------------------
