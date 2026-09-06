@@ -53,6 +53,12 @@ from .base import BaseBot, BotResult
 logger = logging.getLogger(__name__)
 
 ARMORY_REPO_DEFAULT = "jyrkihuhta/molly-armory"
+# molly-armory's GitHub *default* branch is `main`, but `main` is stale
+# (24 playbooks, no scope field, no toolspecs/) — `staging` is the repo's
+# real working branch (1000+ playbooks, actively maintained; see deck's
+# CLAUDE.md). Every armory survey call MUST pass this ref explicitly —
+# the GitHub Contents API silently serves `main` otherwise.
+ARMORY_REF = "staging"
 # The staging Molly instance is hard scope-locked to target-dummy as of
 # 2026-09-05 (deck PLAN.md M2) — real targets (whatnot/boozt/doppler/acronis)
 # are paused. KNOWN_TARGETS matters for validating LLM output and for the
@@ -493,9 +499,11 @@ class ClassGapResearcherBot(BaseBot):
     # ------------------------------------------------------------------
 
     async def _github_get(self, path: str) -> httpx.Response | None:
-        """GET a path from the armory repo's Contents API. Returns None on
-        404 (missing dir/file — e.g. toolspecs/ before it has any content)
-        and raises on any other error."""
+        """GET a path from the armory repo's Contents API, pinned to
+        ``ARMORY_REF`` (the repo's real working branch, not its stale
+        GitHub-default `main`). Returns None on 404 (missing dir/file —
+        e.g. toolspecs/ before it has any content) and raises on any other
+        error."""
         settings = get_settings()
         token = settings.github_token
         repo = self._armory_repo
@@ -508,14 +516,14 @@ class ClassGapResearcherBot(BaseBot):
             "X-GitHub-Api-Version": "2022-11-28",
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(url, headers=headers)
+            r = await client.get(url, headers=headers, params={"ref": ARMORY_REF})
             if r.status_code == 404:
                 return None
             r.raise_for_status()
             return r
 
     async def _fetch_armory_classes(self) -> tuple[set[tuple[str, str]], set[str]]:
-        """Survey ``<armory_repo>/playbooks/`` on the default branch.
+        """Survey ``<armory_repo>/playbooks/`` on ``ARMORY_REF``.
 
         Returns ``(target_specific_pairs, generic_slugs)``:
         - ``target_specific_pairs``: ``(target, vulnerability_class)`` pairs
