@@ -625,8 +625,7 @@ def build_grinder_task_prompt(
             "(Force-with-lease is required because the branch has been "
             "rebased; pushing to a different branch is FORBIDDEN.)"
         )
-        step9_cmd = "gh pr view --json url --jq .url  # print existing PR URL"
-        step9_verb = "Update the existing PR"
+        step9_section = "9. Update the existing PR — print its URL:\n   gh pr view --json url --jq .url\n"
     else:
         branch_instruction = (
             f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
@@ -642,11 +641,23 @@ def build_grinder_task_prompt(
             "(Use 'git push -u origin HEAD' — do NOT use --force-with-lease; "
             "the branch may have no upstream tracking yet.)"
         )
-        step9_cmd = (
-            f'gh pr create --base {base_branch} --head factory/{subtask_id}'
-            f' --title "[Factory] ..." --body "..."'
+        step9_section = (
+            f"9. Create a PR targeting {base_branch}. Write the body to a temp file\n"
+            f"   FIRST so backticks, dollar signs, and newlines in markdown are NOT\n"
+            f"   interpreted by bash:\n"
+            f"   body_file=$(mktemp)\n"
+            f"   cat > \"$body_file\" <<'PR_BODY_EOF'\n"
+            f"   <multi-line markdown body — code spans like `path/to/file.md`,\n"
+            f"    bullets, and ```fenced blocks``` are all safe inside this heredoc>\n"
+            f"   PR_BODY_EOF\n"
+            f"   gh pr create --base {base_branch} --head factory/{subtask_id} \\\n"
+            f'     --title "[Factory] <concise summary>" --body-file "$body_file"\n'
+            f'   rm -f "$body_file"\n'
+            f"   ⚠️  Do NOT pass the body via a `--body` flag on the command line —\n"
+            f"   bash will treat backticks, `$...`, and other markdown as shell\n"
+            f"   metacharacters, producing errors like `Permission denied` or\n"
+            f"   `command not found`. Always use `--body-file`.\n"
         )
-        step9_verb = "Create a PR"
 
     repo_intro = _artifact_intro(artifact_type, task_repo_root)
     armory_protocol = get_armory_prompt(artifact_type)
@@ -684,7 +695,7 @@ def build_grinder_task_prompt(
         f"   git fetch origin && git rebase origin/{base_branch}\n"
         f"   Resolve any conflicts, then push: {push_cmd}\n"
         f"   {push_note}\n"
-        f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
+        f"{step9_section}"
         f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
         f"10. Print the PR URL on the last line of your output"
     )
