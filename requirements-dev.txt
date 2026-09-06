@@ -1,0 +1,19 @@
+# Development dependencies for MeshWiki (top-level).
+#
+# Mirrors the `dev` extras in pyproject.toml so a plain
+# `pip install -r requirements-dev.txt` works in environments where the
+# package hasn't been installed editable first (CI containers, grinder
+# sandboxes, fresh contributors who only want to run the tests).
+#
+# Keep this file in sync with [project.optional-dependencies].dev in
+# pyproject.toml. cryptography is required because tests/fixtures/conftest.py
+# imports it during pytest collection; without it, every `pytest` invocation
+# crashes with `ModuleNotFoundError: No module named 'cryptography'` before
+# even loading the first test file.
+-r pyproject.toml
+pytest>=8.0
+pytest-asyncio>=0.24
+pytest-cov>=5.0
+pytest-playwright>=0.5
+beautifulsoup4>=4.12
+cryptography>=42.0

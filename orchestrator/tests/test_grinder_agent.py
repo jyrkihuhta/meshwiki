@@ -683,6 +683,40 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     assert "No pytest run" in prompt
 
 
+def test_build_grinder_task_prompt_playbook_offers_loader_fallback() -> None:
+    """The playbook test step must point at the self-contained loader
+    test file (with ``--ignore=tests/fixtures``) as the fallback when
+    the agent DOES need to exercise the loader.
+
+    Regression: the full ``python -m pytest tests/`` invocation pulls in
+    ``tests/fixtures/conftest.py``, which imports ``cryptography``. That
+    package is NOT installed in the e2b grinder sandbox, so pytest
+    collection fails with ``ModuleNotFoundError: No module named
+    'cryptography'`` before any test runs. The loader-specific file is
+    self-contained and exercises the markdown-loading contract that
+    playbook changes actually affect, so it is the only safe pytest
+    target for playbook tasks.
+    """
+    sub = _make_prompt_subtask("abcd1234-sub-loader1", title="Add playbook X")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    assert "test_playbook_loader.py" in prompt
+    assert "--ignore=tests/fixtures" in prompt
+    assert "ModuleNotFoundError: No module named 'cryptography'" in prompt
+    # And we still must not invoke the full suite as the default step
+    # — staging's policy is "no full pytest run for playbooks".
+    assert "5. Run: python -m pytest tests/ -x -q\n" not in prompt
+
+
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
     """Regression guard: a non-playbook armory task (e.g. `tool`) MUST still
     run the ruff/black autofix step. Only playbook tasks are exempted."""
@@ -700,6 +734,33 @@ def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
     assert "ruff check --fix molly/tools" in prompt
     assert "black molly/tools" in prompt
     assert "SKIP `ruff check`" not in prompt
+
+
+def test_build_grinder_task_prompt_non_playbook_uses_full_suite() -> None:
+    """Non-playbook artifact types keep the original ``pytest tests/`` step
+    so we don't regress the default for tool / wordlist / toolspec work.
+    """
+    for artifact_type in ("tool", "wordlist", "toolspec"):
+        sub = _make_prompt_subtask(
+            f"abcd1234-sub-{artifact_type}", title=f"add {artifact_type}"
+        )
+        prompt = build_grinder_task_prompt(
+            subtask=sub,
+            page_content="task body",
+            review_feedback="",
+            is_rework=False,
+            artifact_type=artifact_type,
+            task_repo_root="",
+            is_meshwiki=False,
+            base_branch="staging",
+        )
+
+        assert (
+            "5. Run: python -m pytest tests/ -x -q\n" in prompt
+        ), f"{artifact_type} should keep the full-suite test step"
+        assert (
+            "test_playbook_loader.py" not in prompt
+        ), f"{artifact_type} must not be redirected to the loader-only path"
 
 
 def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
