@@ -41,6 +41,33 @@ include = ["src/meshwiki"]
 
 [tool.isort]
 profile = "black"
+# isort is invoked only against Python files in CI; this exclude is defensive
+# so that ad-hoc local runs over the whole repo (which can include Molly armory
+# playbook .md files mounted in this checkout) skip them too.
+skip_glob = ["**/*.md"]
+
+[tool.black]
+# Black skips *.md by default — declare it explicitly so reviewers running
+# `black --check .` from the repo root don't see "Cannot parse: 1:3: ---"
+# errors on playbook Markdown files.
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+)/
+| .*\.md
+'''
+
+[tool.ruff]
+# Ruff skips *.md by default — declare it explicitly so reviewers running
+# `ruff check .` from the repo root don't see "No Python files found" on
+# playbook Markdown files.
+exclude = ["*.md", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
