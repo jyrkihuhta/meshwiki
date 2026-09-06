@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -463,31 +464,51 @@ class GrinderToolExecutor:
         return result.stdout + result.stderr
 
     def _create_pr(self, title: str, body: str, branch_name: str) -> str:
-        """Create a GitHub pull request and return the PR URL."""
+        """Create a GitHub pull request and return the PR URL.
+
+        The PR body is written to a temp file and passed via ``--body-file`` so
+        that markdown content (backticks, unescaped newlines, ``$()`` references,
+        etc.) is never interpreted by a shell. Passing ``--body <body>`` directly
+        is safe here because ``subprocess.run`` is called with a list (no shell),
+        but using ``--body-file`` future-proofs the helper against callers that
+        might invoke it via ``shell=True`` and matches the convention the agent
+        prompt uses.
+        """
         base = get_settings().pr_base_branch
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", delete=False
+        )
         try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "create",
-                    "--title",
-                    title,
-                    "--body",
-                    body,
-                    "--base",
-                    base,
-                ],
-                capture_output=True,
-                text=True,
-                cwd=self.repo_root,
-                timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            return "Error: gh pr create timed out"
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-        return result.stdout.strip()
+            tmp.write(body)
+            tmp.close()
+            try:
+                result = subprocess.run(
+                    [
+                        "gh",
+                        "pr",
+                        "create",
+                        "--title",
+                        title,
+                        "--body-file",
+                        tmp.name,
+                        "--base",
+                        base,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    cwd=self.repo_root,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return "Error: gh pr create timed out"
+            if result.returncode != 0:
+                return f"Error: {result.stderr}"
+            return result.stdout.strip()
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     async def _meshwiki_update_task(
         self,
@@ -525,7 +546,8 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
             "returns a result dict.  Tests live in `tests/`.  "
             "Run tests with `python -m pytest tests/ -x -q`.  "
-            "Lint with `ruff check . && black --check .` from the repo root." + root_note
+            "Lint with `ruff check . && black --check .` from the repo root."
+            + root_note
         )
     if artifact_type == "playbook":
         return (
@@ -533,14 +555,16 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "Your goal is to create or update a YAML playbook for Molly's security-testing pipeline.  "
             "Playbooks define attack patterns: capabilities required, mutation templates, "
             "and expected response conditions.  Validate YAML syntax after writing.  "
-            "Lint with `ruff check . && black --check .` from the repo root." + root_note
+            "Lint with `ruff check . && black --check .` from the repo root."
+            + root_note
         )
     if artifact_type == "wordlist":
         return (
             "You are working on the Molly armory repository (molly-armory). "
             "Your goal is to create or extend a wordlist file (plain text, one entry per line) "
             "for use in Molly's security-testing scans.  "
-            "Place the file in the appropriate directory and update any index files." + root_note
+            "Place the file in the appropriate directory and update any index files."
+            + root_note
         )
     if artifact_type == "toolspec":
         return (
@@ -549,12 +573,11 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "capability, NOT a working implementation. It's a Markdown file with YAML "
             "frontmatter (`toolspec`, `name`, `capability_name`, `status: proposed`, "
             "`category`) plus Problem / Proposed Capability / Example Usage / References "
-            "sections. Do not write any Python — that's a separate, later task." + root_note
+            "sections. Do not write any Python — that's a separate, later task."
+            + root_note
         )
     # Default: MeshWiki
-    return (
-        "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
-    )
+    return "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
 
 
 def build_grinder_task_prompt(
@@ -643,10 +666,17 @@ def build_grinder_task_prompt(
             "the branch may have no upstream tracking yet.)"
         )
         step9_cmd = (
-            f'gh pr create --base {base_branch} --head factory/{subtask_id}'
-            f' --title "[Factory] ..." --body "..."'
+            f"gh pr create --base {base_branch} --head factory/{subtask_id}"
+            f' --title "[Factory] ..." --body-file /tmp/pr-body.md'
         )
         step9_verb = "Create a PR"
+        step9_note = (
+            "   ⚠️  Write the PR body to a temp file (e.g. `cat > /tmp/pr-body.md <<'EOF'\\n"
+            "   ...body markdown here, including code spans like `playbooks/foo.md` ...\\n"
+            "   EOF`) and pass it via `--body-file /tmp/pr-body.md`.\\n"
+            '   DO NOT use `--body "..."` — bash interprets backticks, dollar signs,\\n'
+            "   and newlines inside the quoted string as commands, which breaks PR creation.\\n"
+        )
 
     repo_intro = _artifact_intro(artifact_type, task_repo_root)
     armory_protocol = get_armory_prompt(artifact_type)
@@ -685,6 +715,7 @@ def build_grinder_task_prompt(
         f"   Resolve any conflicts, then push: {push_cmd}\n"
         f"   {push_note}\n"
         f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
+        f"{step9_note if step9_verb == 'Create a PR' else ''}"
         f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
         f"10. Print the PR URL on the last line of your output"
     )
@@ -846,11 +877,13 @@ async def grind_subtask_e2b(
             settings.dry_run_step_delay_seconds,
         )
         await asyncio.sleep(settings.dry_run_step_delay_seconds)
-        subtask.update({
-            "status": "review",
-            "branch_name": branch_name,
-            "pr_url": f"https://github.com/dry-run/fake/pull/0",
-        })
+        subtask.update(
+            {
+                "status": "review",
+                "branch_name": branch_name,
+                "pr_url": f"https://github.com/dry-run/fake/pull/0",
+            }
+        )
         return {"subtask": subtask, "incremental_cost_usd": 0.0}
 
     # Expose E2B_API_KEY so AsyncSandbox.create() picks it up from the environment
