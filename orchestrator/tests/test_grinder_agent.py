@@ -13,6 +13,7 @@ from factory.agents.grinder_agent import (
     GRINDER_SYSTEM_PROMPT,
     GRINDER_TOOLS,
     GrinderToolExecutor,
+    _artifact_intro,
     build_grinder_task_prompt,
     grind_subtask,
     grind_subtask_e2b,
@@ -529,7 +530,7 @@ def test_build_grinder_task_prompt_fresh_run_uses_canonical_branch() -> None:
     assert "gh pr create" in prompt
     # The concrete command shown to the agent must use --body-file, not
     # --body "...". (The note may reference --body "..." as a warning.)
-    assert '--body-file /tmp/pr-body.md' in prompt
+    assert "--body-file /tmp/pr-body.md" in prompt
     assert (
         'gh pr create --base staging --head factory/eb21874d-sub-73fe18 --title "[Factory] ..." --body "..."'
         not in prompt
@@ -637,6 +638,83 @@ def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
     # Step 9 must NOT instruct the grinder to open a new PR.
     assert "gh pr create" not in prompt
     assert "Update the existing PR" in prompt
+
+
+def test_artifact_intro_playbook_forbids_python_linters() -> None:
+    """The playbook artifact intro must NOT instruct the agent to run
+    `ruff check` / `black --check` on `.md` playbook files — those linters
+    always produce spurious noise on Markdown+YAML files."""
+    intro = _artifact_intro("playbook", "playbooks")
+    # Hard rule: do NOT run python linters on playbook files.
+    assert "DO NOT run `ruff check` or `black --check`" in intro
+    # And we must point at a real alternative validator.
+    assert "validate_playbooks.py" in intro or "frontmatter-only YAML parser" in intro
+    # We previously had the line "Lint with `ruff check . && black --check .`"
+    # in this paragraph — it must be gone now.
+    assert "ruff check . && black --check ." not in intro
+
+
+def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
+    """A non-MeshWiki playbook task must skip the ruff/black autofix step
+    (which always fails on `.md` files) and instead instruct the agent to
+    validate with a YAML/frontmatter-only parser."""
+    sub = _make_prompt_subtask("0001-skip-python-linters")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Step 4 must NOT run ruff/black against .md playbook files.
+    assert "ruff check --fix playbooks" not in prompt
+    assert "black playbooks" not in prompt
+    # And it must explicitly forbid them.
+    assert "SKIP `ruff check` / `black --check`" in prompt
+    # And it must point at a concrete validator fallback.
+    assert "scripts/validate_playbooks.py" in prompt
+    assert "yaml.safe_load" in prompt
+    # Playbooks have no Python test suite — step 5 should not run pytest.
+    assert "python -m pytest tests/" not in prompt
+    assert "No pytest run" in prompt
+
+
+def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
+    """Regression guard: a non-playbook armory task (e.g. `tool`) MUST still
+    run the ruff/black autofix step. Only playbook tasks are exempted."""
+    sub = _make_prompt_subtask("0001-tool-still-lints")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "ruff check --fix molly/tools" in prompt
+    assert "black molly/tools" in prompt
+    assert "SKIP `ruff check`" not in prompt
+
+
+def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
+    """PLAYBOOK_SCHEMA must include the same rule so the schema doc the
+    agent reads lines up with the task-prompt autofix step."""
+    from factory.armory_prompts import PLAYBOOK_SCHEMA
+
+    assert "DO NOT" in PLAYBOOK_SCHEMA
+    # The schema doc must mention all three Python-linter names explicitly
+    # so the rule survives prompt summarization by the LLM.
+    assert "`ruff check`" in PLAYBOOK_SCHEMA
+    assert "`black --check`" in PLAYBOOK_SCHEMA
+    assert "isort" in PLAYBOOK_SCHEMA
+    # And it must point at the validator script fallback.
+    assert "scripts/validate_playbooks.py" in PLAYBOOK_SCHEMA
 
 
 # ---------------------------------------------------------------------------
