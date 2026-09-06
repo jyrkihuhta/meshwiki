@@ -1,0 +1,7 @@
+extend-exclude = [
+    "playbooks/",
+    "data/pages",
+    "graph-core/target",
+    ".venv",
+    "node_modules",
+]
