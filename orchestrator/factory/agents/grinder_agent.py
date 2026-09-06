@@ -521,6 +521,65 @@ class GrinderToolExecutor:
         return f"Task {page_name} transitioned to {status}"
 
 
+def _tool_test_targets(
+    subtask: dict[str, Any],
+    task_repo_root: str | None,
+) -> str:
+    """Derive a targeted pytest invocation for a tool change.
+
+    Maps ``molly/tools/<name>.py`` -> ``tests/test_<name>.py`` when the
+    subtask declares the modified file via ``expected_files``. Falls
+    back to the full ``tests/`` suite when no specific file can be
+    derived. Single-file tool changes regularly time out at 120s on the
+    broad suite, hence the narrow path.
+    """
+    files = [
+        str(f).strip() for f in (subtask.get("files_touched") or []) if str(f).strip()
+    ]
+
+    for raw in files:
+        path = raw.lstrip("./")
+        if not (path.endswith(".py") and path.startswith("molly/tools/")):
+            continue
+        module = path.rsplit("/", 1)[-1].removesuffix(".py")
+        if module.startswith("__"):
+            continue
+        return f"python -m pytest tests/test_{module}.py -q"
+
+    return "python -m pytest tests/ -x -q"
+
+
+def select_validation_command(
+    subtask: dict[str, Any],
+    artifact_type: str | None,
+    task_repo_root: str | None,
+    is_meshwiki: bool,
+) -> str:
+    """Return the markdown ``step 5`` validation command for a subtask.
+
+    MeshWiki subtasks always use the full ``src/tests/`` suite (the
+    sandbox has the fixtures and the suite is required for safe merges).
+    Playbook artifacts intentionally get the ``"5. No pytest run ..."``
+    directive from ``build_grinder_task_prompt``'s playbook branch, so
+    this helper is only consulted for ``tool`` and the default armory
+    fallback. Tool changes map to a narrow ``tests/test_<module>.py``
+    invocation to avoid the 120s sandbox timeout on the full suite.
+    """
+    if is_meshwiki:
+        return "5. Run: python -m pytest src/tests/ -x -q\n"
+
+    if artifact_type == "tool":
+        cmd = _tool_test_targets(subtask, task_repo_root)
+        return (
+            f"5. Run: {cmd}\n"
+            f"   Targeted invocation completes in under 30s; add\n"
+            f"   `--ignore=tests/fixtures` only if the contract fixtures\n"
+            f"   are absent from the molly-armory checkout.\n"
+        )
+
+    return "5. Run: python -m pytest tests/ -x -q\n"
+
+
 def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> str:
     """Return a one-paragraph repo/artifact description for the grinder task prompt.
 
@@ -545,7 +604,9 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "exposes a `capability_name` class attribute, a `schema()` classmethod returning "
             "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
             "returns a result dict.  Tests live in `tests/`.  "
-            "Run tests with `python -m pytest tests/ -x -q`.  "
+            "Run a targeted invocation such as "
+            "`python -m pytest tests/test_<tool_module>.py -q` (step 5 below) — "
+            "do NOT run the full `tests/` suite, it times out for single-file changes.  "
             "Lint with `ruff check . && black --check .` from the repo root."
             + root_note
         )
@@ -561,7 +622,13 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "Instead, validate the frontmatter with a YAML-only parser (e.g. `python -c "
             "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
             "or the repo's playbook validator script (e.g. "
-            "`scripts/validate_playbooks.py` if present)." + root_note
+            "`scripts/validate_playbooks.py` if present).  "
+            "Playbook `.md` files have no Python test suite. Step 5 is therefore a no-op for "
+            "playbook-only changes — there is no full pytest run, which avoids the 120-second "
+            "sandbox timeout observed on the broad suite. If you also touched the Python "
+            "loader (e.g. `molly/loader.py`), run the targeted loader test locally with "
+            "`python -m pytest tests/test_playbook_loader.py -q` — it finishes in well "
+            "under 30 seconds and does not need `--ignore=tests/fixtures`." + root_note
         )
     if artifact_type == "wordlist":
         return (
@@ -713,7 +780,12 @@ def build_grinder_task_prompt(
             f"4. Run autofix: ruff check --fix {lint_target} && black {lint_target}\n"
             "   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
         )
-        test_step = "5. Run: python -m pytest tests/ -x -q\n"
+        test_step = select_validation_command(
+            subtask=subtask,
+            artifact_type=artifact_type,
+            task_repo_root=task_repo_root,
+            is_meshwiki=is_meshwiki,
+        )
 
     return (
         f"{repo_intro} "

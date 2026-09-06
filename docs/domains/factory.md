@@ -65,11 +65,43 @@ The autonomous agent software development factory:
 ### Phase 7: End-to-End Pipeline Hardening ✅ (merged #TBD)
 - [x] `orchestrator/factory/main.py` — orchestrator entrypoint (FastAPI + uvicorn, health at `/health`)
 - [x] Standardized `MeshWikiClient` instantiation across all nodes (consistent no-arg constructor)
-- [x] `pm_review` node fully wires diff fetching via `GitHubClient.get_pr_diff()` into `review_with_pm()`
+- [x] `pm_review` node fully wires diff fetching via `GitHubClient.get_pr_diff()` into review_with_pm()
 - [x] `finalize` node completes `MeshWikiClient.transition_task(name, "done")` with `cost_usd`
 - [x] `escalate` node completes retry logic: increments `attempt`, resets to `pending` for retriable subtasks
 - [x] `orchestrator/tests/test_pipeline.py` — integration smoke tests (4 tests) exercising full graph with mocked I/O
 - [x] SQLite checkpointer (`AsyncSqliteSaver`) — persistent graph state via `orchestrator_data` Docker volume
+
+### Grinder validation — targeted pytest for tool tasks; playbook skips pytest ✅
+
+The grinder prompt (`build_grinder_task_prompt` in
+`orchestrator/factory/agents/grinder_agent.py`) used to hardcode
+`python -m pytest tests/ -x -q` for every non-MeshWiki artifact, which
+either timed out at the 120s sandbox budget or failed on missing
+fixture dependencies for single-file tool/playbook changes.
+
+`select_validation_command()` now picks the narrowest command that still
+validates the change. Playbook artifacts take a separate path (PR #176):
+playbook `.md` files have no Python test suite, so step 5 is a no-op
+(`5. No pytest run — playbook files have no Python test suite.`). The
+intro paragraph documents the targeted loader test
+(`python -m pytest tests/test_playbook_loader.py -q`) as the optional
+fallback for the rare case where the agent also touches the Python
+loader; this command finishes in well under 30s.
+
+| Artifact | Files changed | Step 5 command |
+|----------|---------------|----------------|
+| `playbook` | `playbooks/*.md` | _no pytest — see paragraph above_ |
+| `playbook` (+ touched loader) | `playbooks/*.md` + `molly/loader.py` | `python -m pytest tests/test_playbook_loader.py -q` (local only) |
+| `tool` | `molly/tools/<name>.py` | `python -m pytest tests/test_<name>.py -q` |
+| `tool` | (no module file) | `python -m pytest tests/ -x -q` |
+| `code` / MeshWiki | anything | `python -m pytest src/tests/ -x -q` |
+| `wordlist` / other | anything | `python -m pytest tests/ -x -q` |
+
+The tool prompt adds an ignore-fixtures escape hatch
+(`--ignore=tests/fixtures`) when the contract fixtures are absent from
+the molly-armory checkout. The same helper exposes a
+`GrinderToolExecutor._run_tests(test_path=...)` path so the agent can
+invoke the narrower command from the sandbox shell as well.
 
 ### Staging Integration (S1) — In Progress
 

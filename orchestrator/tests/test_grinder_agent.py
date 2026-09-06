@@ -17,6 +17,7 @@ from factory.agents.grinder_agent import (
     build_grinder_task_prompt,
     grind_subtask,
     grind_subtask_e2b,
+    select_validation_command,
 )
 from factory.state import FactoryState, SubTask
 
@@ -678,9 +679,12 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     # And it must point at a concrete validator fallback.
     assert "scripts/validate_playbooks.py" in prompt
     assert "yaml.safe_load" in prompt
-    # Playbooks have no Python test suite — step 5 should not run pytest.
-    assert "python -m pytest tests/" not in prompt
-    assert "No pytest run" in prompt
+    # Playbooks have no Python test suite — step 5's primary directive is
+    # the "No pytest run" explanation (post-#176). The narrow loader
+    # test (tests/test_playbook_loader.py) only appears in the intro
+    # paragraph as an optional local fallback.
+    assert "5. No pytest run" in prompt
+    assert "5. Run: python -m pytest tests/ -x -q" not in prompt
 
 
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
@@ -715,6 +719,115 @@ def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
     assert "isort" in PLAYBOOK_SCHEMA
     # And it must point at the validator script fallback.
     assert "scripts/validate_playbooks.py" in PLAYBOOK_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# select_validation_command — targeted pytest for playbook/tool changes
+# ---------------------------------------------------------------------------
+
+
+def test_select_validation_command_meshwiki_uses_full_suite() -> None:
+    """MeshWiki subtasks still validate against the full src/tests suite."""
+    cmd = select_validation_command(
+        subtask={"files_touched": ["src/foo.py"]},
+        artifact_type="code",
+        task_repo_root=None,
+        is_meshwiki=True,
+    )
+    assert "python -m pytest src/tests/ -x -q" in cmd
+    assert "test_playbook_loader" not in cmd
+
+
+def test_select_validation_command_tool_targets_module_test() -> None:
+    """Tool artifact tasks map molly/tools/<name>.py -> tests/test_<name>.py
+    when files_touched declares the changed module."""
+    sub = _make_prompt_subtask()
+    sub["files_touched"] = ["molly/tools/ssrf.py"]
+    cmd = select_validation_command(
+        subtask=sub,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/test_ssrf.py -q" in cmd
+
+
+def test_select_validation_command_tool_falls_back_to_full_suite() -> None:
+    """When no specific tool module can be derived, the tool prompt
+    keeps the existing behaviour (full tests/ with -x) so we don't
+    regress coverage for ambiguous changes."""
+    cmd = select_validation_command(
+        subtask=_make_prompt_subtask(),
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/ -x -q" in cmd
+
+
+def test_select_validation_command_wordlist_keeps_full_suite() -> None:
+    """Wordlist (or other non-playbook/tool) artifacts keep the default
+    full-suite command — the timeout issue is specific to markdown and
+    tool artifacts."""
+    cmd = select_validation_command(
+        subtask=_make_prompt_subtask(),
+        artifact_type="wordlist",
+        task_repo_root="wordlists",
+        is_meshwiki=False,
+    )
+    assert "python -m pytest tests/ -x -q" in cmd
+
+
+def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
+    """After PR #176 merged, playbook artifacts skip pytest entirely
+    (no Python test suite on `.md` playbooks). The 120-second sandbox
+    timeout that motivated this task is now avoided by skipping pytest,
+    which trivially satisfies acceptance criteria 1 and 2. The full
+    `python -m pytest tests/ -x -q` invocation must NOT appear as the
+    primary step 5 directive for a playbook-only change."""
+    sub = _make_prompt_subtask("aaaa1111-sub-aaaa")
+    sub["files_touched"] = ["playbooks/example.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # PR #176: playbook artifacts have no Python test suite — step 5 is
+    # the no-op explanation, not a pytest invocation.
+    assert "5. No pytest run" in prompt
+    # Hardcoded full-suite line must NOT appear as the step 5 directive.
+    assert "5. Run: python -m pytest tests/ -x -q\n" not in prompt
+    # The targeted loader test appears in the intro paragraph as the
+    # optional local fallback when the agent also touches the Python
+    # loader. It must NOT appear as the primary step-5 directive here.
+    assert "5. Run: python -m pytest tests/test_playbook_loader.py" not in prompt
+
+
+def test_artifact_intro_playbook_documents_targeted_pytest() -> None:
+    """The playbook intro paragraph must point at the actual cloned repo
+    (armory), not a sibling orchestrator repo, and must mention the
+    narrow loader test as the optional fallback when the agent touches
+    Python loader code. Regression guard for the PM review fix #2."""
+    from factory.agents.grinder_agent import _artifact_intro
+
+    intro = _artifact_intro("playbook", "playbooks")
+    # Must point at the armory repo (the sandbox clones it to /tmp/repo),
+    # NOT at a sibling orchestrator/ directory that doesn't exist there.
+    assert "molly-armory" in intro
+    assert "orchestrator repo" not in intro
+    # Must reference the narrow loader test as the optional fallback.
+    assert "loader" in intro.lower()
+    assert "well under 30" in intro
+    # Must mention the warned-against full-suite sandbox timeout so the
+    # agent doesn't fall back to `python -m pytest tests/ -x -q`.
+    assert "120-second" in intro or "120s" in intro or "120 " in intro
+    # PR #176's linter-skip guidance must still be present.
+    assert "DO NOT run `ruff check` or `black --check`" in intro
 
 
 # ---------------------------------------------------------------------------
