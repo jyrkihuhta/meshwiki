@@ -54,9 +54,9 @@ def test_gitignore_excludes_pycache_artifacts(path: str) -> None:
 def test_gitignore_has_pycache_directive() -> None:
     """The .gitignore must contain an explicit __pycache__/ rule."""
     content = _read_gitignore()
-    assert re.search(r"^__pycache__/?$", content, re.MULTILINE), (
-        "root .gitignore must include a top-level __pycache__/ rule"
-    )
+    assert re.search(
+        r"^__pycache__/?$", content, re.MULTILINE
+    ), "root .gitignore must include a top-level __pycache__/ rule"
 
 
 def test_gitignore_has_pyc_extension() -> None:
@@ -79,3 +79,34 @@ def test_no_tracked_pycache_files() -> None:
         path for path in tracked if "__pycache__" in path or path.endswith(".pyc")
     ]
     assert not offenders, f"unexpected tracked bytecode files: {offenders}"
+
+
+def test_pytest_run_leaves_no_untracked_pycache(tmp_path: Path) -> None:
+    """Acceptance criterion: pytest must not leave untracked bytecode behind.
+
+    Touching a Python file and compiling it (the cheapest stand-in for a pytest
+    run that imports modules) must not surface ``__pycache__`` or ``.pyc``
+    artifacts via ``git status --porcelain``.
+    """
+    import py_compile
+
+    src_py = tmp_path / "sample_module.py"
+    src_py.write_text("x = 1\n")
+    py_compile.compile(str(src_py), cfile=str(tmp_path / "sample_module.pyc"))
+    (tmp_path / "__pycache__").mkdir(exist_ok=True)
+    (tmp_path / "__pycache__" / "sample.pyc").write_bytes(b"")
+
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    porcelain = result.stdout
+    offenders = [
+        line
+        for line in porcelain.splitlines()
+        if "__pycache__" in line or line.endswith(".pyc")
+    ]
+    assert not offenders, f"pytest would leak bytecode into git status: {offenders}"
