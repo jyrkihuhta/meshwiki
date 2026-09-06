@@ -7,6 +7,8 @@
 .terraform.lock.hcl
 
 # Python
+# Bytecache (__pycache__/, *.pyc) must be ignored so test runs leave a clean
+# working tree and `git rebase` succeeds without the stash-dance.
 __pycache__/
 *.py[cod]
 *$py.class
