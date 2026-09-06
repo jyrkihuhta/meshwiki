@@ -561,7 +561,8 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "Instead, validate the frontmatter with a YAML-only parser (e.g. `python -c "
             "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
             "or the repo's playbook validator script (e.g. "
-            "`scripts/validate_playbooks.py` if present)." + root_note
+            "`scripts/validate_playbooks.py` if present)."
+            + root_note
         )
     if artifact_type == "wordlist":
         return (
@@ -706,7 +707,19 @@ def build_grinder_task_prompt(
             f"     done\n"
             f"   If the repo provides `scripts/validate_playbooks.py` (or equivalent), use that instead.\n"
         )
-        test_step = "5. No pytest run — playbook files have no Python test suite.\n"
+        test_step = (
+            "5. No pytest run by default — playbook files have no Python test suite of their own. "
+            "If you DO need to exercise the loader (e.g. when a change touches how "
+            "playbook frontmatter is parsed), run ONLY the self-contained loader test "
+            "module from the armory repo, skipping the cryptography-dependent fixtures:\n"
+            "     python -m pytest -q test_playbook_loader.py --ignore=tests/fixtures\n"
+            "   The full pytest run on `tests/` pulls in `tests/fixtures/conftest.py`, which "
+            "imports `cryptography`. That package is not installed in the e2b sandbox, so "
+            "collection fails with `ModuleNotFoundError: No module named 'cryptography'` "
+            "before any test runs. The loader-only target exercises the markdown-loading "
+            "contract that playbook changes actually affect, without the cryptography "
+            "dependency.\n"
+        )
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (

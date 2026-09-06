@@ -24,6 +24,7 @@ dev = [
     "isort>=5.13",
     "ruff>=0.4",
     "respx>=0.21",
+    "cryptography>=42.0",
 ]
 
 [tool.pytest.ini_options]
