@@ -62,12 +62,14 @@ def _mock_cm(mock_client: AsyncMock) -> AsyncMock:
 def test_factory_state_has_task_repo_root() -> None:
     """FactoryState must include task_repo_root field."""
     from factory.state import FactoryState
+
     assert "task_repo_root" in FactoryState.__annotations__
 
 
 def test_factory_state_has_artifact_type() -> None:
     """FactoryState must include artifact_type field."""
     from factory.state import FactoryState
+
     assert "artifact_type" in FactoryState.__annotations__
 
 
@@ -78,6 +80,7 @@ def test_factory_state_has_artifact_type() -> None:
 
 def test_settings_has_molly_url() -> None:
     from factory.config import Settings
+
     s = Settings()
     assert hasattr(s, "molly_url")
     assert s.molly_url == ""
@@ -85,6 +88,7 @@ def test_settings_has_molly_url() -> None:
 
 def test_settings_has_molly_api_token() -> None:
     from factory.config import Settings
+
     s = Settings()
     assert hasattr(s, "molly_api_token")
     assert s.molly_api_token == ""
@@ -92,6 +96,7 @@ def test_settings_has_molly_api_token() -> None:
 
 def test_settings_has_armory_repo() -> None:
     from factory.config import Settings
+
     s = Settings()
     assert hasattr(s, "armory_repo")
     assert s.armory_repo == ""
@@ -126,6 +131,16 @@ def test_artifact_intro_tool_includes_repo_root() -> None:
 def test_artifact_intro_playbook_describes_yaml() -> None:
     intro = _artifact_intro("playbook", None)
     assert "YAML" in intro or "playbook" in intro.lower()
+
+
+def test_artifact_intro_playbook_instructs_to_skip_ruff_black_on_md() -> None:
+    """Playbook task prompts must NOT instruct agents to run ruff/black on
+    `playbooks/*.md` files — they are markdown with YAML frontmatter that
+    ruff can't lint and black can't format (would fail on `---`)."""
+    intro = _artifact_intro("playbook", None)
+    assert "Do not run `ruff`" in intro or "Do not run `ruff`" in intro
+    assert "playbooks/*.md" in intro
+    assert "yaml.safe_load" in intro
 
 
 def test_artifact_intro_wordlist_describes_format() -> None:

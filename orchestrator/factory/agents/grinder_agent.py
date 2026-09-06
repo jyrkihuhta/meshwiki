@@ -525,22 +525,28 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
             "returns a result dict.  Tests live in `tests/`.  "
             "Run tests with `python -m pytest tests/ -x -q`.  "
-            "Lint with `ruff check . && black --check .` from the repo root." + root_note
+            "Lint with `ruff check . && black --check .` from the repo root."
+            + root_note
         )
     if artifact_type == "playbook":
         return (
             "You are working on the Molly armory repository (molly-armory). "
             "Your goal is to create or update a YAML playbook for Molly's security-testing pipeline.  "
             "Playbooks define attack patterns: capabilities required, mutation templates, "
-            "and expected response conditions.  Validate YAML syntax after writing.  "
-            "Lint with `ruff check . && black --check .` from the repo root." + root_note
+            "and expected response conditions.  "
+            "Do not run `ruff` or `black` on `playbooks/*.md` — these are markdown files "
+            "with YAML frontmatter; validate frontmatter with "
+            '`python -c "import yaml,sys; yaml.safe_load(sys.stdin)"` instead.  '
+            "If you also touch Python files outside `playbooks/`, lint them normally."
+            + root_note
         )
     if artifact_type == "wordlist":
         return (
             "You are working on the Molly armory repository (molly-armory). "
             "Your goal is to create or extend a wordlist file (plain text, one entry per line) "
             "for use in Molly's security-testing scans.  "
-            "Place the file in the appropriate directory and update any index files." + root_note
+            "Place the file in the appropriate directory and update any index files."
+            + root_note
         )
     if artifact_type == "toolspec":
         return (
@@ -549,12 +555,11 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "capability, NOT a working implementation. It's a Markdown file with YAML "
             "frontmatter (`toolspec`, `name`, `capability_name`, `status: proposed`, "
             "`category`) plus Problem / Proposed Capability / Example Usage / References "
-            "sections. Do not write any Python — that's a separate, later task." + root_note
+            "sections. Do not write any Python — that's a separate, later task."
+            + root_note
         )
     # Default: MeshWiki
-    return (
-        "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
-    )
+    return "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
 
 
 def build_grinder_task_prompt(
@@ -643,7 +648,7 @@ def build_grinder_task_prompt(
             "the branch may have no upstream tracking yet.)"
         )
         step9_cmd = (
-            f'gh pr create --base {base_branch} --head factory/{subtask_id}'
+            f"gh pr create --base {base_branch} --head factory/{subtask_id}"
             f' --title "[Factory] ..." --body "..."'
         )
         step9_verb = "Create a PR"
@@ -846,11 +851,13 @@ async def grind_subtask_e2b(
             settings.dry_run_step_delay_seconds,
         )
         await asyncio.sleep(settings.dry_run_step_delay_seconds)
-        subtask.update({
-            "status": "review",
-            "branch_name": branch_name,
-            "pr_url": f"https://github.com/dry-run/fake/pull/0",
-        })
+        subtask.update(
+            {
+                "status": "review",
+                "branch_name": branch_name,
+                "pr_url": f"https://github.com/dry-run/fake/pull/0",
+            }
+        )
         return {"subtask": subtask, "incremental_cost_usd": 0.0}
 
     # Expose E2B_API_KEY so AsyncSandbox.create() picks it up from the environment
