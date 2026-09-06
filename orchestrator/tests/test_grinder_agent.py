@@ -519,6 +519,18 @@ def test_build_grinder_task_prompt_fresh_run_uses_canonical_branch() -> None:
     assert "git push -u origin HEAD" in prompt
     assert "REWORK REQUIRED" not in prompt
     assert "NEVER create a new branch" not in prompt
+    # PR creation must use --body-file (heredoc to a temp file) so markdown
+    # backticks/dollar-signs/newlines are not interpreted by bash. Passing the
+    # body via --body "..." on the command line caused observed failures
+    # (Permission denied / command not found) when bodies contained code spans
+    # like `playbooks/foo.md`.
+    assert "--body-file" in prompt
+    assert "mktemp" in prompt
+    assert "PR_BODY_EOF" in prompt
+    # The forbidden --body "..." pattern must NOT appear in the prompt.
+    assert '--body "' not in prompt
+    # Title prefix requirement must still be present.
+    assert "[Factory] " in prompt
 
 
 def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
