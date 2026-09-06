@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 from factory.agents.grinder_agent import (
     GRINDER_SYSTEM_PROMPT,
     GRINDER_TOOLS,
@@ -678,9 +679,12 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     # And it must point at a concrete validator fallback.
     assert "scripts/validate_playbooks.py" in prompt
     assert "yaml.safe_load" in prompt
-    # Playbooks have no Python test suite — step 5 should not run pytest.
-    assert "python -m pytest tests/" not in prompt
-    assert "No pytest run" in prompt
+    # Playbooks have no Python test suite — step 5's primary directive is
+    # the "No pytest run" explanation (post-#176). The narrow loader
+    # test (tests/test_playbook_loader.py) only appears in the intro
+    # paragraph as an optional local fallback.
+    assert "5. No pytest run" in prompt
+    assert "5. Run: python -m pytest tests/ -x -q" not in prompt
 
 
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
@@ -732,69 +736,6 @@ def test_select_validation_command_meshwiki_uses_full_suite() -> None:
     )
     assert "python -m pytest src/tests/ -x -q" in cmd
     assert "test_playbook_loader" not in cmd
-
-
-def test_select_validation_command_playbook_targets_loader_test() -> None:
-    """Playbook artifact tasks target tests/test_playbook_loader.py so the
-    validation step completes in under 30s instead of timing out on the
-    full suite (acceptance criterion 1)."""
-    sub = _make_prompt_subtask()
-    sub["files_touched"] = ["playbooks/ssrf-internal-api.md"]
-    cmd = select_validation_command(
-        subtask=sub,
-        artifact_type="playbook",
-        task_repo_root="playbooks",
-        is_meshwiki=False,
-    )
-    assert "python -m pytest tests/test_playbook_loader.py -q" in cmd
-    assert "do NOT fall" in cmd
-    assert "times out at" in cmd
-    # The prompt must tell the agent to skip --ignore=tests/fixtures
-    # when running the targeted invocation (acceptance criterion 3).
-    assert "is not needed" in cmd
-    assert "--ignore=tests/fixtures" in cmd
-
-
-def test_select_validation_command_playbook_handles_dotted_root() -> None:
-    """The loader-test command is selected regardless of whether
-    ``expected_files`` uses ``playbooks/`` or the configured
-    ``task_repo_root`` prefix."""
-    sub = _make_prompt_subtask()
-    sub["files_touched"] = ["molly/playbooks/foo.md"]
-    cmd = select_validation_command(
-        subtask=sub,
-        artifact_type="playbook",
-        task_repo_root="molly/playbooks",
-        is_meshwiki=False,
-    )
-    assert "tests/test_playbook_loader.py" in cmd
-
-
-def test_select_validation_command_playbook_empty_files_falls_back() -> None:
-    """Even with empty files_touched, the playbook artifact gets the
-    loader test — falling back to a wide suite silently is the bug we
-    are fixing."""
-    cmd = select_validation_command(
-        subtask=_make_prompt_subtask(),
-        artifact_type="playbook",
-        task_repo_root="playbooks",
-        is_meshwiki=False,
-    )
-    assert "tests/test_playbook_loader.py" in cmd
-
-
-def test_select_validation_command_playbook_skips_non_markdown_files() -> None:
-    """If files_touched contains only non-md files, fall back to the
-    canonical loader test rather than running nothing."""
-    sub = _make_prompt_subtask()
-    sub["files_touched"] = ["docs/notes.md", "src/example.py"]
-    cmd = select_validation_command(
-        subtask=sub,
-        artifact_type="playbook",
-        task_repo_root="playbooks",
-        is_meshwiki=False,
-    )
-    assert "tests/test_playbook_loader.py" in cmd
 
 
 def test_select_validation_command_tool_targets_module_test() -> None:
@@ -858,12 +799,13 @@ def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
     )
     # PR #176: playbook artifacts have no Python test suite — step 5 is
     # the no-op explanation, not a pytest invocation.
-    assert "No pytest run" in prompt
-    # Hardcoded full-suite line must NOT appear for playbook artifacts.
+    assert "5. No pytest run" in prompt
+    # Hardcoded full-suite line must NOT appear as the step 5 directive.
     assert "5. Run: python -m pytest tests/ -x -q\n" not in prompt
-    # And the broader targeted loader test must NOT be inserted either —
-    # the agent only runs it locally if it touches the Python loader.
-    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+    # The targeted loader test appears in the intro paragraph as the
+    # optional local fallback when the agent also touches the Python
+    # loader. It must NOT appear as the primary step-5 directive here.
+    assert "5. Run: python -m pytest tests/test_playbook_loader.py" not in prompt
 
 
 def test_artifact_intro_playbook_documents_targeted_pytest() -> None:

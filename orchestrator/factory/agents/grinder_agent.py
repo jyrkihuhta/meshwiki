@@ -521,69 +521,21 @@ class GrinderToolExecutor:
         return f"Task {page_name} transitioned to {status}"
 
 
-def _playbook_test_targets(
-    subtask: dict[str, Any],
-    task_repo_root: str | None,
-) -> tuple[str, bool]:
-    """Derive a targeted pytest invocation for a playbook/task change.
-
-    Inspects ``subtask["files_touched"]`` (sourced from the ``expected_files``
-    frontmatter field by ``task_intake_node``) and returns the narrowest
-    pytest command that still validates the change. The full ``tests/``
-    suite is intentionally avoided because agents repeatedly time out at
-    120s on it for single-file markdown playbook changes, and several
-    suites require fixture resources that aren't always available in the
-    sandbox.
-
-    Args:
-        subtask: Active subtask dict (with optional ``files_touched``).
-        task_repo_root: Sub-path within the repo where the artifact lives
-            (e.g. ``"playbooks"``). ``None`` for MeshWiki.
-
-    Returns:
-        Tuple ``(command, ignore_fixtures)``. ``command`` is the full
-        ``python -m pytest ... -q`` invocation the agent should run.
-        ``ignore_fixtures`` is ``True`` when the targeted command should
-        add ``--ignore=tests/fixtures`` to skip fixture-data files that
-        are not real tests.
-    """
-    files = [
-        str(f).strip() for f in (subtask.get("files_touched") or []) if str(f).strip()
-    ]
-    ignore_fixtures = True
-    test_file: str | None = None
-
-    for raw in files:
-        path = raw.lstrip("./")
-        if not path.endswith(".md"):
-            continue
-        if path.startswith("playbooks/") or path.startswith(
-            (task_repo_root or "playbooks") + "/"
-        ):
-            test_file = "tests/test_playbook_loader.py"
-            break
-
-    if test_file is None:
-        test_file = "tests/test_playbook_loader.py"
-
-    return f"python -m pytest {test_file} -q", ignore_fixtures
-
-
 def _tool_test_targets(
     subtask: dict[str, Any],
     task_repo_root: str | None,
-) -> tuple[str, bool]:
+) -> str:
     """Derive a targeted pytest invocation for a tool change.
 
-    Mirrors :func:`_playbook_test_targets` for tool artifacts. Maps
-    ``molly/tools/<name>.py`` -> ``tests/test_<name>.py`` when the
+    Maps ``molly/tools/<name>.py`` -> ``tests/test_<name>.py`` when the
     subtask declares the modified file via ``expected_files``. Falls
-    back to ``tests/`` when no specific file can be derived.
+    back to the full ``tests/`` suite when no specific file can be
+    derived. Single-file tool changes regularly time out at 120s on the
+    broad suite, hence the narrow path.
     """
     files = [
         str(f).strip() for f in (subtask.get("files_touched") or []) if str(f).strip()
     ]
-    ignore_fixtures = True
 
     for raw in files:
         path = raw.lstrip("./")
@@ -592,9 +544,9 @@ def _tool_test_targets(
         module = path.rsplit("/", 1)[-1].removesuffix(".py")
         if module.startswith("__"):
             continue
-        return f"python -m pytest tests/test_{module}.py -q", ignore_fixtures
+        return f"python -m pytest tests/test_{module}.py -q"
 
-    return "python -m pytest tests/ -x -q", ignore_fixtures
+    return "python -m pytest tests/ -x -q"
 
 
 def select_validation_command(
@@ -605,31 +557,25 @@ def select_validation_command(
 ) -> str:
     """Return the markdown ``step 5`` validation command for a subtask.
 
-    Encapsulates the "use a narrow pytest invocation for playbook-only
-    changes" rule. MeshWiki subtasks still use the full ``src/tests/``
-    suite because the sandbox has the fixtures available and the suite
-    is required for safe merges.
+    MeshWiki subtasks always use the full ``src/tests/`` suite (the
+    sandbox has the fixtures and the suite is required for safe merges).
+    Playbook artifacts intentionally get the ``"5. No pytest run ..."``
+    directive from ``build_grinder_task_prompt``'s playbook branch, so
+    this helper is only consulted for ``tool`` and the default armory
+    fallback. Tool changes map to a narrow ``tests/test_<module>.py``
+    invocation to avoid the 120s sandbox timeout on the full suite.
     """
     if is_meshwiki:
         return "5. Run: python -m pytest src/tests/ -x -q\n"
 
-    if artifact_type == "playbook":
-        cmd, ignore = _playbook_test_targets(subtask, task_repo_root)
-        ignore_note = (
-            " (--ignore=tests/fixtures is not needed for this command)"
-            if ignore
-            else ""
-        )
+    if artifact_type == "tool":
+        cmd = _tool_test_targets(subtask, task_repo_root)
         return (
             f"5. Run: {cmd}\n"
-            f"   Targeted invocation completes in under 30s; do NOT fall\n"
-            f"   back to `python -m pytest tests/ -x -q` — it times out at\n"
-            f"   120s on single-file playbook changes.{ignore_note}\n"
+            f"   Targeted invocation completes in under 30s; add\n"
+            f"   `--ignore=tests/fixtures` only if the contract fixtures\n"
+            f"   are absent from the molly-armory checkout.\n"
         )
-
-    if artifact_type == "tool":
-        cmd, _ = _tool_test_targets(subtask, task_repo_root)
-        return f"5. Run: {cmd}\n"
 
     return "5. Run: python -m pytest tests/ -x -q\n"
 
@@ -677,12 +623,12 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
             "or the repo's playbook validator script (e.g. "
             "`scripts/validate_playbooks.py` if present).  "
-            "Playbook `.md` files have no Python test suite. The standard step 5 is therefore "
-            "a no-op for playbook-only changes — there is no full pytest run, which avoids "
-            "the 120-second sandbox timeout observed on the broad suite. If you also touched "
-            "the Python loader (e.g. `molly/loader.py`), the narrow loader test in the armory "
-            "repo (the test that exercises the loader) finishes in well under 30 seconds."
-            + root_note
+            "Playbook `.md` files have no Python test suite. Step 5 is therefore a no-op for "
+            "playbook-only changes — there is no full pytest run, which avoids the 120-second "
+            "sandbox timeout observed on the broad suite. If you also touched the Python "
+            "loader (e.g. `molly/loader.py`), run the targeted loader test locally with "
+            "`python -m pytest tests/test_playbook_loader.py -q` — it finishes in well "
+            "under 30 seconds and does not need `--ignore=tests/fixtures`." + root_note
         )
     if artifact_type == "wordlist":
         return (
