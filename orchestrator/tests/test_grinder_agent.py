@@ -601,6 +601,98 @@ def test_create_pr_uses_body_file() -> None:
     assert "--body" not in cmd
 
 
+def test_build_grinder_task_prompt_playbook_uses_targeted_pytest() -> None:
+    """A playbook task must NOT use the full `pytest tests/ -x -q` command —
+    that invocation times out at 120s for markdown-only changes and pulls in
+    fixture-heavy tests that aren't relevant to YAML validation.
+
+    Instead the prompt must point at the narrow validator tests
+    (``tests/test_m23_armory_validation.py`` + ``tests/test_armory_contract.py``)
+    which cover `_check_playbook_files` and the contract fixtures, run in
+    ~1 second, and have no heavy fixture dependencies.
+    """
+    sub = _make_prompt_subtask("pb-targeted-01")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # The targeted command must appear, named verbatim so a regression that
+    # drifts the path shows up immediately.
+    assert "tests/test_m23_armory_validation.py" in prompt
+    assert "tests/test_armory_contract.py" in prompt
+
+    # The validity of the targeted invocation depends on NOT also forcing
+    # the agent to run the full slow suite. Step 5 must be the narrow
+    # invocation, not the blanket `pytest tests/ -x -q`.
+    step5_idx = prompt.index("5. ")
+    next_step_idx = prompt.index("6. ", step5_idx)
+    step5_block = prompt[step5_idx:next_step_idx]
+    assert "tests/test_m23_armory_validation.py" in step5_block
+    assert "tests/test_armory_contract.py" in step5_block
+    # The blanket full-suite pytest command must not appear as the primary
+    # step-5 directive for a playbook-only change. (It may appear as a
+    # conditional fallback — that text is allowed and tested separately.)
+    assert "5. Run: python -m pytest tests/ -x -q\n" not in step5_block
+
+
+def test_build_grinder_task_prompt_playbook_mentions_targeted_fallback() -> None:
+    """The playbook prompt must explicitly tell the agent when to fall back
+    to the full pytest suite (only if non-playbook code was touched)."""
+    sub = _make_prompt_subtask("pb-fallback-01")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Fallback clause must be present and mention what triggers it.
+    assert "fall back" in prompt.lower() or "fallback" in prompt.lower()
+    assert "non-playbook" in prompt or "loader" in prompt
+
+    # Acceptance criterion: the prompt explicitly instructs the agent to
+    # SKIP `--ignore=tests/fixtures` (it's irrelevant for the targeted
+    # validator tests and slows collection). The token must appear, but
+    # only in the "do not use it" context.
+    assert "--ignore=tests/fixtures" in prompt
+    assert "skip" in prompt.lower() or "not needed" in prompt.lower()
+
+
+def test_build_grinder_task_prompt_non_playbook_keeps_full_pytest() -> None:
+    """Tool / wordlist / MeshWiki tasks must NOT be switched to the targeted
+    playbook-only invocation — their full suite is the right validation step.
+    Regression guard so the new playbook branch doesn't bleed into other
+    artifact types.
+    """
+    sub = _make_prompt_subtask("tool-regression-01")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Tool tasks still use the blanket command.
+    assert "5. Run: python -m pytest tests/ -x -q" in prompt
+    # And must NOT advertise the narrow playbook validator tests.
+    assert "tests/test_m23_armory_validation.py" not in prompt
+
+
 def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
     """A rework must explicitly forbid creating new semantic branches and
     push back to the canonical factory/<id> branch with --force-with-lease.

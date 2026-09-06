@@ -561,7 +561,14 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "Instead, validate the frontmatter with a YAML-only parser (e.g. `python -c "
             "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
             "or the repo's playbook validator script (e.g. "
-            "`scripts/validate_playbooks.py` if present)." + root_note
+            "`scripts/validate_playbooks.py` if present).  "
+            "If you also touched the Python loader (e.g. `molly/loader.py`), validate it "
+            "with the targeted loader test "
+            "`python -m pytest tests/test_playbook_loader.py -q` from the armory repo — "
+            "it finishes in <30s. Do NOT fall back to `python -m pytest tests/ -x -q`, "
+            "which times out at 120s on the e2b sandbox. `--ignore=tests/fixtures` is "
+            "unnecessary for the targeted invocation."
+            + root_note
         )
     if artifact_type == "wordlist":
         return (
