@@ -191,6 +191,17 @@ class Settings(BaseSettings):
     armory_repo: str = (
         ""  # FACTORY_ARMORY_REPO — molly-armory GitHub repo, e.g. jyrkihuhta/molly-armory
     )
+    purgatory_enabled: bool = (
+        False  # FACTORY_PURGATORY_ENABLED — enable the staging-tier-1 daily regression bot
+    )
+    purgatory_interval_seconds: int = (
+        86400  # FACTORY_PURGATORY_INTERVAL_SECONDS — daily by default (deck PLAN.md M2.5)
+    )
+    purgatory_run_window_seconds: int = (
+        600  # FACTORY_PURGATORY_RUN_WINDOW_SECONDS — how long to leave the
+        # heartbeat running per daily cycle before disarming again (tier 1
+        # is periodic, not continuously armed, by design)
+    )
 
     model_config = SettingsConfigDict(env_prefix="FACTORY_")
 
