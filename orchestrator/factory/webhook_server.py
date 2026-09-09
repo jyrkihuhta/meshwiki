@@ -18,6 +18,7 @@ from .bots.bookkeeper import BookkeeperBot
 from .bots.ci_fixer import CIFixerBot
 from .bots.class_gap_researcher import ClassGapResearcherBot
 from .bots.insight import InsightBot
+from .bots.purgatory import PurgatoryBot
 from .bots.registry import BotRegistry
 from .bots.scheduler import SchedulerBot
 from .bots.stale_pr_bot import StalePRBot
@@ -283,6 +284,13 @@ async def lifespan(app: FastAPI):
             "factory: class-gap-researcher bot enabled (interval=%ds, model=%s)",
             settings.class_gap_researcher_interval_seconds,
             settings.class_gap_researcher_model,
+        )
+    if settings.purgatory_enabled:
+        bot_registry.register(PurgatoryBot())
+        logger.info(
+            "factory: purgatory bot enabled (interval=%ds, run_window=%ds)",
+            settings.purgatory_interval_seconds,
+            settings.purgatory_run_window_seconds,
         )
     app.state.bot_registry = bot_registry
 
