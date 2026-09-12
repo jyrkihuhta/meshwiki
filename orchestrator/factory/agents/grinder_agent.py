@@ -728,7 +728,13 @@ def build_grinder_task_prompt(
             f"     done\n"
             f"   If the repo provides `scripts/validate_playbooks.py` (or equivalent), use that instead.\n"
         )
-        test_step = "5. No pytest run — playbook files have no Python test suite.\n"
+        test_step = (
+            "5. Run: python -m pytest tests/test_playbook_loader.py -x -q\n"
+            "   (Narrow to the loader test only — the full `tests/` suite pulls in fixtures "
+            "that require a `cryptography` module that is not installed in this env, which "
+            "causes 120s timeouts. The loader test alone covers playbook schema/loading "
+            "without that dependency.)\n"
+        )
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (
