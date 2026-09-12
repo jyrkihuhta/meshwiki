@@ -683,6 +683,51 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     assert "No pytest run" in prompt
 
 
+def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
+    """Both the fresh and rework prompts must instruct the agent to handle
+    __pycache__/*.pyc before any `git rebase` step — these artifacts are
+    produced by pytest and would otherwise block the rebase with
+    'cannot rebase: You have unstaged changes', forcing a
+    stash/rebase/stash-pop dance in every task.
+    """
+    sub = _make_prompt_subtask("ecfdbfa7-sub-clean")
+
+    # Fresh-run path
+    fresh_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "__pycache__" in fresh_prompt
+    assert "git clean -fd" in fresh_prompt
+    # The instruction must appear BEFORE the rebase step so the agent sees
+    # it as part of the workflow, not as a post-mortem fix.
+    assert fresh_prompt.index("__pycache__") < fresh_prompt.index("Rebase onto")
+    # Fresh prompt should also mention the rebase pre-flight check.
+    assert "working tree is clean" in fresh_prompt
+    assert "git status --porcelain" in fresh_prompt
+
+    # Rework path must carry the same pre-flight rule (otherwise reworks
+    # trip over the same bytecode issue).
+    rework_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="fix the schema",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "__pycache__" in rework_prompt
+    assert rework_prompt.index("__pycache__") < rework_prompt.index("Rebase onto")
+
+
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
     """Regression guard: a non-playbook armory task (e.g. `tool`) MUST still
     run the ruff/black autofix step. Only playbook tasks are exempted."""
