@@ -678,9 +678,12 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     # And it must point at a concrete validator fallback.
     assert "scripts/validate_playbooks.py" in prompt
     assert "yaml.safe_load" in prompt
-    # Playbooks have no Python test suite — step 5 should not run pytest.
-    assert "python -m pytest tests/" not in prompt
-    assert "No pytest run" in prompt
+    # Playbooks have no FULL Python test suite — the full suite pulls in
+    # `cryptography`-dependent fixtures that 120s-timeout this env, so step 5
+    # must narrow pytest to the loader test only.
+    assert "python -m pytest tests/ -x -q" not in prompt
+    assert "python -m pytest tests/test_playbook_loader.py" in prompt
+    assert "cryptography" in prompt
 
 
 def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
@@ -760,6 +763,37 @@ def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
     assert "isort" in PLAYBOOK_SCHEMA
     # And it must point at the validator script fallback.
     assert "scripts/validate_playbooks.py" in PLAYBOOK_SCHEMA
+
+
+def test_build_grinder_task_prompt_playbook_runs_narrow_pytest() -> None:
+    """A non-MeshWiki playbook task must instruct the agent to run ONLY the
+    playbook loader test (`tests/test_playbook_loader.py`), not the full
+    `pytest tests/` suite — the full suite pulls in `cryptography`-dependent
+    fixtures that aren't installed in this env and 120s-timeout. Skipping
+    pytest entirely is wrong because the loader test exists and exercises
+    the schema rules we care about."""
+    sub = _make_prompt_subtask("0001-playbook-narrow-pytest")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # Step 5 must narrow to the loader test file.
+    assert "python -m pytest tests/test_playbook_loader.py" in prompt
+    # And it must NOT run the full `tests/` suite (the cryptography failure).
+    assert "python -m pytest tests/ -x -q" not in prompt
+    assert "python -m pytest tests -x -q" not in prompt
+    # And it must NOT skip pytest entirely (the loader test exists and runs).
+    assert "No pytest run" not in prompt
+    # The acceptance criterion is to mention `cryptography` so the LLM
+    # understands WHY we're narrowing (avoids the LLM "helpfully" re-running
+    # the full suite).
+    assert "cryptography" in prompt
 
 
 # ---------------------------------------------------------------------------
