@@ -6,7 +6,10 @@ pass-through.
 
 For armory artifact types it checks:
 - **tool**: no forbidden network-I/O imports in any changed ``.py`` file.
-- **playbook**: all YAML blocks in changed ``.md``/``.yaml`` files parse cleanly.
+- **playbook**: all YAML blocks in changed ``.md``/``.yaml`` files parse cleanly,
+  AND any ``tests/.../test_*.py`` file added in the same PR derives its stem
+  from a playbook's ``playbook:`` slug (slug → snake_case) so a test cannot
+  silently validate the wrong artifact.
 - **wordlist**: no validation (structure is trivially valid).
 
 On failure the node marks the offending subtask as ``changes_requested``,
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import PurePosixPath
 
 import yaml
 
@@ -26,6 +30,7 @@ from ..armory_prompts import FORBIDDEN_IMPORTS
 from ..config import get_settings
 from ..integrations.github_client import GitHubClient, _extract_pr_number
 from ..state import FactoryState, SubTask
+from ..test_filenames import expected_test_stem
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +59,11 @@ _VALID_PLAYBOOK_SCOPES: frozenset[str] = frozenset({"generic", "target-specific"
 # `capability_name` is what a later `artifact_type: tool` task would use as
 # ToolBase.capability_name if this idea gets forged for real.
 _TOOLSPEC_REQUIRED_FM: tuple[str, ...] = (
-    "toolspec", "name", "capability_name", "status", "category",
+    "toolspec",
+    "name",
+    "capability_name",
+    "status",
+    "category",
 )
 _CHECK_REQUIRED_KEYS: tuple[str, ...] = ("id", "name", "mode", "category", "severity")
 # Modes whose checks are routed through Intruder and therefore need at least
@@ -64,9 +73,7 @@ _MUTATION_REQUIRED_MODES: frozenset[str] = frozenset({"deterministic", "oob"})
 # A mutation is "real" when it carries at least one of these payload-bearing
 # keys. `note` and `value` (without `header`) alone don't qualify — `value`
 # without `header` has nothing to attach to and is silently dropped.
-_MUTATION_PAYLOAD_KEYS: frozenset[str] = frozenset(
-    {"body", "header", "url_override"}
-)
+_MUTATION_PAYLOAD_KEYS: frozenset[str] = frozenset({"body", "header", "url_override"})
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +193,7 @@ async def validate_armory_node(state: FactoryState) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def validate_armory_pr_files(
-    pr_files: list[dict], artifact_type: str
-) -> list[str]:
+def validate_armory_pr_files(pr_files: list[dict], artifact_type: str) -> list[str]:
     """Run the armory schema/safety checks against a PR's changed files.
 
     Public helper used by both ``validate_armory_node`` (post-merge gate)
@@ -271,13 +276,39 @@ def _matches_forbidden_import(line: str, module: str) -> bool:
 def _check_playbook_files(pr_files: list[dict]) -> list[str]:
     """Validate YAML syntax and required fields in changed playbook files.
 
+    Also enforces the test-filename contract: when a PR adds a playbook
+    ``.md`` and a ``tests/.../test_*.py`` file at the same time, the test
+    file's stem MUST equal ``test_<playbook_snake_case>`` (see
+    :mod:`factory.test_filenames`). A mismatch silently validates the wrong
+    artifact — pytest would happily run the wrong test against whatever
+    happens to live at the imported path. Rejecting it here forces the
+    grinder to derive the filename from the playbook slug it's actually
+    testing.
+
     Args:
         pr_files: List of PR file objects from the GitHub API.
 
     Returns:
-        List of error strings (empty means all clear).
+        List of error strings (empty means all pass).
     """
     errors: list[str] = []
+
+    # First pass: collect playbook slugs whose ``.md``/``.yaml``/``.yml``
+    # file was added/modified in this PR. These are the candidates a test
+    # file is allowed to reference.
+    playbook_slugs: list[str] = []
+    test_paths: list[str] = []
+    for f in pr_files:
+        filename: str = f.get("filename", "")
+        status: str = f.get("status", "")
+        # Only enforce for added/modified test files — a deleted test in an
+        # unrelated PR shouldn't be matched against today's playbook diff.
+        if status not in ("added", "modified"):
+            continue
+        if filename.startswith("tests/") and filename.endswith(".py"):
+            stem = PurePosixPath(filename).stem
+            if stem.startswith("test_"):
+                test_paths.append(filename)
 
     for f in pr_files:
         filename: str = f.get("filename", "")
@@ -307,7 +338,9 @@ def _check_playbook_files(pr_files: list[dict]) -> list[str]:
 
         # Validate YAML frontmatter in Markdown files (--- ... ---).
         if filename.endswith(".md"):
-            fm_match = re.match(r"^---\n(.*?)^---", added_text, re.DOTALL | re.MULTILINE)
+            fm_match = re.match(
+                r"^---\n(.*?)^---", added_text, re.DOTALL | re.MULTILINE
+            )
             if fm_match:
                 try:
                     fm = yaml.safe_load(fm_match.group(1)) or {}
@@ -336,6 +369,33 @@ def _check_playbook_files(pr_files: list[dict]) -> list[str]:
                     # fenced block. Validate them with the same rules.
                     if "checks" in fm:
                         errors.extend(_validate_checks(filename, fm["checks"]))
+                    # Record this playbook's slug so the test-filename check
+                    # below can match test files against it. Only collect
+                    # when the frontmatter is well-formed (has a `playbook:`
+                    # key) — otherwise the test-filename rule has nothing to
+                    # anchor on.
+                    slug = fm.get("playbook")
+                    if isinstance(slug, str) and slug:
+                        playbook_slugs.append(slug)
+
+    # Test-filename derivation: every added/modified test_*.py file in this
+    # PR must match the stem of at least one playbook slug touched by the
+    # same PR. Skip silently when no playbook files were touched (the test
+    # is presumably for an existing playbook that wasn't changed here).
+    if test_paths and playbook_slugs:
+        allowed_stems = {expected_test_stem(slug) for slug in playbook_slugs}
+        for test_path in test_paths:
+            stem = PurePosixPath(test_path).stem
+            if stem not in allowed_stems:
+                expected = sorted(allowed_stems)
+                errors.append(
+                    f"`{test_path}`: test filename does not match any playbook "
+                    f"added/modified in this PR. Expected stem one of "
+                    f"{expected} (slugify the playbook's `playbook:` field, "
+                    f"replace hyphens with underscores, prefix `test_`). "
+                    f"Test files for playbooks must be derived from the "
+                    f"playbook slug — see factory.test_filenames."
+                )
 
     return errors
 
