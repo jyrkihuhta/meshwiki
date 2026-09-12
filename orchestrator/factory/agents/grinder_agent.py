@@ -546,8 +546,12 @@ def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> st
             "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
             "returns a result dict.  Tests live in `tests/`.  "
             "Run tests with `python -m pytest tests/ -x -q`.  "
-            "Lint with `ruff check . && black --check .` from the repo root."
-            + root_note
+            "Lint with `ruff check . && black --check .` from the repo root, BUT ONLY when "
+            "the diff actually touches `.py` files. Inspect `git diff --name-only origin/<base>...HEAD` "
+            "first and skip the repo-wide lint (both `ruff check` and `black --check`) entirely "
+            "if no `.py` files appear in the change set — running them on `.md` playbook files "
+            "always produces spurious `No Python files found` / `Cannot parse: 1:3: ---` errors "
+            "that waste a round-trip." + root_note
         )
     if artifact_type == "playbook":
         return (
@@ -738,8 +742,24 @@ def build_grinder_task_prompt(
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (
-            f"4. Run autofix: ruff check --fix {lint_target} && black {lint_target}\n"
-            "   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
+            f"4. SKIP `ruff check` / `black --check` / `isort` if the diff contains no `.py` "
+            f"files — running Python linters on `.md` playbook files always produces spurious "
+            f"`No Python files found` / `Cannot parse: 1:3: ---` errors. Inspect the change "
+            f"set first:\n"
+            f"     changed=$(git diff --name-only origin/{base_branch}...HEAD)\n"
+            f"     if echo \"$changed\" | grep -q '\\.py$'; then\n"
+            f"       ruff check --fix {lint_target} && black {lint_target}\n"
+            f"     else\n"
+            f"       echo 'No Python files changed — skipping ruff/black/isort.'\n"
+            f"       # If the change set contains playbook `.md` files, validate the\n"
+            f"       # frontmatter with a YAML-only parser instead:\n"
+            f"       for f in $(echo \"$changed\" | grep '^playbooks/.*\\.md$'); do\n"
+            f"         python -c \"import yaml,sys; d=yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1]); "
+            f"assert d.get('playbook') and d.get('name') and d.get('leaf_type') and d.get('scope')\" \"$f\" \\\n"
+            f'           || echo "FAIL: $f"\n'
+            f"       done\n"
+            f"     fi\n"
+            f"   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
         )
         test_step = "5. Run: python -m pytest tests/ -x -q\n"
 

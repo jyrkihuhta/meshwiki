@@ -733,7 +733,10 @@ def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
 
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
     """Regression guard: a non-playbook armory task (e.g. `tool`) MUST still
-    run the ruff/black autofix step. Only playbook tasks are exempted."""
+    have the ruff/black autofix command available for the case where the diff
+    touches `.py` files. The command is now gated on a `git diff --name-only`
+    check, but the lint command itself must still be present (only the
+    unconditional repo-wide lint was removed)."""
     sub = _make_prompt_subtask("0001-tool-still-lints")
     prompt = build_grinder_task_prompt(
         subtask=sub,
@@ -745,9 +748,55 @@ def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
         is_meshwiki=False,
         base_branch="staging",
     )
+    # The lint command must still be present (inside the diff-conditional
+    # branch) so the agent has something to run when .py files are touched.
     assert "ruff check --fix molly/tools" in prompt
     assert "black molly/tools" in prompt
-    assert "SKIP `ruff check`" not in prompt
+    # And the prompt must gate the lint on the diff touching .py files
+    # (criterion #3: repo-wide lint only when .py files are touched).
+    assert "SKIP `ruff check`" in prompt
+    assert "git diff --name-only" in prompt
+
+
+def test_build_grinder_task_prompt_tool_branch_validates_md_frontmatter() -> None:
+    """The `tool` artifact prompt must point the agent at a YAML frontmatter
+    validator (yaml.safe_load on the extracted `---` block) for playbook
+    `.md` files, mirroring the rule in the dedicated `playbook` artifact
+    branch. Criterion #2: frontmatter validation never parses the full
+    markdown file."""
+    sub = _make_prompt_subtask("0001-tool-md-frontmatter")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The validator snippet must be present.
+    assert "yaml.safe_load" in prompt
+    # It must split on '---' to extract ONLY the frontmatter block, not
+    # parse the full markdown body (criterion #2).
+    assert ".split('---',2)[1]" in prompt
+    # And it must be reachable only via the no-.py-files-changed branch
+    # (so it's not wasted work when the change set is pure Python).
+    assert "^playbooks/.*\\.md$" in prompt
+
+
+def test_artifact_intro_tool_branch_mentions_diff_gated_lint() -> None:
+    """The `tool` artifact intro must tell the agent to inspect the diff and
+    skip repo-wide `ruff`/`black` when no `.py` files are touched, matching
+    criterion #3 (no spurious linter failures on .md playbook files)."""
+    intro = _artifact_intro("tool", "molly/tools")
+    assert "git diff --name-only" in intro
+    assert "ruff check" in intro
+    assert "black --check" in intro
+    # The conditional skip rule must be stated explicitly so the LLM doesn't
+    # simplify it away.
+    assert "no `.py` files" in intro or "no Python files" in intro
+    assert "No Python files found" in intro or "Cannot parse" in intro
 
 
 def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
