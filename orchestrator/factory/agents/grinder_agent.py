@@ -635,10 +635,13 @@ def build_grinder_task_prompt(
             "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
             "   ('cannot rebase: You have unstaged changes'). .gitignore already excludes\n"
             "   them, but files generated BEFORE the .gitignore rules took effect may still\n"
-            "   surface in `git status --porcelain`. Run before the rebase to save 2-3 commands:\n"
-            "     git rm -rf --cached --ignore-unmatch $(git ls-files -o --directory --exclude-standard | grep -E '__pycache__|/[^/]+\\.pyc$') 2>/dev/null; \\\n"
-            "     git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'\n"
-            "   If `git clean` fails, fall back to `git stash --include-untracked && git rebase ... && git stash pop`.\n"
+            "   surface in `git status --porcelain`. Run BEFORE the rebase — this avoids\n"
+            "   any stash/rebase/stash-pop dance:\n"
+            "     git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__\n"
+            "   (The `-X` flag removes ONLY files matched by .gitignore, which lists\n"
+            "   `__pycache__/` and `*.pyc`, so untracked source files are safe.)\n"
+            "   Then re-run `git status --porcelain` to confirm the working tree is clean\n"
+            "   before proceeding to step 8. No `git stash` step is required.\n"
         )
         branch_instruction = (
             f"2. Set up the branch — you MUST push fixes to the EXISTING PR branch:\n"
@@ -672,14 +675,16 @@ def build_grinder_task_prompt(
     else:
         pycache_preflight = (
             "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
-            "   ('cannot rebase: You have unstaged changes') and force a stash/rebase/stash-pop\n"
-            "   cycle. .gitignore already excludes __pycache__/ and *.pyc, but files generated\n"
-            "   BEFORE the .gitignore rules took effect (or by other tools) may still appear\n"
-            "   in `git status --porcelain`. Run this BEFORE the rebase to save 2-3 commands:\n"
-            "     git rm -rf --cached --ignore-unmatch $(git ls-files -o --directory --exclude-standard | grep -E '__pycache__|/[^/]+\\.pyc$') 2>/dev/null; \\\n"
-            "     git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'\n"
-            "   If `git clean` complains about nested git repositories or protected paths,\n"
-            "   fall back to `git stash --include-untracked && git rebase ... && git stash pop`.\n"
+            "   ('cannot rebase: You have unstaged changes') and force a wasteful\n"
+            "   stash/rebase/stash-pop cycle. .gitignore already excludes __pycache__/ and\n"
+            "   *.pyc, but files generated BEFORE the .gitignore rules took effect (or by\n"
+            "   other tools) may still appear in `git status --porcelain`. Run this BEFORE\n"
+            "   the rebase so no `git stash` step is needed:\n"
+            "     git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__\n"
+            "   (The `-X` flag removes ONLY files matched by .gitignore, which lists\n"
+            "   `__pycache__/` and `*.pyc`, so untracked source files are safe.)\n"
+            "   Then re-run `git status --porcelain` to confirm the working tree is clean\n"
+            "   before proceeding to step 8.\n"
         )
         branch_instruction = (
             f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
@@ -781,8 +786,9 @@ def build_grinder_task_prompt(
         f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
         f"   First verify the working tree is clean — pytest will have left __pycache__/*.pyc\n"
         f"   files behind. If `git status --porcelain` shows any `__pycache__/` or `*.pyc`\n"
-        f"   lines, run `git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'` (or\n"
-        f"   `git stash --include-untracked` as a last resort) before rebasing.\n"
+        f"   lines, run `git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__`\n"
+        f"   (the `-X` flag targets only .gitignore-matched paths, so untracked source files\n"
+        f"   are safe). No `git stash` is needed once the pre-flight in step 2 has run.\n"
         f"   Then: git fetch origin && git rebase origin/{base_branch}\n"
         f"   Resolve any conflicts, then push: {push_cmd}\n"
         f"   {push_note}\n"
@@ -953,7 +959,7 @@ async def grind_subtask_e2b(
             {
                 "status": "review",
                 "branch_name": branch_name,
-                "pr_url": f"https://github.com/dry-run/fake/pull/0",
+                "pr_url": "https://github.com/dry-run/fake/pull/0",
             }
         )
         return {"subtask": subtask, "incremental_cost_usd": 0.0}
