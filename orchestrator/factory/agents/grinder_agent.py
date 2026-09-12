@@ -627,6 +627,15 @@ def build_grinder_task_prompt(
     subtask_id: str = subtask["id"]
 
     if is_rework:
+        rework_pycache_preflight = (
+            "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
+            "   ('cannot rebase: You have unstaged changes'). .gitignore already excludes\n"
+            "   them, but files generated BEFORE the .gitignore rules took effect may still\n"
+            "   surface in `git status --porcelain`. Run before the rebase to save 2-3 commands:\n"
+            "     git rm -rf --cached --ignore-unmatch $(git ls-files -o --directory --exclude-standard | grep -E '__pycache__|/[^/]+\\.pyc$') 2>/dev/null; \\\n"
+            "     git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'\n"
+            "   If `git clean` fails, fall back to `git stash --include-untracked && git rebase ... && git stash pop`.\n"
+        )
         branch_instruction = (
             f"2. Set up the branch — you MUST push fixes to the EXISTING PR branch:\n"
             f"   git fetch origin\n"
@@ -638,6 +647,7 @@ def build_grinder_task_prompt(
             f"   variant. Pushing to a different branch leaves the PR showing the OLD\n"
             f"   broken file and the rework cycle stalls. If `git rebase` conflicts in\n"
             f"   step 8, resolve them in place — do NOT abandon the branch.\n"
+            f"{rework_pycache_preflight}"
         )
         rework_section = (
             f"\n## ⚠️ REWORK REQUIRED — Previous review feedback\n\n"
@@ -656,6 +666,17 @@ def build_grinder_task_prompt(
         step9_cmd = "gh pr view --json url --jq .url  # print existing PR URL"
         step9_verb = "Update the existing PR"
     else:
+        pycache_preflight = (
+            "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
+            "   ('cannot rebase: You have unstaged changes') and force a stash/rebase/stash-pop\n"
+            "   cycle. .gitignore already excludes __pycache__/ and *.pyc, but files generated\n"
+            "   BEFORE the .gitignore rules took effect (or by other tools) may still appear\n"
+            "   in `git status --porcelain`. Run this BEFORE the rebase to save 2-3 commands:\n"
+            "     git rm -rf --cached --ignore-unmatch $(git ls-files -o --directory --exclude-standard | grep -E '__pycache__|/[^/]+\\.pyc$') 2>/dev/null; \\\n"
+            "     git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'\n"
+            "   If `git clean` complains about nested git repositories or protected paths,\n"
+            "   fall back to `git stash --include-untracked && git rebase ... && git stash pop`.\n"
+        )
         branch_instruction = (
             f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
             f"   git fetch origin\n"
@@ -663,6 +684,7 @@ def build_grinder_task_prompt(
             f"   (If the branch already exists from a previous interrupted run, check out the existing branch.\n"
             f"    Then check if there is already an open PR for this branch: gh pr list --head factory/{subtask_id} --json number,url\n"
             f"    If an open PR exists and this is NOT a rework, skip straight to step 9 and print its URL.)\n"
+            f"{pycache_preflight}"
         )
         rework_section = ""
         push_cmd = "git push -u origin HEAD"
@@ -731,7 +753,11 @@ def build_grinder_task_prompt(
         f"6. Fix any lint/test failures\n"
         f"7. Commit your changes\n"
         f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
-        f"   git fetch origin && git rebase origin/{base_branch}\n"
+        f"   First verify the working tree is clean — pytest will have left __pycache__/*.pyc\n"
+        f"   files behind. If `git status --porcelain` shows any `__pycache__/` or `*.pyc`\n"
+        f"   lines, run `git clean -fd -- ':!*.py' ':!src' ':!orchestrator' ':!tests'` (or\n"
+        f"   `git stash --include-untracked` as a last resort) before rebasing.\n"
+        f"   Then: git fetch origin && git rebase origin/{base_branch}\n"
         f"   Resolve any conflicts, then push: {push_cmd}\n"
         f"   {push_note}\n"
         f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
