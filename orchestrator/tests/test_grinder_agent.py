@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -693,6 +694,12 @@ def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
     produced by pytest and would otherwise block the rebase with
     'cannot rebase: You have unstaged changes', forcing a
     stash/rebase/stash-pop dance in every task.
+
+    Acceptance criteria for the Task-0002 (Pre-clean __pycache__ artifacts):
+      - Before `git rebase`, run `git clean -fdX` (or targeted rm) to remove
+        __pycache__ directories created by the test run.
+      - No `__pycache__/*.pyc` files appear in `git status` before push.
+      - No `git stash` step is needed to clear cache pollution before rebase.
     """
     sub = _make_prompt_subtask("ecfdbfa7-sub-clean")
 
@@ -708,13 +715,33 @@ def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
         base_branch="staging",
     )
     assert "__pycache__" in fresh_prompt
-    assert "git clean -fd" in fresh_prompt
+    # Acceptance #1: must use `-fdX` (ignored-only) so untracked source is safe.
+    assert "git clean -fdX" in fresh_prompt
     # The instruction must appear BEFORE the rebase step so the agent sees
     # it as part of the workflow, not as a post-mortem fix.
     assert fresh_prompt.index("__pycache__") < fresh_prompt.index("Rebase onto")
     # Fresh prompt should also mention the rebase pre-flight check.
     assert "working tree is clean" in fresh_prompt
     assert "git status --porcelain" in fresh_prompt
+    # Acceptance #3: the prompt must NOT require `git stash` to clear cache.
+    # We split the prompt into "before rebase" and "after rebase" sections by
+    # the first occurrence of the rebase step header, then assert the
+    # pre-rebase block never instructs the agent to RUN `git stash`.
+    # (The phrase "no `git stash` step is needed" is allowed — it's the
+    # negation that fulfils the acceptance criterion.)
+    rebase_marker = "Rebase onto"
+    pre_rebase_block = fresh_prompt[: fresh_prompt.index(rebase_marker)]
+    stash_command_patterns = [
+        r"`git stash`\s*&&",  # chained shell command
+        r"git\s+stash\s+(?:--|-u)",  # git stash with any flag
+        r"fall\s+back\s+to.*git\s+stash",
+        r"run\s+`git\s+stash`",
+    ]
+    for pat in stash_command_patterns:
+        assert not re.search(pat, pre_rebase_block, re.IGNORECASE), (
+            f"Acceptance #3 violated: pre-rebase block contains stash command "
+            f"matching /{pat}/. Pre-rebase block:\n{pre_rebase_block}"
+        )
 
     # Rework path must carry the same pre-flight rule (otherwise reworks
     # trip over the same bytecode issue).
@@ -729,7 +756,54 @@ def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
         base_branch="staging",
     )
     assert "__pycache__" in rework_prompt
+    assert "git clean -fdX" in rework_prompt
     assert rework_prompt.index("__pycache__") < rework_prompt.index("Rebase onto")
+    rework_pre_rebase = rework_prompt[: rework_prompt.index("Rebase onto")]
+    for pat in stash_command_patterns:
+        assert not re.search(pat, rework_pre_rebase, re.IGNORECASE), (
+            f"Acceptance #3 violated: rework pre-rebase block contains stash "
+            f"command matching /{pat}/. Block:\n{rework_pre_rebase}"
+        )
+
+
+def test_build_grinder_task_prompt_pycache_preflight_targets_known_paths() -> None:
+    """The pre-clean command must target the well-known __pycache__ paths used
+    by the MeshWiki, orchestrator, and tests trees (acceptance #1: targeted
+    removal, not a blanket `git clean -fd` which could nuke untracked work).
+    """
+    sub = _make_prompt_subtask("ecfdbfa7-targets")
+
+    fresh_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The fresh pre-flight command must list the canonical cache roots.
+    assert "__pycache__" in fresh_prompt
+    # Targeted removal: pathspecs reference __pycache__ directories (not a
+    # blanket `git clean -fd` which would also delete other ignored files).
+    assert re.search(
+        r"git clean -fdX[^\n]*__pycache__", fresh_prompt
+    ), "Expected `git clean -fdX ... __pycache__ ...` in the fresh prompt."
+
+    rework_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="fix the schema",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert re.search(
+        r"git clean -fdX[^\n]*__pycache__", rework_prompt
+    ), "Expected `git clean -fdX ... __pycache__ ...` in the rework prompt."
 
 
 def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
