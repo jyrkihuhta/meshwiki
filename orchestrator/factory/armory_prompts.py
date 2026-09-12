@@ -248,6 +248,32 @@ Body prose explaining what this playbook tests and why.
   fields populated as `?` — that's a sign the YAML is structurally
   wrong (probably emitted as a list of strings rather than mappings).
 
+### Test filename MUST be derived from the playbook name
+
+If you create a test file for the playbook in the same PR, the filename
+MUST be derived from the playbook's `playbook:` slug — never invented
+freely. A test file with a mismatched stem silently validates the wrong
+artifact (pytest will run whatever lives at the imported path) and ships
+to staging looking "green" while exercising nothing relevant.
+
+Derivation rule (executed by `factory.test_filenames`):
+
+1. Take the playbook's `playbook:` slug from its own frontmatter, e.g.
+   `tenant-users-get-acronis`.
+2. Convert it to snake_case (lowercase, replace hyphens with underscores):
+   `tenant_users_get_acronis`.
+3. Prefix with `test_` and suffix with `.py`:
+   `test_tenant_users_get_acronis.py`.
+4. Place it under `tests/` (e.g. `tests/test_tenant_users_get_acronis.py`
+   or `tests/playbooks/test_tenant_users_get_acronis.py`).
+
+The armory validator (`nodes/validate_armory._check_playbook_files`)
+rejects the PR when a `tests/.../test_*.py` file's stem does not match
+any `playbook:` slug touched by the same PR, with a message pointing at
+`factory.test_filenames` so the failure is easy to fix. If the PR
+contains no new test file (loader tests cover it) the validator is a
+no-op for this rule.
+
 ### Local validation (skip Python linters)
 
 Playbook `.md` files are NOT Python. Do not run `ruff check` /

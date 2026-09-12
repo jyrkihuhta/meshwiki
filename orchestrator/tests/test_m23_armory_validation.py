@@ -26,7 +26,6 @@ from factory.nodes.validate_armory import (
     validate_armory_node,
 )
 
-
 # ---------------------------------------------------------------------------
 # armory_prompts
 # ---------------------------------------------------------------------------
@@ -216,7 +215,9 @@ def _make_md_file(filename: str, added_content: str) -> dict:
 
 
 def test_check_playbook_files_valid_returns_empty() -> None:
-    files = [_make_md_file("playbooks/test.md", _VALID_FRONTMATTER + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _VALID_FRONTMATTER + _VALID_CHECKS_YAML)
+    ]
     assert _check_playbook_files(files) == []
 
 
@@ -227,7 +228,9 @@ def test_check_playbook_files_invalid_yaml_block() -> None:
 
 
 def test_check_playbook_files_missing_leaf_type() -> None:
-    files = [_make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)
+    ]
     errors = _check_playbook_files(files)
     assert any("leaf_type" in e for e in errors)
 
@@ -296,7 +299,9 @@ def test_check_playbook_files_ignores_non_playbook_files() -> None:
 
 
 def test_check_playbook_files_missing_scope() -> None:
-    files = [_make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)
+    ]
     errors = _check_playbook_files(files)
     assert any("scope" in e for e in errors), errors
 
@@ -739,7 +744,11 @@ async def test_validate_armory_pass_through_for_explicit_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_subtask(subtask_id: str, status: str = "merged", pr_url: str = "https://github.com/owner/repo/pull/42") -> dict:
+def _make_subtask(
+    subtask_id: str,
+    status: str = "merged",
+    pr_url: str = "https://github.com/owner/repo/pull/42",
+) -> dict:
     return {
         "id": subtask_id,
         "wiki_page": subtask_id,
@@ -779,7 +788,11 @@ async def test_validate_armory_tool_clean_passes() -> None:
         task_repo="jyrkihuhta/molly-armory",
         subtasks=[_make_subtask("task-0099")],
     )
-    clean_files = [_make_file("python/molly/tools/my_tool.py", "+from molly.tools.base import ToolBase\n")]
+    clean_files = [
+        _make_file(
+            "python/molly/tools/my_tool.py", "+from molly.tools.base import ToolBase\n"
+        )
+    ]
     mock_gh = _mock_github(clean_files)
 
     with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):
@@ -848,10 +861,12 @@ async def test_validate_armory_toolspec_non_proposed_status_fails() -> None:
         task_repo="jyrkihuhta/molly-armory",
         subtasks=[_make_subtask("task-0099")],
     )
-    bad_files = [_make_md_file(
-        "toolspecs/bad.md",
-        "---\ntoolspec: x\nname: X\ncapability_name: x\nstatus: forged\ncategory: misc\n---\n",
-    )]
+    bad_files = [
+        _make_md_file(
+            "toolspecs/bad.md",
+            "---\ntoolspec: x\nname: X\ncapability_name: x\nstatus: forged\ncategory: misc\n---\n",
+        )
+    ]
     mock_gh = _mock_github(bad_files)
 
     with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):
@@ -937,3 +952,238 @@ def test_route_after_validate_armory_failed_no_changes_requested_escalates() -> 
         result = route_after_validate_armory(state)
 
     assert result == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# Test-filename derivation — reject PRs whose tests don't match the playbook
+# ---------------------------------------------------------------------------
+
+
+_PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS = """\
+---
+playbook: tenant-users-get-acronis
+name: Tenant Users Get (Acronis)
+leaf_type: rest_api
+scope: target-specific
+target: acronis
+checks:
+  - id: c1
+    name: C1
+    mode: analytical
+    category: idor-bola
+    severity: high
+---
+"""
+
+_PLAYBOOK_FM_JWT_ALG_CONFUSION = """\
+---
+playbook: jwt-algorithm-confusion
+name: JWT Algorithm Confusion
+leaf_type: auth_endpoint
+scope: generic
+checks:
+  - id: c1
+    name: C1
+    mode: deterministic
+    category: auth-bypass
+    severity: critical
+---
+"""
+
+
+def _make_test_file(filename: str, status: str = "added") -> dict:
+    """Build a minimal PR-file entry for a test_*.py file."""
+    return {
+        "filename": filename,
+        "patch": "+def test_placeholder():\n+    assert True\n",
+        "status": status,
+    }
+
+
+def test_check_playbook_files_matching_test_filename_passes() -> None:
+    """Adding a playbook and a test_<snake> file is allowed."""
+    files = [
+        _make_md_file(
+            "playbooks/tenant-users-get-acronis.md",
+            _PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS,
+        ),
+        _make_test_file("tests/test_tenant_users_get_acronis.py"),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_mismatched_test_filename_fails() -> None:
+    """Regression: grinder shipped test_mass_assignment_... for tenant-users-get-acronis."""
+    files = [
+        _make_md_file(
+            "playbooks/tenant-users-get-acronis.md",
+            _PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS,
+        ),
+        _make_test_file(
+            "tests/playbooks/test_mass_assignment_tenant_user_creation_acronis.py"
+        ),
+    ]
+    errors = _check_playbook_files(files)
+    assert errors, "expected a test-filename mismatch error"
+    msg = errors[0]
+    assert "test_mass_assignment_tenant_user_creation_acronis.py" in msg
+    assert "tenant-users-get-acronis" in msg or "test_tenant_users_get_acronis" in msg
+    assert "test_*.py" in msg or "test_" in msg
+
+
+def test_check_playbook_files_test_in_subdir_subpath_passes() -> None:
+    """tests/playbooks/test_<slug>.py is also accepted."""
+    files = [
+        _make_md_file(
+            "playbooks/jwt-algorithm-confusion.md",
+            _PLAYBOOK_FM_JWT_ALG_CONFUSION,
+        ),
+        _make_test_file("tests/playbooks/test_jwt_algorithm_confusion.py"),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_test_without_playbook_change_passes() -> None:
+    """If the PR adds a test but no playbook, the rule is a no-op — the
+    test presumably targets an existing playbook that wasn't changed here."""
+    files = [
+        _make_test_file("tests/test_existing_playbook.py"),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_playbook_without_test_passes() -> None:
+    """If the PR adds a playbook but no test, the rule is a no-op — loader
+    tests cover it via the existing pytest suite."""
+    files = [
+        _make_md_file(
+            "playbooks/jwt-algorithm-confusion.md",
+            _PLAYBOOK_FM_JWT_ALG_CONFUSION,
+        ),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_only_modified_test_filename_checked() -> None:
+    """A deleted test file is not subject to the rule."""
+    files = [
+        _make_md_file(
+            "playbooks/tenant-users-get-acronis.md",
+            _PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS,
+        ),
+        _make_test_file("tests/test_old_orphan.py", status="deleted"),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_multiple_playbooks_all_match() -> None:
+    """When the PR touches multiple playbooks, the test can match any of them."""
+    files = [
+        _make_md_file(
+            "playbooks/tenant-users-get-acronis.md",
+            _PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS,
+        ),
+        _make_md_file(
+            "playbooks/jwt-algorithm-confusion.md",
+            _PLAYBOOK_FM_JWT_ALG_CONFUSION,
+        ),
+        _make_test_file("tests/test_jwt_algorithm_confusion.py"),
+    ]
+    assert _check_playbook_files(files) == []
+
+
+def test_check_playbook_files_multiple_playbooks_one_bad_test() -> None:
+    """A single test that doesn't match ANY playbook slug fails."""
+    files = [
+        _make_md_file(
+            "playbooks/tenant-users-get-acronis.md",
+            _PLAYBOOK_FM_TENANT_USERS_GET_ACRONIS,
+        ),
+        _make_md_file(
+            "playbooks/jwt-algorithm-confusion.md",
+            _PLAYBOOK_FM_JWT_ALG_CONFUSION,
+        ),
+        _make_test_file("tests/test_something_else.py"),
+    ]
+    errors = _check_playbook_files(files)
+    assert len(errors) == 1
+    assert "test_something_else.py" in errors[0]
+    assert "test_tenant_users_get_acronis" in errors[0]
+    assert "test_jwt_algorithm_confusion" in errors[0]
+
+
+# ---------------------------------------------------------------------------
+# factory.test_filenames — slug → snake → test path helpers
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_basic() -> None:
+    from factory.test_filenames import slugify
+
+    assert slugify("Hello World!") == "hello-world"
+    assert slugify("Hello_World") == "hello-world"
+    assert slugify("Hello---World") == "hello-world"
+    assert slugify("  multi   spaces  ") == "multi-spaces"
+    assert slugify("---leading-and-trailing---") == "leading-and-trailing"
+
+
+def test_slugify_strips_non_alnum() -> None:
+    from factory.test_filenames import slugify
+
+    assert slugify("foo/bar.baz (qux)") == "foobarbaz-qux"
+    assert slugify("Tenant Users (Get — Acronis)") == "tenant-users-get-acronis"
+    assert slugify("123-abc_DEF") == "123-abc-def"
+
+
+def test_slugify_empty() -> None:
+    from factory.test_filenames import slugify
+
+    assert slugify("") == ""
+    assert slugify("---") == ""
+    assert slugify("!!!") == ""
+
+
+def test_snake_case_basic() -> None:
+    from factory.test_filenames import snake_case
+
+    assert snake_case("tenant-users-get-acronis") == "tenant_users_get_acronis"
+    assert snake_case("Hello-World!") == "hello_world"
+
+
+def test_expected_test_stem_basic() -> None:
+    from factory.test_filenames import expected_test_stem
+
+    assert (
+        expected_test_stem("tenant-users-get-acronis")
+        == "test_tenant_users_get_acronis"
+    )
+    assert (
+        expected_test_stem("jwt-algorithm-confusion") == "test_jwt_algorithm_confusion"
+    )
+
+
+def test_playbook_test_filename_default_dir() -> None:
+    from factory.test_filenames import playbook_test_filename
+
+    assert (
+        playbook_test_filename("tenant-users-get-acronis")
+        == "tests/test_tenant_users_get_acronis.py"
+    )
+
+
+def test_playbook_test_filename_subdir() -> None:
+    from factory.test_filenames import playbook_test_filename
+
+    assert (
+        playbook_test_filename("tenant-users-get-acronis", "tests/playbooks")
+        == "tests/playbooks/test_tenant_users_get_acronis.py"
+    )
+
+
+def test_playbook_test_filename_strips_trailing_slash() -> None:
+    from factory.test_filenames import playbook_test_filename
+
+    assert (
+        playbook_test_filename("tenant-users-get-acronis", "tests/playbooks/")
+        == "tests/playbooks/test_tenant_users_get_acronis.py"
+    )
