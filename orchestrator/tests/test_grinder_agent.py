@@ -659,6 +659,7 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     (which always fails on `.md` files) and instead instruct the agent to
     validate with a YAML/frontmatter-only parser."""
     sub = _make_prompt_subtask("0001-skip-python-linters")
+    sub["files_touched"] = ["playbooks/new-md-only-playbook.md"]
     prompt = build_grinder_task_prompt(
         subtask=sub,
         page_content="task body",
@@ -678,9 +679,9 @@ def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
     # And it must point at a concrete validator fallback.
     assert "scripts/validate_playbooks.py" in prompt
     assert "yaml.safe_load" in prompt
-    # Playbooks have no FULL Python test suite — the full suite pulls in
-    # `cryptography`-dependent fixtures that 120s-timeout this env, so step 5
-    # must narrow pytest to the loader test only.
+    # Markdown-only playbook diffs must NOT run the full `pytest tests/` suite
+    # (the cryptography fixture would 120s-timeout); narrow to the loader
+    # test only.
     assert "python -m pytest tests/ -x -q" not in prompt
     assert "python -m pytest tests/test_playbook_loader.py" in prompt
     assert "cryptography" in prompt
@@ -815,13 +816,18 @@ def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
 
 
 def test_build_grinder_task_prompt_playbook_runs_narrow_pytest() -> None:
-    """A non-MeshWiki playbook task must instruct the agent to run ONLY the
-    playbook loader test (`tests/test_playbook_loader.py`), not the full
-    `pytest tests/` suite — the full suite pulls in `cryptography`-dependent
-    fixtures that aren't installed in this env and 120s-timeout. Skipping
-    pytest entirely is wrong because the loader test exists and exercises
-    the schema rules we care about."""
+    """A non-MeshWiki markdown-only playbook task must instruct the agent to
+    run ONLY the playbook loader test (`tests/test_playbook_loader.py`), not
+    the full `pytest tests/` suite — the full suite pulls in
+    `cryptography`-dependent fixtures that aren't installed in this env and
+    120s-timeout. Skipping pytest entirely is wrong because the loader test
+    exists and exercises the schema rules we care about.
+
+    The narrowing only applies when the subtask is known to touch ONLY `.md`
+    files inside the playbook root — otherwise the full suite is required.
+    """
     sub = _make_prompt_subtask("0001-playbook-narrow-pytest")
+    sub["files_touched"] = ["playbooks/narrow-pytest-target.md"]
     prompt = build_grinder_task_prompt(
         subtask=sub,
         page_content="task body",
@@ -843,6 +849,93 @@ def test_build_grinder_task_prompt_playbook_runs_narrow_pytest() -> None:
     # understands WHY we're narrowing (avoids the LLM "helpfully" re-running
     # the full suite).
     assert "cryptography" in prompt
+    # And it must tell the agent to report-and-continue on a missing-dep
+    # failure rather than retrying the full suite.
+    assert "ModuleNotFoundError" in prompt
+    assert "REPORT" in prompt
+    assert "do NOT retry" in prompt or "do not retry" in prompt.lower()
+
+
+def test_build_grinder_task_prompt_playbook_with_python_file_runs_full_pytest() -> None:
+    """If the subtask touches a Python file (or any non-.md file) inside
+    ``playbooks/``, the narrow loader-only pytest is unsafe — Python module
+    imports may be broken and only the full suite would catch that. The
+    prompt must fall back to `pytest tests/ -x -q`."""
+    sub = _make_prompt_subtask("0001-playbook-with-python")
+    sub["files_touched"] = [
+        "playbooks/new-playbook.md",
+        "molly/playbook_loader.py",
+    ]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # Full suite is required when a non-.md file is in scope.
+    assert "python -m pytest tests/ -x -q" in prompt
+    # Narrow loader-only path must NOT appear (otherwise the Python change
+    # goes unvalidated).
+    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+    # The full-suite branch explains WHY so the agent doesn't "helpfully"
+    # narrow it again.
+    assert "Python files" in prompt or "outside `playbooks/`" in prompt
+
+
+def test_build_grinder_task_prompt_playbook_without_files_touched_runs_full_pytest() -> (
+    None
+):
+    """When ``files_touched`` is unknown / empty the prompt must take the
+    safe path and run the full ``pytest tests/`` suite. Better one slow run
+    than a silent skip on a subtask whose actual diff we can't predict."""
+    sub = _make_prompt_subtask("0001-playbook-unknown-files")
+    # No files_touched set — defaults to [] in _make_prompt_subtask.
+    assert sub["files_touched"] == []
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "python -m pytest tests/ -x -q" in prompt
+    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+
+
+def test_is_markdown_only_playbook_diff_helper() -> None:
+    """The shared helper decides whether to narrow pytest to the loader
+    test. Direct coverage avoids having to set up the full prompt path to
+    exercise the branching."""
+    from factory.agents.grinder_agent import _is_markdown_only_playbook_diff
+
+    # Pure md inside playbooks/ → narrow
+    assert _is_markdown_only_playbook_diff(
+        ["playbooks/foo.md", "playbooks/sub/bar.md"], "playbooks"
+    )
+    # Nested md only, any task_repo_root → narrow when root matches
+    assert _is_markdown_only_playbook_diff(["playbooks/x/y.md"], "playbooks/")
+    # Python file in the diff → full suite
+    assert not _is_markdown_only_playbook_diff(
+        ["playbooks/foo.md", "molly/loader.py"], "playbooks"
+    )
+    # md outside the playbook root → full suite (not a playbook change)
+    assert not _is_markdown_only_playbook_diff(
+        ["docs/foo.md", "playbooks/bar.md"], "playbooks"
+    )
+    # Empty / None → conservative full suite
+    assert not _is_markdown_only_playbook_diff([], "playbooks")
+    assert not _is_markdown_only_playbook_diff(None, "playbooks")
+    # Non-md extension that happens to live in playbooks/ → full suite
+    assert not _is_markdown_only_playbook_diff(["playbooks/foo.txt"], "playbooks")
+    # Bare .md with no playbook root known → still narrow (any markdown diff)
+    assert _is_markdown_only_playbook_diff(["README.md"], None)
 
 
 # ---------------------------------------------------------------------------

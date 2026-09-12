@@ -521,6 +521,47 @@ class GrinderToolExecutor:
         return f"Task {page_name} transitioned to {status}"
 
 
+def _is_markdown_only_playbook_diff(
+    files_touched: list[str] | None,
+    task_repo_root: str | None,
+) -> bool:
+    """Return True if *files_touched* indicates a markdown-only playbook change.
+
+    The narrowing rule (loader-test only, no full ``pytest tests/``) applies
+    when the subtask touches **only** ``.md`` files inside the playbook
+    directory. The full suite is still required when any ``.py`` (or other
+    non-Markdown) file is in scope — ``test_playbook_loader.py`` doesn't
+    exercise Python module imports.
+
+    An empty or missing ``files_touched`` list is treated as "unknown" and
+    therefore returns ``False`` — better to run the safer full suite than to
+    silently skip validation for a subtask whose touched files we don't know.
+
+    Args:
+        files_touched: File paths the PM / frontmatter ``expected_files``
+            said this subtask will create or modify. May be ``None`` or ``[]``.
+        task_repo_root: Sub-path within the repo where playbooks live
+            (e.g. ``"playbooks"``). When set, files must start with this
+            prefix (with or without trailing slash) to qualify.
+
+    Returns:
+        ``True`` only when the list is non-empty AND every entry ends in
+        ``.md`` AND every entry is rooted inside ``task_repo_root`` (when
+        that prefix is known). Otherwise ``False``.
+    """
+    if not files_touched:
+        return False
+    root = (task_repo_root or "").rstrip("/")
+    for path in files_touched:
+        if not isinstance(path, str) or not path:
+            return False
+        if not path.lower().endswith(".md"):
+            return False
+        if root and not (path == root or path.startswith(root + "/")):
+            return False
+    return True
+
+
 def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> str:
     """Return a one-paragraph repo/artifact description for the grinder task prompt.
 
@@ -732,13 +773,29 @@ def build_grinder_task_prompt(
             f"     done\n"
             f"   If the repo provides `scripts/validate_playbooks.py` (or equivalent), use that instead.\n"
         )
-        test_step = (
-            "5. Run: python -m pytest tests/test_playbook_loader.py -x -q\n"
-            "   (Narrow to the loader test only — the full `tests/` suite pulls in fixtures "
-            "that require a `cryptography` module that is not installed in this env, which "
-            "causes 120s timeouts. The loader test alone covers playbook schema/loading "
-            "without that dependency.)\n"
+        files_touched = (
+            subtask.get("files_touched") if isinstance(subtask, dict) else None
         )
+        md_only = _is_markdown_only_playbook_diff(files_touched, task_repo_root)
+        if md_only:
+            test_step = (
+                "5. Run ONLY: python -m pytest tests/test_playbook_loader.py -q\n"
+                "   (This subtask touches only `.md` files inside `playbooks/`, so the full "
+                "`pytest tests/` suite is unnecessary — it pulls in `cryptography`-dependent "
+                "fixtures that aren't installed in this env and 120s-timeout. The loader test "
+                "covers playbook schema/loading without that dependency.)\n"
+                "   If the targeted test itself fails with `ModuleNotFoundError` (e.g. "
+                "missing `cryptography` or similar), REPORT that failure and CONTINUE — "
+                "do NOT retry the full `pytest tests/` suite, as it will fail the same way "
+                "and waste a full grinder iteration.\n"
+            )
+        else:
+            test_step = (
+                "5. Run: python -m pytest tests/ -x -q\n"
+                "   (This subtask touches Python files or files outside `playbooks/`, so the "
+                "full `tests/` suite is required — `test_playbook_loader.py` alone would not "
+                "cover module imports or other code paths affected by the change.)\n"
+            )
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (
