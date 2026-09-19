@@ -50,6 +50,15 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 # only, and REQUIRES `target:` — see _check_playbook_files).
 _PLAYBOOK_REQUIRED_FM: tuple[str, ...] = ("playbook", "name", "leaf_type", "scope")
 _VALID_PLAYBOOK_SCOPES: frozenset[str] = frozenset({"generic", "target-specific"})
+# A target handle is what molly.json/TargetConfig configures (e.g. `whatnot`,
+# `acronis`) — a short lowercase token, never a hostname or URL. 4 of 5
+# playbooks found broken on 2026-09-19 had `target:` set to a hostname/URL
+# (`api.whatnot.com`, `https://api.whatnot.com`, `fi01-cloud.acronis.com`)
+# instead of the handle. `match_playbooks()` matches on the handle exactly,
+# so those values silently never match anything. We can't validate against
+# Molly's live target list from here (it's runtime config, not in this
+# repo), so this only rejects values that are structurally not a handle.
+_TARGET_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # `toolspec` is the top-level required key, mirroring `playbook`.
 # `capability_name` is what a later `artifact_type: tool` task would use as
 # ToolBase.capability_name if this idea gets forged for real.
@@ -327,11 +336,22 @@ def _check_playbook_files(pr_files: list[dict]) -> list[str]:
                             f"`{filename}`: invalid scope `{scope}` (must be one of: "
                             f"{', '.join(sorted(_VALID_PLAYBOOK_SCOPES))})"
                         )
-                    if scope == "target-specific" and not fm.get("target"):
-                        errors.append(
-                            f"`{filename}`: scope=target-specific requires a `target:` "
-                            "field naming which leaf this fires on"
-                        )
+                    if scope == "target-specific":
+                        target = fm.get("target")
+                        if not target:
+                            errors.append(
+                                f"`{filename}`: scope=target-specific requires a "
+                                "`target:` field naming which leaf this fires on"
+                            )
+                        elif not isinstance(target, str) or not _TARGET_HANDLE_RE.match(
+                            target
+                        ):
+                            errors.append(
+                                f"`{filename}`: target `{target}` doesn't look like a "
+                                "target handle (e.g. `whatnot`, `acronis`) — it must "
+                                "match what molly.json/TargetConfig configures, not a "
+                                "hostname or URL"
+                            )
                     # Real playbooks put `checks:` IN the frontmatter, not a
                     # fenced block. Validate them with the same rules.
                     if "checks" in fm:
