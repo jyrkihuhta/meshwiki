@@ -364,6 +364,37 @@ checks:
     assert _check_playbook_files(files) == []
 
 
+@pytest.mark.parametrize(
+    "malformed_target",
+    ["https://api.example.com", "api.example.com", "fi01-cloud.acronis.com"],
+)
+def test_check_playbook_files_target_specific_with_malformed_target_fails(
+    malformed_target: str,
+) -> None:
+    """A `target:` that's a hostname/URL instead of a bare handle silently
+    never matches anything in Molly's match_playbooks() (which matches on
+    handle, e.g. `whatnot`/`acronis`) — just as broken as a missing target,
+    and the exact shape that caused the 2026-09-19 incident."""
+    fm = f"""\
+---
+playbook: my-playbook
+name: My Playbook
+leaf_type: rest_api
+scope: target-specific
+target: {malformed_target}
+checks:
+  - id: c1
+    name: C1
+    mode: analytical
+    category: misc
+    severity: medium
+---
+"""
+    files = [_make_md_file("playbooks/test.md", fm)]
+    errors = _check_playbook_files(files)
+    assert any("doesn't look like a target handle" in e for e in errors), errors
+
+
 # ---------------------------------------------------------------------------
 # _check_toolspec_files
 # ---------------------------------------------------------------------------
