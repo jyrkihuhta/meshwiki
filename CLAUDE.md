@@ -2,12 +2,38 @@
 
 ## Project Overview
 
-MeshWiki is a modern wiki platform inspired by MoinMoin, Graphingwiki, and Obsidian. It combines:
-- File-based Markdown storage
-- Wiki links (`[[PageName]]` syntax)
+MeshWiki is a self-hosted wiki application, inspired by MoinMoin, Graphingwiki, and
+Obsidian. Like any wiki, it stores pages, links them together, and renders them for
+reading and editing. Core features:
+- File-based Markdown storage (pages are plain `.md` files on disk)
+- Wiki links (`[[PageName]]` syntax) with a backlink graph
+- Full-text search, tags, page history, and a D3.js link-graph view
 - VPS deployment via Docker Compose + Caddy (auto-HTTPS)
 
 **Tech Stack:** FastAPI, Jinja2, HTMX, Python 3.12+, Rust (graph engine), Docker Compose, Caddy
+
+The wiki is the whole product, and it runs on its own — `core/graph.py` is an optional
+import and the app works without it. A separate, optional automation subsystem (the
+"agent factory" / orchestrator under `orchestrator/`) can open PRs against this repo to
+help with development; it has its own docs and nothing in the wiki depends on it.
+
+## Scope & Authorization
+
+The wiki application itself performs no security testing of any kind — it stores and
+renders pages. The optional agent-factory subsystem, and the separate Molly
+security-testing service it can drive, operate only against explicitly authorized
+targets:
+
+- **Bug-bounty programs the operator is enrolled in** on HackerOne and Intigriti,
+  tested strictly within each program's published scope. Every request is checked
+  against per-target allow/deny rules (`scope_rules` / `scope_exclude_rules`) by a Rust
+  `ScopeChecker` before it is sent; out-of-scope hosts are blocked.
+- **Deliberately-vulnerable practice targets** on a private range (e.g. DVGA and other
+  "target-dummy" apps) used for regression testing. Staging is locked to this practice
+  range and never points at live third-party targets.
+
+This is authorized, scoped security testing. There is no capability for testing hosts
+outside the configured, authorized scope.
 
 ## Key Documentation
 
