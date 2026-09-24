@@ -43,7 +43,7 @@ Read these for full context:
 - `docs/getting-started.md` - Setup and deployment guide
 - `docs/architecture.md` - System design and components
 - `docs/prd/002-meshwiki-mvp.md` - Application requirements and status
-- `docs/prd/003-agent-factory.md` - Agent factory full spec (phases, API, orchestrator)
+- `docs/domains/factory.md` - Agent factory design (phases, API, orchestrator)
 
 - `docs/prd/001-infrastructure.md` - Infrastructure requirements
 - `docs/custom-macros.md` - How to create custom `<<Macro>>` extensions
@@ -365,8 +365,8 @@ The agent reads the domain doc for context, works autonomously, and reports back
 ## Testing
 
 ```bash
+pip install -e ".[dev]"            # from the repo root (pyproject.toml lives there)
 cd src
-pip install -e ".[dev]"
 pytest
 pytest --cov=meshwiki          # With coverage
 pytest -x                        # Stop on first failure
