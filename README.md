@@ -25,6 +25,7 @@ New here? Start with [Quick Start](#quick-start) to get the wiki running — you
 - **Dark mode** - One-click toggle with CSS custom properties, persisted in localStorage
 - **Responsive design** - Mobile-friendly with hamburger nav, stacked layouts below 768px
 - **Syntax highlighting** - Fenced code blocks highlighted via highlight.js with light/dark themes
+- **Toast notifications** - Save/delete feedback with auto-dismiss animations
 - **HTMX interactions** - Snappy server-rendered UI without heavy JavaScript
 - **Agent factory** *(optional)* - Autonomous LLM coding agents driven from wiki task pages ([details](#agent-factory-experimental))
 - **CI pipeline** - GitHub Actions running Python and Rust test suites with coverage enforcement
@@ -53,8 +54,8 @@ Options:
 The app works without the graph engine — graph features (backlinks, MetaTable, visualization) gracefully degrade.
 
 ```bash
+pip install -e .          # from the repo root (pyproject.toml lives there)
 cd src
-pip install -e .
 uvicorn meshwiki.main:app --reload
 ```
 
@@ -122,16 +123,16 @@ The factory is an optional layer that lets MeshWiki build software on its own. Y
 - **Status:** v1 complete (phases 1–7); v2 (phases 8–11) in progress. It is functional but still evolving — treat it as experimental.
 - **Off by default:** the factory API is disabled unless you set `MESHWIKI_FACTORY_ENABLED=true`, and it fails closed unless a `MESHWIKI_FACTORY_API_KEY` is configured. The wiki works fully without ever enabling it.
 - **External dependencies:** it needs LLM API access (Anthropic-compatible, MiniMax by default) and, for sandboxed execution, [E2B](https://e2b.dev/); it also uses the GitHub API to open PRs.
-- **Learn more:** [`docs/domains/factory.md`](docs/domains/factory.md) (design and scope), [`docs/runbook.md`](docs/runbook.md) (operations), and the PRD at [`docs/prd/003-agent-factory.md`](docs/prd/003-agent-factory.md).
+- **Learn more:** [`docs/domains/factory.md`](docs/domains/factory.md) (design and scope) and [`docs/runbook.md`](docs/runbook.md) (operations).
 
 The orchestrator lives in [`orchestrator/`](orchestrator/) and runs as its own service; the wiki-side API that task pages talk to lives under `src/meshwiki/api/`.
 
 ## Running Tests
 
 ```bash
-# Web app (unit + E2E) — from the src/ directory
-cd src
+# Web app (unit + E2E) — install from the repo root, run from src/
 pip install -e ".[dev]"
+cd src
 pytest tests/ -v                       # ~750 unit tests
 pytest tests/ --cov=meshwiki           # with coverage
 
@@ -140,11 +141,10 @@ pytest e2e/ -v --browser chromium      # 49 E2E browser tests
 ```
 
 ```bash
-# Rust graph engine — from graph-core/
+# Rust graph engine (via its Python bindings) — from graph-core/
 cd graph-core
 source .venv/bin/activate
 PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
-cargo test                             # ~70 Rust tests
 python -m pytest tests/ -v             # ~70 PyO3 integration tests
 ```
 
@@ -155,7 +155,7 @@ pip install -e ".[dev]"
 pytest tests/ -v                       # ~600 tests
 ```
 
-Roughly **1,500 tests** across the web app, orchestrator, E2E, and Rust suites. CI runs the Python and Rust suites automatically via GitHub Actions.
+Roughly **1,500 tests** across the web app, orchestrator, E2E, and graph-engine suites. CI runs the web-app, orchestrator, and graph-engine suites automatically via GitHub Actions.
 
 ## Project Structure
 
@@ -164,16 +164,16 @@ meshwiki/
 ├── dev.sh                      # Development startup script
 ├── Makefile                    # Common dev/test/build tasks
 ├── Dockerfile                  # Multi-stage build (Rust + Python)
+├── pyproject.toml              # Web-app package + dev dependencies
 ├── graph-core/                 # Rust graph engine
 │   ├── Cargo.toml
 │   ├── src/                    # Rust source (lib, graph, parser, models, query, events, watcher)
 │   └── tests/                  # PyO3 integration tests
 ├── src/                        # Python web application
-│   ├── pyproject.toml
 │   ├── meshwiki/
 │   │   ├── main.py             # FastAPI routes + WebSocket endpoints
 │   │   ├── config.py           # Settings (MESHWIKI_* env vars)
-│   │   ├── api/                # Agent-factory JSON API (pages, tasks, webhooks)
+│   │   ├── api/                # Agent-factory JSON API (pages, tasks, agents, webhooks)
 │   │   ├── core/
 │   │   │   ├── storage.py      # Abstract storage + FileStorage
 │   │   │   ├── parser.py       # Markdown + wiki links + macros
@@ -288,7 +288,6 @@ For local development with k3d, Istio, and Flux GitOps, see the [Getting Started
 | [TODO](TODO.md) | Milestones and roadmap |
 | [PRD: Infrastructure](docs/prd/001-infrastructure.md) | Infrastructure requirements |
 | [PRD: MeshWiki MVP](docs/prd/002-meshwiki-mvp.md) | Application requirements |
-| [PRD: Agent Factory](docs/prd/003-agent-factory.md) | Agent factory requirements |
 | [ADR-001: k3d Approach](docs/adr/001-k3d-terraform-approach.md) | k3d Terraform decision |
 | [Contributing](CONTRIBUTING.md) | Contributor guide |
 
