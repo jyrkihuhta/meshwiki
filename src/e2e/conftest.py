@@ -64,6 +64,10 @@ def e2e_server(tmp_path_factory):
         "MESHWIKI_DATA_DIR": str(data_dir),
         "MESHWIKI_DEBUG": "true",
         "MESHWIKI_GRAPH_WATCH": "false",
+        # create_page writes .md files straight to disk, bypassing the save
+        # route's cache refresh, and with the watcher off nothing else would
+        # invalidate page_cache, so pages would stay missing from the sidebar.
+        "MESHWIKI_PAGE_CACHE": "0",
     }
 
     proc = subprocess.Popen(
