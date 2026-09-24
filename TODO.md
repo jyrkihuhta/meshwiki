@@ -378,3 +378,64 @@ Moved to v2 milestones (see F8–F11 above):
 - Keep Python as the primary interface; Rust is an implementation detail
 - Python 3.14 requires ABI3 forward compatibility flag for PyO3
 - Signed grinder commits (F8.14) deferred — GitHub App token or GPG key in E2B sandbox so factory PRs carry verified authorship
+
+---
+
+## Review follow-ups (2026-09-24)
+
+Follow-ups from a security/correctness review. The HIGH/MEDIUM findings that
+still applied to `staging` were fixed in a separate pass; the items below are
+the deferred LOW findings and improvement ideas, grouped by theme.
+
+### Correctness (LOW findings B10–B13)
+- **Decompose `planned→planned` + acceptance-criteria bug** — the PM decompose
+  path can emit a no-op `planned→planned` transition; and acceptance criteria
+  are derived from `files_touched` (an *estimate* filled in during
+  decomposition), so criteria can be wrong/empty when the estimate is off.
+  Derive acceptance criteria from the task spec, not the file estimate.
+- **Branch name from page name → invalid git refs** — branch names built from
+  wiki page names can produce refs git rejects (spaces, `..`, leading/trailing
+  slashes, control chars, reserved sequences). Sanitize to a valid ref.
+- **Rate limiter keys on proxy IP** — `auth.py`'s login rate limiter keys on the
+  socket peer, which behind a reverse proxy (Caddy) is the proxy IP, so all
+  users share one bucket. Honor a trusted `X-Forwarded-For` (only from known
+  proxies) when deriving the client IP.
+- **Rust/Python frontmatter parse divergence + code-block links** — the Rust
+  parser and the Python parser can disagree on frontmatter edge cases, and the
+  Rust link extractor creates graph edges for `[[wiki links]]` that appear
+  inside fenced code blocks (the Python side already skips code blocks). Align
+  the two parsers and skip code blocks in the Rust link extraction.
+
+### Async correctness
+- **Blocking I/O in async paths** — `storage.py` calls synchronous
+  `path.read_text()` inside `async def` methods (e.g. tag/search scans), blocking
+  the event loop; route heavy scans through `run_in_executor` (as
+  `page_cache` already does for `list_pages_with_metadata_sync`).
+- **PyO3 GIL** — the `GraphEngine` PyO3 methods hold the GIL for the whole call;
+  wrap heavy graph operations (rebuild, query, metatable) in `py.allow_threads`
+  so concurrent Python work isn't blocked.
+
+### Factory F8 robustness
+- Enforce concurrency caps (parent tasks + sandboxes) at dispatch, not just in
+  status reporting.
+- Add real cost tracking (accumulate per-grinder token/sandbox cost into
+  `cost_usd` / `incremental_costs_usd`).
+- Use one shared `httpx.AsyncClient` per `MeshWikiClient` instead of a new client
+  per request.
+- URL-encode page names when building MeshWiki API URLs (hierarchical names with
+  slashes/spaces).
+
+### Build / dependency hygiene
+- No lockfiles and all deps pinned as `>=` — add lockfiles (pip-tools/uv,
+  `Cargo.lock` committed) for reproducible builds.
+- `config.py` hardcodes a `repo_root` default — make it explicit/required.
+- Remove dead `POSTGRES_DSN` config (no DB backend yet).
+- Reconcile the `FACTORY_PORT` mismatch between compose/env and the app default.
+
+### CI / deploy
+- Gate deploy on `test-orchestrator` (orchestrator tests currently don't block
+  deploy).
+- Orchestrator image is shipped as unversioned `:latest` with no rollback path —
+  tag images and keep a rollback.
+- Most E2E tests never run in CI — wire the Playwright E2E suite into CI.
+- Add secret scanning and `cargo clippy` to the lint/CI pipeline.
