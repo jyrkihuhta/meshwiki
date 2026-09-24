@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _scrub_secrets(text: str, *secrets: str) -> str:
+    """Redact secret values from text before it is relayed anywhere shared.
+
+    The grinder's terminal output is streamed to any client watching the
+    ``/ws/terminal`` WebSocket, so the GitHub token (which appears in the
+    ``git config`` insteadOf rule and the clone URL, and can be echoed back by
+    git in error messages) must never reach that stream verbatim.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
 GRINDER_SYSTEM_PROMPT = """
 You are a software engineer working on MeshWiki. You implement tasks autonomously.
 
@@ -309,23 +324,53 @@ class GrinderToolExecutor:
             logger.exception("GrinderToolExecutor: error in tool %s", tool_name)
             return f"Error executing {tool_name}: {exc}"
 
+    def _resolve_in_repo(self, path: str) -> Path:
+        """Resolve *path* against repo_root and confine it to the repo tree.
+
+        The LLM's tool inputs are influenced by (untrusted) wiki task-page
+        content, so an absolute path or ``..`` traversal must not be able to
+        escape ``repo_root``.  Mirrors the guard in
+        ``meshwiki.core.storage.FileStorage._get_path``.
+
+        Raises:
+            ValueError: if *path* is absolute or resolves outside repo_root.
+        """
+        if os.path.isabs(path):
+            raise ValueError(f"Absolute paths are not allowed: {path!r}")
+        repo_root = self.repo_root.resolve()
+        full_path = (repo_root / path).resolve()
+        try:
+            full_path.relative_to(repo_root)
+        except ValueError as exc:
+            raise ValueError(f"Path escapes repository root: {path!r}") from exc
+        return full_path
+
     def _read_file(self, path: str) -> str:
         """Read a file relative to repo root."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "File not found"
         return full_path.read_text(encoding="utf-8")
 
     def _write_file(self, path: str, content: str) -> str:
         """Write content to a file, creating parent directories as needed."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
         return f"Written: {path}"
 
     def _list_directory(self, path: str) -> str:
         """List directory contents."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "Directory not found"
         entries = os.listdir(full_path)
@@ -338,7 +383,13 @@ class GrinderToolExecutor:
         file_glob: str | None = None,
     ) -> str:
         """Search code using ripgrep."""
-        search_path = str(self.repo_root / path) if path else str(self.repo_root)
+        if path:
+            try:
+                search_path = str(self._resolve_in_repo(path))
+            except ValueError as exc:
+                return f"Error: {exc}"
+        else:
+            search_path = str(self.repo_root)
         cmd = ["rg", pattern, search_path]
         if file_glob:
             cmd += ["--glob", file_glob]
@@ -1056,17 +1107,21 @@ async def grind_subtask_e2b(
         # Kilo runs inside a PTY; on_data delivers raw terminal bytes (ANSI etc.).
 
         async def _on_stdout(line: str) -> None:
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(wiki_page, line + "\r\n")
 
         async def _on_stderr(line: str) -> None:
             # Render stderr in yellow so it stands out in the terminal.
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(
                 wiki_page, f"\x1b[33m{line}\x1b[0m\r\n"
             )
 
         # _pty_chunks is initialised before the try block so it is always available.
         async def _on_pty_data(data: bytes) -> None:
-            text = data.decode("utf-8", errors="replace")
+            text = _scrub_secrets(
+                data.decode("utf-8", errors="replace"), settings.github_token
+            )
             _pty_chunks.append(text)
             await meshwiki_client.relay_terminal(wiki_page, text)
 
@@ -1096,7 +1151,10 @@ async def grind_subtask_e2b(
             on_stderr=_on_stderr,
         )
         if result.exit_code != 0:
-            raise RuntimeError(f"git clone failed: {result.stderr}")
+            raise RuntimeError(
+                "git clone failed: "
+                + _scrub_secrets(result.stderr or "", settings.github_token)
+            )
 
         # Install Python deps — MeshWiki only; armory repos are not Python packages.
         if is_meshwiki:

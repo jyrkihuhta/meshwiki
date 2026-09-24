@@ -185,6 +185,51 @@ async def test_grinder_tool_list_directory_missing(tmp_path: Path) -> None:
     assert "not found" in result.lower()
 
 
+# ---------------------------------------------------------------------------
+# GrinderToolExecutor: path traversal confinement (B1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_read_file_rejects_traversal(tmp_path: Path) -> None:
+    """read_file must not read files outside repo_root via ``..``."""
+    secret = tmp_path.parent / "outside_secret.txt"
+    secret.write_text("TOP SECRET")
+    executor = _make_executor(tmp_path)
+
+    result = await executor.execute("read_file", {"path": "../outside_secret.txt"})
+    assert "TOP SECRET" not in result
+    assert "Error" in result
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_read_file_rejects_absolute(tmp_path: Path) -> None:
+    """read_file must reject absolute paths."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute("read_file", {"path": "/etc/passwd"})
+    assert "Error" in result
+    assert "root:" not in result
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_write_file_rejects_traversal(tmp_path: Path) -> None:
+    """write_file must not write outside repo_root via ``..``."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute(
+        "write_file", {"path": "../escaped.py", "content": "pwned"}
+    )
+    assert "Error" in result
+    assert not (tmp_path.parent / "escaped.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_list_directory_rejects_traversal(tmp_path: Path) -> None:
+    """list_directory must reject traversal outside repo_root."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute("list_directory", {"path": "../.."})
+    assert "Error" in result
+
+
 @pytest.mark.asyncio
 async def test_grinder_tool_search_code(tmp_path: Path) -> None:
     """GrinderToolExecutor.execute('search_code') runs rg and returns matches."""
@@ -446,6 +491,26 @@ async def test_grind_subtask_fails_on_budget() -> None:
 # ---------------------------------------------------------------------------
 # Module-level sanity checks
 # ---------------------------------------------------------------------------
+
+
+def test_scrub_secrets_redacts_token() -> None:
+    """_scrub_secrets removes the GitHub token from relayed terminal text (B4)."""
+    from factory.agents.grinder_agent import _scrub_secrets
+
+    token = "ghp_supersecrettoken123"
+    text = (
+        f"remote: https://x-access-token:{token}@github.com/owner/repo.git failed"
+    )
+    scrubbed = _scrub_secrets(text, token)
+    assert token not in scrubbed
+    assert "***" in scrubbed
+
+
+def test_scrub_secrets_ignores_empty_token() -> None:
+    """_scrub_secrets is a no-op when the secret is empty."""
+    from factory.agents.grinder_agent import _scrub_secrets
+
+    assert _scrub_secrets("plain text", "") == "plain text"
 
 
 def test_grinder_system_prompt_not_empty() -> None:
