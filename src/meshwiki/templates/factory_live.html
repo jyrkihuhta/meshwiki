@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}Factory — {{ app_title }}{% endblock %}
+
+{% block main_class %}main--full-width{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/css/factory.css">
+{% endblock %}
+
+{% block content %}
+<div class="fc">
+
+  <header class="fc-header">
+    <h1>⚡ Factory</h1>
+    <div class="fc-live"><span class="fc-live-dot"></span>Live</div>
+    <span id="fc-orch-pill" class="fc-orch-pill fc-orch-pill--unknown">orchestrator …</span>
+    <span id="fc-updated" class="fc-updated"></span>
+  </header>
+
+  <!-- ── LangGraph pipeline — the main visual ──────────────────── -->
+  <section class="fc-flow">
+    <svg id="fc-svg" class="fc-svg" aria-hidden="true"></svg>
+
+    <!-- Left anchor: wiki backlog -->
+    <div class="fc-anchor fc-anchor--backlog" id="fc-node-planned">
+      <div class="fc-anchor-count" id="fc-count-planned">—</div>
+      <div class="fc-anchor-label">Backlog</div>
+    </div>
+
+    <!-- LangGraph internal state track -->
+    <div class="fc-lg-track">
+      <div class="fc-lg-rail"></div>
+
+      <div class="fc-lg-node" id="fc-lgn-intake">
+        <div class="fc-lg-dot" id="fc-lgd-intake"></div>
+        <div class="fc-lg-name">Intake</div>
+        <div class="fc-lg-pills" id="fc-lgt-intake"></div>
+      </div>
+
+      <div class="fc-lg-node" id="fc-lgn-decomposing">
+        <div class="fc-lg-dot" id="fc-lgd-decomposing"></div>
+        <div class="fc-lg-name">Decompose</div>
+        <div class="fc-lg-pills" id="fc-lgt-decomposing"></div>
+      </div>
+
+      <div class="fc-lg-node" id="fc-lgn-dispatching">
+        <div class="fc-lg-dot" id="fc-lgd-dispatching"></div>
+        <div class="fc-lg-name">Dispatch</div>
+        <div class="fc-lg-pills" id="fc-lgt-dispatching"></div>
+      </div>
+
+      <div class="fc-lg-node" id="fc-lgn-grinding">
+        <div class="fc-lg-dot" id="fc-lgd-grinding"></div>
+        <div class="fc-lg-name">Grind</div>
+        <div class="fc-lg-grinders" id="fc-lg-grinders"></div>
+        <div class="fc-lg-pills" id="fc-lgt-grinding"></div>
+      </div>
+
+      <div class="fc-lg-node" id="fc-lgn-reviewing">
+        <div class="fc-lg-dot" id="fc-lgd-reviewing"></div>
+        <div class="fc-lg-name">Review</div>
+        <div class="fc-lg-pills" id="fc-lgt-reviewing"></div>
+      </div>
+    </div>
+
+    <!-- Right anchor: merged outcomes -->
+    <div class="fc-anchor fc-anchor--outcomes" id="fc-node-outcomes">
+      <div class="fc-anchor-count" id="fc-count-merged">—</div>
+      <div class="fc-anchor-label">Merged</div>
+      <div class="fc-anchor-sub">
+        <span class="fc-anchor-sub--failed">✗ <span id="fc-count-failed">0</span></span>
+        <span class="fc-anchor-sub--rejected">⊘ <span id="fc-count-rejected">0</span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── KPI strip ─────────────────────────────────────────────── -->
+  <div class="fc-kpis">
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-count-in_progress">—</span>
+      <span class="fc-kpi-label">In Progress</span>
+    </div>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-grinders">—</span>
+      <span class="fc-kpi-label">Grinders</span>
+    </div>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-cost">—</span>
+      <span class="fc-kpi-label">Session Cost</span>
+    </div>
+    <div class="fc-kpi-sep"></div>
+    <div class="fc-kpi">
+      <span class="fc-kpi-value" id="fc-kpi-cap">—</span>
+      <span class="fc-kpi-label">Slots Free</span>
+    </div>
+  </div>
+
+  <!-- ── Detail: graph cards + bots ────────────────────────────── -->
+  <div class="fc-detail">
+
+    <div class="fc-detail-col fc-detail-col--wide">
+      <div class="fc-section-head">
+        <span class="fc-section-title">Active Graphs</span>
+        <span class="fc-section-badge" id="fc-graphs-badge">0</span>
+      </div>
+      <div class="fc-graphs-scroll" id="fc-graphs-body">
+        <div class="fc-empty">No active graphs</div>
+      </div>
+    </div>
+
+    <div class="fc-detail-divider"></div>
+
+    <div class="fc-detail-col fc-detail-col--narrow">
+      <div class="fc-section-head">
+        <span class="fc-section-title">Bots</span>
+        <span class="fc-section-badge" id="fc-bots-badge">0</span>
+      </div>
+      <div class="fc-bots-list" id="fc-bots-body">
+        <div class="fc-empty">No bots registered</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Activity strip ────────────────────────────────────────── -->
+  <div class="fc-activity">
+    <span class="fc-activity-label">Activity</span>
+    <div class="fc-activity-scroll" id="fc-activity-body">
+      <span class="fc-activity-hint">Watching for transitions…</span>
+    </div>
+  </div>
+
+</div>
+<script src="/static/js/factory.js"></script>
+{% endblock %}

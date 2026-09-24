@@ -18,7 +18,8 @@ _LIVE_MODE = bool(os.environ.get("E2E_BASE_URL"))
 # All test pages live under this subpage in live mode, isolating them from real content.
 _E2E_PREFIX = "E2e/" if _LIVE_MODE else ""
 
-# Pages that browser-based tests save via submit/ctrl+s — need explicit cleanup on live server.
+# Pages that browser-based tests save via submit/ctrl+s — need explicit cleanup on live
+# server.
 _BROWSER_CREATED_PAGES = [f"{_E2E_PREFIX}HelloWorld", f"{_E2E_PREFIX}SaveShortcut"]
 
 # Per-test list of pages created via the create_page fixture (live mode only).
@@ -49,7 +50,7 @@ def _wait_for_server(url: str, timeout: float = 15.0) -> None:
 
 @pytest.fixture(scope="session")
 def e2e_server(tmp_path_factory):
-    """Start a local MeshWiki server, or yield live server details if E2E_BASE_URL is set."""
+    """Start a local MeshWiki server, or use the live one if E2E_BASE_URL is set."""
     if _LIVE_MODE:
         base_url = os.environ["E2E_BASE_URL"].rstrip("/")
         yield {"url": base_url, "data_dir": None, "port": None}
@@ -64,6 +65,10 @@ def e2e_server(tmp_path_factory):
         "MESHWIKI_DATA_DIR": str(data_dir),
         "MESHWIKI_DEBUG": "true",
         "MESHWIKI_GRAPH_WATCH": "false",
+        # create_page writes .md files straight to disk, bypassing the save
+        # route's cache refresh, and with the watcher off nothing else would
+        # invalidate page_cache, so pages would stay missing from the sidebar.
+        "MESHWIKI_PAGE_CACHE": "0",
     }
 
     proc = subprocess.Popen(

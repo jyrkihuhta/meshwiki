@@ -2,8 +2,9 @@
 
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
-from html import escape as html_escape
+from html import escape as html_escape  # used in CalloutBlockPreprocessor
 from typing import Callable
 from xml.etree.ElementTree import Element
 
@@ -11,6 +12,47 @@ from markdown import Markdown
 from markdown.extensions import Extension
 from markdown.inlinepatterns import InlineProcessor, SimpleTagInlineProcessor
 from markdown.preprocessors import Preprocessor
+
+from meshwiki.core.graph import get_engine
+from meshwiki.extensions.running_clock import RunningClockExtension
+
+_ESCAPED_MACRO_RE = re.compile(r"\\<<([A-Za-z][^>]*)>>")
+
+
+class MacroEscapePreprocessor(Preprocessor):
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00ESCCODE{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def _replace(m: re.Match) -> str:
+            literal = f"<<{m.group(1)}>>"
+            return f'<span class="macro-literal">{html_escape(literal)}</span>'
+
+        text = _ESCAPED_MACRO_RE.sub(_replace, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00ESCCODE{i}\x00", block)
+
+        return text.split("\n")
+
+
+class MacroEscapeExtension(Extension):
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            MacroEscapePreprocessor(md),
+            "macro_escape",
+            200,
+        )
+
 
 # Pattern for wiki links: [[PageName]] or [[PageName|Display Text]]
 WIKI_LINK_PATTERN = r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]"
@@ -52,6 +94,13 @@ class WikiLinkInlineProcessor(InlineProcessor):
         el = Element("a")
         el.text = display_text
         el.set("href", f"/page/{page_name.replace(' ', '_')}")
+        el.set(
+            "hx-get",
+            f"/api/pages/{page_name.replace(' ', '_')}/preview",
+        )
+        el.set("hx-trigger", "mouseenter delay:250ms")
+        el.set("hx-target", "#wiki-hover-card")
+        el.set("hx-swap", "outerHTML")
 
         # Add class based on whether page exists
         if self.page_exists(page_name):
@@ -168,7 +217,8 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
     lines = ['<div class="metatable-wrapper">', '<table class="metatable">']
     lines.append("<thead><tr>")
     for col in result.columns:
-        lines.append(f"<th>{col}</th>")
+        escaped_col = html_escape(col, quote=True)
+        lines.append(f'<th data-col="{escaped_col}">{col}</th>')
     lines.append("</tr></thead>")
     lines.append("<tbody>")
 
@@ -176,27 +226,44 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
         # Skip completely empty rows
         if all(not row.get(col) for col in result.columns):
             continue
+        page_url = html_escape(row.page_name.replace(" ", "_"), quote=True)
         escaped_page = html_escape(row.page_name, quote=True)
         lines.append("<tr>")
         for col in result.columns:
             escaped_col = html_escape(col, quote=True)
             values = row.get(col)
-            if col == "name" and values:
-                page_name = values[0]
-                url_name = page_name.replace(" ", "_")
-                cell = f'<a href="/page/{url_name}" class="wiki-link">{page_name}</a>'
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}">{cell}</td>'
+            td_attrs = (
+                f'data-page="{escaped_page}" data-field="{escaped_col}" '
+                f'data-col="{escaped_col}"'
+            )
+            if col in ("name", "title") and values:
+                label = html_escape(values[0])
+                if col == "name":
+                    href = html_escape(values[0].replace(" ", "_"), quote=True)
+                else:
+                    href = page_url
+                cell = f'<a href="/page/{href}" class="wiki-link">{label}</a>'
+                lines.append(f"<td {td_attrs}>{cell}</td>")
+            elif col == "source" and values:
+                raw = values[0]
+                try:
+                    from urllib.parse import urlparse
+
+                    domain = urlparse(raw).netloc or raw
+                except Exception:
+                    domain = raw
+                escaped_raw = html_escape(raw, quote=True)
+                escaped_domain = html_escape(domain)
+                cell = (
+                    f'<a href="{escaped_raw}" class="source-link" target="_blank" '
+                    f'rel="noopener">{escaped_domain}</a>'
                 )
+                lines.append(f"<td {td_attrs}>{cell}</td>")
             elif values:
-                cell = ", ".join(values)
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true">{cell}</td>'
-                )
+                cell = html_escape(", ".join(values))
+                lines.append(f'<td {td_attrs} data-editable="true">{cell}</td>')
             else:
-                lines.append(
-                    f'<td data-page="{escaped_page}" data-field="{escaped_col}" data-editable="true"></td>'
-                )
+                lines.append(f'<td {td_attrs} data-editable="true"></td>')
         lines.append("</tr>")
 
     lines.append("</tbody></table>")
@@ -219,7 +286,7 @@ class MetaTablePreprocessor(Preprocessor):
             return lines
 
         # Strip out fenced code blocks so we don't replace macros inside them
-        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
         code_blocks: list[str] = []
 
         def stash_code(m: re.Match) -> str:
@@ -289,27 +356,12 @@ def _timeago(dt: datetime | None) -> str:
         return dt.strftime("%Y-%m-%d")
 
 
-def _render_recent_changes(n: int = 10) -> str:
+def _render_recent_changes(pages: list, n: int = 10) -> str:
     """Render the <<RecentChanges(n)>> macro as an HTML list of recent pages."""
-    try:
-        from meshwiki.core.dependencies import get_storage
-
-        storage = get_storage()
-    except RuntimeError:
+    if not pages:
         return (
             '<div class="recent-changes-wrapper">'
-            '<p class="recent-changes-unavailable">'
-            "<em>RecentChanges: storage not available</em></p></div>"
-        )
-
-    try:
-        import asyncio
-
-        pages = asyncio.run(storage.list_pages_with_metadata())
-    except Exception as e:
-        return (
-            f'<div class="recent-changes-wrapper">'
-            f'<p class="recent-changes-error"><em>RecentChanges error: {e}</em></p></div>'
+            '<p class="recent-changes-empty"><em>No pages found</em></p></div>'
         )
 
     filtered = [p for p in pages if not p.name.startswith("Factory/")]
@@ -343,12 +395,16 @@ def _render_recent_changes(n: int = 10) -> str:
 class RecentChangesPreprocessor(Preprocessor):
     """Preprocessor that replaces <<RecentChanges(n)>> macros with an HTML list."""
 
+    def __init__(self, md: Markdown, recent_pages: list | None):
+        super().__init__(md)
+        self.recent_pages = recent_pages or []
+
     def run(self, lines: list[str]) -> list[str]:
         text = "\n".join(lines)
         if "<<RecentChanges" not in text:
             return lines
 
-        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
         code_blocks: list[str] = []
 
         def stash_code(m: re.Match) -> str:
@@ -361,7 +417,7 @@ class RecentChangesPreprocessor(Preprocessor):
         def replace_match(m: re.Match) -> str:
             n_str = m.group(1)
             n = int(n_str) if n_str else 10
-            html = _render_recent_changes(n)
+            html = _render_recent_changes(self.recent_pages, n)
             return self.md.htmlStash.store(html)
 
         text = RECENTCHANGES_PATTERN.sub(replace_match, text)
@@ -375,10 +431,141 @@ class RecentChangesPreprocessor(Preprocessor):
 class RecentChangesExtension(Extension):
     """Markdown extension for <<RecentChanges(n)>> macros."""
 
+    def __init__(self, recent_pages: list | None = None, **kwargs):
+        self.recent_pages = recent_pages or []
+        super().__init__(**kwargs)
+
     def extendMarkdown(self, md: Markdown) -> None:
         md.preprocessors.register(
-            RecentChangesPreprocessor(md),
+            RecentChangesPreprocessor(md, self.recent_pages),
             "recentchanges",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TagList macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+TAGLIST_PATTERN = re.compile(r"<<TagList>>")
+
+
+class TagListPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<TagList>> with a sorted tag list."""
+
+    def __init__(self, md: Markdown, pages: list):
+        super().__init__(md)
+        self.pages = pages or []
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<TagList>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00TLBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        counter: Counter[str] = Counter()
+        for page in self.pages:
+            for tag in page.metadata.tags or []:
+                counter[tag] += 1
+
+        if not counter:
+            html = ""
+        else:
+            items = "".join(
+                f'<li><a href="/search?tag={html_escape(tag)}">{html_escape(tag)} '
+                f"({count})</a></li>"
+                for tag, count in counter.most_common()
+            )
+            html = f'<ul class="tag-list">{items}</ul>'
+
+        text = text.replace("<<TagList>>", html)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00TLBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class TagListExtension(Extension):
+    """Markdown extension for <<TagList>> macro."""
+
+    def __init__(self, pages: list | None = None, **kwargs):
+        self.pages = pages or []
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            TagListPreprocessor(md, self.pages),
+            "taglist",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LastModified macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+LASTMODIFIED_PATTERN = re.compile(r"<<LastModified>>")
+
+
+class LastModifiedPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<LastModified>> with relative time."""
+
+    def __init__(self, md: Markdown, modified: datetime | None):
+        super().__init__(md)
+        self.modified = modified
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<LastModified>>" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00LMBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(_m: re.Match) -> str:
+            if self.modified:
+                rel = _timeago(self.modified)
+                html = f'<span class="last-modified">Last modified {rel}</span>'
+            else:
+                html = '<span class="last-modified">—</span>'
+            return self.md.htmlStash.store(html)
+
+        text = LASTMODIFIED_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00LMBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class LastModifiedExtension(Extension):
+    """Markdown extension for <<LastModified>> macro."""
+
+    def __init__(self, modified: datetime | None = None, **kwargs):
+        self.modified = modified
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            LastModifiedPreprocessor(md, self.modified),
+            "lastmodified",
             29,
         )
 
@@ -410,7 +597,7 @@ class PageCountPreprocessor(Preprocessor):
         if "<<PageCount>>" not in text:
             return lines
 
-        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
         code_blocks: list[str] = []
 
         def stash_code(m: re.Match) -> str:
@@ -483,8 +670,14 @@ _BADGE_CLASS: dict[str, str] = {
 }
 
 
-def _mermaid_diagram(status: str) -> str:
-    """Return a Mermaid ``flowchart LR`` string for *status*."""
+def _mermaid_diagram(status: str, rework_count: int = 0) -> str:
+    """Return a Mermaid ``flowchart LR`` string for *status*.
+
+    Args:
+        status: Current task status.
+        rework_count: Number of times PM has requested rework; adds a labelled
+            back-edge from ``review`` to ``in_progress`` when > 0.
+    """
     # Build the happy-path chain definition once.
     chain = " --> ".join(f"{s}({s.replace('_', ' ')})" for s in _HAPPY_PATH)
     lines = ["flowchart LR", f"    {chain}"]
@@ -494,6 +687,11 @@ def _mermaid_diagram(status: str) -> str:
     if is_off_path:
         branch_from = _OFF_PATH_BRANCH[status]
         lines.append(f"    {branch_from} --> {status}({status.replace('_', ' ')})")
+
+    # Add rework back-edge when PM has requested changes at least once.
+    if rework_count > 0:
+        label = f"×{rework_count}"
+        lines.append(f'    review -->|"{label}"| in_progress')
 
     lines.append("")
 
@@ -569,6 +767,13 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
     status: str = _get_meta_str(page_metadata, "status", "draft")
     badge_cls = _BADGE_CLASS.get(status, "gray")
 
+    rework_count = 0
+    raw_rework = page_metadata.get("rework_count", 0)
+    try:
+        rework_count = int(raw_rework)
+    except (ValueError, TypeError):
+        pass
+
     # ── Section A: status badge ───────────────────────────────────────────────
     badge_html = (
         f'<span class="task-status-badge task-status-badge--{badge_cls}">'
@@ -577,7 +782,7 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
     )
 
     # ── Section B: Mermaid flowchart ──────────────────────────────────────────
-    mermaid_src = _mermaid_diagram(status)
+    mermaid_src = _mermaid_diagram(status, rework_count=rework_count)
     diagram_html = (
         '<div class="task-status-diagram">'
         f'<div class="mermaid">{html_escape(mermaid_src)}</div>'
@@ -613,7 +818,8 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         meta_items.append(
             f'<span class="task-meta-item">'
             f'<span class="task-meta-key">Parent</span> '
-            f'<a href="/page/{html_escape(url)}" class="wiki-link">{html_escape(parent)}</a>'
+            f'<a href="/page/{html_escape(url)}" '
+            f'class="wiki-link">{html_escape(parent)}</a>'
             f"</span>"
         )
     meta_html = (
@@ -622,21 +828,57 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         else ""
     )
 
-    # ── Section D: live terminal (in_progress only) ───────────────────────────
+    # ── Section C2: phase indicator (in_progress / review only) ───────────────
+    phase_html = ""
+    if status in ("in_progress", "review"):
+        pr_url = _get_meta_str(page_metadata, "pr_url")
+        pr_display = ""
+        if pr_url:
+            pr_num_match = re.search(r"/pull/(\d+)", pr_url)
+            if pr_num_match:
+                pr_num = pr_num_match.group(1)
+                pr_display = (
+                    f' on <a href="{html_escape(pr_url)}" target="_blank" '
+                    f'rel="noopener">PR #{html_escape(pr_num)}</a>'
+                )
+        if status == "in_progress":
+            if pr_url:
+                phase_text = f"🔨 Grinding — rework in progress{pr_display}"
+            else:
+                phase_text = "🔨 Grinding — grinder is implementing..."
+        elif status == "review":
+            if pr_url:
+                phase_text = f"🔍 PM reviewing{pr_display}..."
+            else:
+                phase_text = "🔍 PM reviewing..."
+        phase_html = f'<div class="task-status-phase">{phase_text}</div>'
+
+    # ── Section D: live terminal (in_progress / review / failed) ─────────────
     terminal_html = ""
-    if status == "in_progress":
+    if status in ("in_progress", "review", "failed"):
         safe_id = re.sub(r"[^a-zA-Z0-9-]", "-", page_name)
-        # Escape < > so the JSON string is safe inside a <script> tag.
         page_name_js = (
             json.dumps(page_name).replace("<", "\\u003c").replace(">", "\\u003e")
         )
+        is_done_status = status in ("merged", "done", "failed", "rejected")
         terminal_html = (
-            '<div class="task-status-terminal">'
+            "<div "
+            'class="task-status-terminal"'
+            f'{" data-terminal-done" if is_done_status else ""}>'
             '<div class="task-terminal-header">'
             '<span class="task-terminal-dot task-terminal-dot--red"></span>'
             '<span class="task-terminal-dot task-terminal-dot--yellow"></span>'
             '<span class="task-terminal-dot task-terminal-dot--green"></span>'
-            f'<span class="task-terminal-title">kilo &mdash; {html_escape(page_name)}</span>'
+            '<span class="task-terminal-title">kilo &mdash; '
+            f"{html_escape(page_name)}</span>"
+            '<button class="task-terminal-expand-btn" title="Expand terminal"'
+            ' onclick="(function(b){'
+            "var w=b.closest('.task-status-terminal');"
+            "var expanded=w.classList.toggle('terminal-expanded');"
+            "b.title=expanded?'Exit fullscreen':'Expand terminal';"
+            "b.innerHTML=expanded?'&#x2715;':'&#x26F6;';"
+            "document.body.style.overflow=expanded?'hidden':'';"
+            '})(this)">&#x26F6;</button>'
             "</div>"
             f'<div id="task-terminal-{safe_id}" class="task-terminal-body"></div>'
             "</div>"
@@ -644,18 +886,60 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             "(function(){"
             f"var PAGE={page_name_js};"
             f"var EL=document.getElementById('task-terminal-{safe_id}');"
+            f"var DONE={str(is_done_status).lower()};"
+            "var NO_SESSION_MSG='\\r\\n\\x1b[2m[no active terminal session for this "
+            "task]\\x1b[0m\\r\\n';"
             "function boot(){"
             "var t=new Terminal({"
-            "cols:220,rows:50,disableStdin:true,convertEol:true,scrollback:5000,"
+            "cols:160,rows:50,disableStdin:true,convertEol:true,scrollback:5000,"
             "fontFamily:'Menlo,Monaco,\"Courier New\",monospace',fontSize:13,"
             "theme:{background:'#1e1e1e',foreground:'#d4d4d4'}"
             "});"
             "t.open(EL);"
             "var pr=location.protocol==='https:'?'wss:':'ws:';"
-            "var ws=new WebSocket(pr+'//'+location.host+'/ws/terminal/'+PAGE);"
-            "ws.onmessage=function(e){t.write(e.data);};"
-            "ws.onclose=function(){t.write('\\r\\n\\x1b[2m\\u2501\\u2501\\u2501 session ended \\u2501\\u2501\\u2501\\x1b[0m\\r\\n');};"
-            "ws.onerror=function(){t.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n');};"
+            "var retries=0;"
+            "var retryMax=10;"
+            "var retryDelay=5000;"
+            "var bannerEl=null;"
+            "function showBanner(msg){"
+            "bannerEl=document.createElement('div');"
+            "bannerEl.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);"
+            "color:#888;font-family:Menlo,Monaco,monospace;font-size:13px;text-align:center;"
+            "pointer-events:none;';"
+            "bannerEl.textContent=msg;"
+            "EL.style.position='relative';EL.appendChild(bannerEl);"
+            "}"
+            "function "
+            "clearBanner(){if(bannerEl&&bannerEl.parentNode){bannerEl.parentNode.removeChild(bannerEl);bannerEl=null;}}"
+            "function connect(){"
+            "var wsPath=PAGE.split('/').map(function(s){return "
+            "encodeURIComponent(s);}).join('/');"
+            "var ws=new WebSocket(pr+'//'+location.host+'/ws/terminal/'+wsPath);"
+            "ws.onmessage=function(e){"
+            "if(e.data===NO_SESSION_MSG.trim()){"
+            "if(!bannerEl){showBanner('[session ended — waiting for next grinder "
+            "run...]');}"
+            "}else{"
+            "clearBanner();"
+            "if(e.data!==NO_SESSION_MSG){t.write(e.data);}"
+            "}"
+            "};"
+            "ws.onclose=function(e){"
+            "if(DONE||e.code===1000){t.write('\\r\\n\\x1b[2m\\u2501\\u2501\\u2501 "
+            "session ended \\u2501\\u2501\\u2501\\x1b[0m\\r\\n');return;}"
+            "clearBanner();"
+            "if(retries<retryMax){"
+            "retries++;"
+            "showBanner('[session ended — waiting for next grinder run...]');"
+            "setTimeout(connect,retryDelay);"
+            "}else{"
+            "showBanner('[no more retries — reload page]');"
+            "}"
+            "};"
+            "ws.onerror=function(){t.write('\\r\\n\\x1b[31m[connection "
+            "error]\\x1b[0m\\r\\n');};"
+            "};"
+            "connect();"
             "}"
             "if(window.Terminal){boot();}"
             "else{"
@@ -675,6 +959,7 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         f"{badge_html}"
         f"{diagram_html}"
         f"{meta_html}"
+        f"{phase_html}"
         f"{terminal_html}"
         "</div>"
     )
@@ -695,7 +980,7 @@ class TaskStatusPreprocessor(Preprocessor):
             return lines
 
         # Protect fenced code blocks (same technique as MetaTablePreprocessor).
-        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
         code_blocks: list[str] = []
 
         def stash_code(m: re.Match) -> str:
@@ -733,6 +1018,164 @@ class TaskStatusExtension(Extension):
             TaskStatusPreprocessor(md, self.page_name, self.page_metadata),
             "taskstatus",
             29,
+        )
+
+
+PAGELIST_PATTERN = re.compile(r"<<PageList(?:\(([^)]*)\))?>>")
+
+
+def _parse_pagelist_args(args_str: str | None) -> dict[str, str]:
+    """Parse comma-separated key=value pairs from a macro argument string.
+
+    Returns a dict of lowercased keys to raw string values.
+    Empty or None input returns {}.
+    """
+    if not args_str:
+        return {}
+    result = {}
+    for part in args_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            result[key.strip().lower()] = value.strip()
+    return result
+
+
+def _get_page_tags(page) -> list[str]:
+    """Return the tags for a page object.
+
+    Handles both Pydantic Page (page.metadata.tags) and Rust PageInfo
+    (page.metadata is a plain dict).
+    """
+    metadata = page.metadata
+    if isinstance(metadata, dict):
+        return metadata.get("tags", [])
+    return getattr(metadata, "tags", None) or []
+
+
+def _render_page_list(args_str: str | None, all_pages: list) -> str:
+    """Render <<PageList(...)>> as an HTML list of wiki pages.
+
+    Args:
+        args_str: Raw argument string from the macro (may be None).
+        all_pages: Pre-fetched list of Page objects passed in from the route handler.
+                   Must not be fetched here — preprocessors run inside the event loop.
+    """
+    args = _parse_pagelist_args(args_str)
+
+    if all_pages is None:
+        return (
+            '<div class="page-list-wrapper">'
+            '<p class="page-list-unavailable">'
+            "<em>PageList: storage not available</em></p></div>"
+        )
+
+    pages = list(all_pages)
+
+    if "tag" in args:
+        tag_lower = args["tag"].lower()
+        pages = [
+            p for p in pages if any(t.lower() == tag_lower for t in _get_page_tags(p))
+        ]
+
+    if "prefix" in args:
+        prefix = args["prefix"]
+        pages = [p for p in pages if p.name.startswith(prefix)]
+
+    pages.sort(key=lambda p: p.name.lower())
+
+    if "limit" in args:
+        try:
+            limit = int(args["limit"])
+            if limit > 0:
+                pages = pages[:limit]
+        except ValueError:
+            pass
+
+    if not pages:
+        return (
+            '<div class="page-list-wrapper">'
+            '<p class="page-list-empty"><em>No pages found</em></p></div>'
+        )
+
+    lines = ['<div class="page-list-wrapper">', '<ul class="page-list">']
+    for page in pages:
+        url_name = page.name.replace(" ", "_")
+        tags_html = ""
+        page_tags = _get_page_tags(page)
+        if page_tags:
+            tag_links = [
+                f'<a href="/search?tag={html_escape(t)}" '
+                f'class="tag-pill">{html_escape(t)}</a>'
+                for t in page_tags
+            ]
+            tags_html = f'<span class="page-list-tags">{"".join(tag_links)}</span>'
+        lines.append(
+            f'<li class="page-list-item">'
+            f'<a href="/page/{url_name}" class="wiki-link">{html_escape(page.name)}</a>'
+            f"{tags_html}"
+            f"</li>"
+        )
+    lines.append("</ul></div>")
+    return "\n".join(lines)
+
+
+class PageListPreprocessor(Preprocessor):
+    """Preprocessor that replaces <<PageList(...)>> macros with an HTML list."""
+
+    def __init__(self, md: Markdown, pages: list | None = None):
+        super().__init__(md)
+        self.pages = pages
+
+    def run(self, lines: list[str]) -> list[str]:
+        pages = self.pages
+        if pages is None:
+            engine = get_engine()
+            if engine is None:
+                return lines
+            pages = engine.list_pages()
+
+        text = "\n".join(lines)
+        if "<<PageList" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00PLBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            args_str = m.group(1)
+            html = _render_page_list(args_str, pages)
+            return self.md.htmlStash.store(html)
+
+        text = PAGELIST_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00PLBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class PageListExtension(Extension):
+    """Markdown extension for <<PageList(...)>> macros."""
+
+    def __init__(self, pages: list | None = None, **kwargs):
+        self.pages = pages
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            PageListPreprocessor(md, pages=self.pages),
+            "pagelist",
+            28,
         )
 
 
@@ -782,7 +1225,7 @@ class BackLinksPreprocessor(Preprocessor):
         if "<<BackLinks>>" not in text:
             return lines
 
-        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
         code_blocks: list[str] = []
 
         def stash_code(m: re.Match) -> str:
@@ -820,23 +1263,579 @@ class BackLinksExtension(Extension):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Children macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHILDREN_PATTERN = re.compile(r"<<Children>>")
+
+
+class ChildrenPreprocessor(Preprocessor):
+    """Replace <<Children>> with rendered HTML list of declared child pages."""
+
+    def __init__(self, md: Markdown, page_metadata: dict | None = None) -> None:
+        super().__init__(md)
+        self.page_metadata = page_metadata or {}
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<Children>>" not in text:
+            return lines
+
+        raw = self.page_metadata.get("children", [])
+        if isinstance(raw, str):
+            children = [c.strip() for c in raw.split(",") if c.strip()]
+        else:
+            children = [str(c) for c in raw if c]
+
+        if not children:
+            html = ""
+        else:
+            parts = ['<ul class="children-list">']
+            for child in children:
+                # Normalise: underscores and spaces are interchangeable in page names
+                # (mirrors the _ref() logic in build_page_tree_sync /
+                # storage._path_to_name).
+                normalised = child.replace("_", " ")
+                url = normalised.replace(" ", "_")
+                display = html_escape(normalised)
+                parts.append(
+                    f'<li><a href="/page/{url}" class="wiki-link">{display}</a></li>'
+                )
+            parts.append("</ul>")
+            html = "\n".join(parts)
+
+        def replace_match(_m: re.Match) -> str:
+            return self.md.htmlStash.store(html)
+
+        return CHILDREN_PATTERN.sub(replace_match, text).split("\n")
+
+
+class ChildrenExtension(Extension):
+    """Markdown extension for <<Children>> macro."""
+
+    def __init__(self, page_metadata: dict | None = None, **kwargs):
+        self.page_metadata = page_metadata
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            ChildrenPreprocessor(md, self.page_metadata),
+            "children",
+            28,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TableOfContents macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOC_PATTERN = re.compile(r"<<TableOfContents(?:\(([^)]+)\))?>>")
+
+
+class TableOfContentsPreprocessor(Preprocessor):
+    def __init__(self, md: Markdown, toc_html: str = "", default_depth: int = 99):
+        super().__init__(md)
+        self.toc_html = toc_html
+        self.default_depth = default_depth
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<TableOfContents" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00TOCBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            depth = self.default_depth
+            try:
+                depth_str = m.group(1)
+                if depth_str:
+                    import re as _re
+
+                    depth_match = _re.search(r"(\d+)", depth_str)
+                    if depth_match:
+                        depth = int(depth_match.group(1))
+            except (IndexError, TypeError):
+                pass
+            html = self._build_toc(depth)
+            return self.md.htmlStash.store(html)
+
+        text = TOC_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00TOCBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+    def _build_toc(self, max_depth: int) -> str:
+        if not self.toc_html:
+            return ""
+        toc_str = self.toc_html.strip()
+        if not toc_str:
+            return ""
+        inner = self._strip_toc_wrapper(toc_str)
+        if not inner.strip():
+            return ""
+        if "<a href=" not in inner:
+            return ""
+        filtered = self._filter_by_depth(inner, max_depth)
+        if not filtered.strip() or "<a href=" not in filtered:
+            return ""
+        return f'<nav class="wiki-toc wiki-toc-inline">\n{filtered}\n</nav>'
+
+    def _strip_toc_wrapper(self, toc_html: str) -> str:
+        start = toc_html.find("<ul>")
+        end = toc_html.rfind("</div>")
+        if start == -1 or end == -1:
+            return toc_html
+        return toc_html[start:end]
+
+    def _filter_by_depth(self, toc_inner: str, max_depth: int) -> str:
+        if max_depth <= 0:
+            return ""
+        result: list[str] = []
+        depth = 0
+        i = 0
+        while i < len(toc_inner):
+            if toc_inner[i : i + 4] == "<ul>":
+                depth += 1
+                heading_level = depth - 1
+                if heading_level < max_depth:
+                    result.append("<ul>")
+                i += 4
+            elif toc_inner[i : i + 5] == "</ul>":
+                if depth - 1 < max_depth:
+                    result.append("</ul>")
+                depth -= 1
+                i += 5
+            else:
+                if depth - 1 < max_depth:
+                    result.append(toc_inner[i])
+                i += 1
+        return "".join(result)
+
+
+class TableOfContentsExtension(Extension):
+    def __init__(self, toc_html: str = "", default_depth: int = 99, **kwargs):
+        self.toc_html = toc_html
+        self.default_depth = default_depth
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            TableOfContentsPreprocessor(md, self.toc_html, self.default_depth),
+            "tableofcontents",
+            29,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Include macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+INCLUDE_PATTERN = re.compile(
+    r"<<Include\(\s*(.+?)\s*\)>>",
+    re.DOTALL,
+)
+
+
+def _parse_include_args(
+    args_str: str,
+) -> tuple[str, str | None, int | None, str | None, str | None, str | None]:
+    """Parse Include macro arguments.
+
+    Returns:
+        Tuple of (page_name, heading_text, heading_level, from_marker, to_marker, sort).
+    """
+    page_name = args_str.strip()
+    heading_text: str | None = None
+    heading_level: int | None = None
+    from_marker: str | None = None
+    to_marker: str | None = None
+    sort: str | None = None
+
+    from_match = re.search(r'from="([^"]*)"', args_str)
+    to_match = re.search(r'to="([^"]*)"', args_str)
+    sort_match = re.search(r"sort=(ascending|descending)", args_str)
+
+    if from_match:
+        from_marker = from_match.group(1) or None
+    if to_match:
+        to_marker = to_match.group(1) or None
+    if sort_match:
+        sort = sort_match.group(1) or None
+
+    clean = re.sub(r'\b(?:from|to|sort)=(?:"[^"]*"|\S+)', "", args_str)
+    positional = [s.strip() for s in clean.split(",")]
+    if len(positional) >= 1:
+        page_name = positional[0]
+    if len(positional) >= 2 and positional[1]:
+        heading_text = positional[1].strip('"')
+    if len(positional) >= 3 and positional[2]:
+        try:
+            heading_level = int(positional[2])
+        except ValueError:
+            pass
+
+    return page_name, heading_text, heading_level, from_marker, to_marker, sort
+
+
+def _render_include(
+    page_name: str,
+    heading_text: str | None,
+    heading_level: int | None,
+    from_marker: str | None,
+    to_marker: str | None,
+    sort: str | None,
+    page_contents: dict[str, str],
+    include_chain: list[str],
+) -> str:
+    """Render the <<Include(...)>> macro as embedded content HTML."""
+    if page_name.endswith("/*"):
+        prefix = page_name[:-2]
+        matching_pages = sorted(
+            [pn for pn in page_contents if pn.startswith(prefix)],
+            reverse=(sort == "descending"),
+        )
+        if not matching_pages:
+            return f'<span class="include-missing">[[{page_name}]]</span>'
+        parts: list[str] = []
+        for matched_page in matching_pages:
+            if matched_page in include_chain:
+                parts.append(
+                    f'<span class="include-circular">[[{matched_page}]]'
+                    f"<em>(circular include skipped)</em></span>"
+                )
+                continue
+            content = page_contents.get(matched_page, "")
+            content = _strip_frontmatter(content)
+            nested_html = parse_wiki_content(
+                content,
+                page_contents=page_contents,
+                include_chain=include_chain + [matched_page],
+            )
+            parts.append(
+                '<div class="include-content" '
+                f'data-included-page="{html_escape(matched_page)}">'
+                f"{nested_html}"
+                f"</div>"
+            )
+        return "\n".join(parts)
+
+    content = page_contents.get(page_name)
+    if content is None:
+        return f'<span class="include-missing">[[{page_name}]]</span>'
+
+    if page_name in include_chain:
+        return (
+            f'<span class="include-circular">[[{page_name}]]'
+            f"<em>(circular include skipped)</em></span>"
+        )
+
+    content = _strip_frontmatter(content)
+
+    if from_marker or to_marker:
+        content = _extract_snippet(content, from_marker, to_marker)
+
+    if heading_text is None and heading_level is not None:
+        heading_text = page_name
+
+    if heading_text:
+        level = max(1, min(6, heading_level if heading_level is not None else 2))
+        content = f"<h{level}>{html_escape(heading_text)}</h{level}>\n{content}"
+
+    nested_html = parse_wiki_content(
+        content,
+        page_contents=page_contents,
+        include_chain=include_chain + [page_name],
+    )
+
+    return (
+        f'<div class="include-content" data-included-page="{html_escape(page_name)}">'
+        f"{nested_html}"
+        f"</div>"
+    )
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Strip YAML frontmatter from content."""
+    return FRONTMATTER_PATTERN.sub("", content)
+
+
+def _extract_snippet(
+    content: str, from_marker: str | None, to_marker: str | None
+) -> str:
+    """Extract snippet between from_marker and to_marker."""
+    if from_marker is None and to_marker is None:
+        return content
+
+    start = 0
+    end = len(content)
+
+    if from_marker:
+        idx = content.find(from_marker)
+        if idx != -1:
+            start = idx + len(from_marker)
+
+    if to_marker:
+        idx = content.find(to_marker, start)
+        if idx != -1:
+            end = idx
+
+    return content[start:end]
+
+
+class IncludePreprocessor(Preprocessor):
+    """Preprocessor that replaces <<Include(...)>> macros with embedded page content."""
+
+    def __init__(
+        self,
+        md: Markdown,
+        page_contents: dict[str, str] | None = None,
+        include_chain: list[str] | None = None,
+    ):
+        super().__init__(md)
+        self.page_contents = page_contents or {}
+        self.include_chain = include_chain or []
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<Include(" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00INCLBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            args_str = m.group(1)
+            (
+                page_name,
+                heading_text,
+                heading_level,
+                from_marker,
+                to_marker,
+                sort,
+            ) = _parse_include_args(args_str)
+            html = _render_include(
+                page_name,
+                heading_text,
+                heading_level,
+                from_marker,
+                to_marker,
+                sort,
+                self.page_contents,
+                self.include_chain,
+            )
+            return self.md.htmlStash.store(html)
+
+        text = INCLUDE_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00INCLBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class IncludeExtension(Extension):
+    """Markdown extension for <<Include(...)>> macros."""
+
+    def __init__(
+        self,
+        page_contents: dict[str, str] | None = None,
+        include_chain: list[str] | None = None,
+        **kwargs,
+    ):
+        self.page_contents = page_contents or {}
+        self.include_chain = include_chain or []
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            IncludePreprocessor(md, self.page_contents, self.include_chain),
+            "include",
+            28,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callout Blocks
+# ─────────────────────────────────────────────────────────────────────────────
+
+CALLOUT_TYPES = ("info", "warning", "tip", "error", "note")
+
+CALLOUT_ICONS: dict[str, str] = {
+    "info": "ℹ️",
+    "warning": "⚠️",
+    "tip": "💡",
+    "error": "❌",
+    "note": "📝",
+}
+
+
+class CalloutBlockPreprocessor(Preprocessor):
+    """Preprocessor that converts fenced callout blocks to raw HTML."""
+
+    FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<type>\w+)\s*$")
+
+    def run(self, lines: list[str]) -> list[str]:
+        result: list[str] = []
+        i = 0
+        while i < len(lines):
+            m = self.FENCE_RE.match(lines[i])
+            if not m:
+                result.append(lines[i])
+                i += 1
+                continue
+
+            fence_char = m.group("fence")
+            callout_type = m.group("type")
+            if callout_type not in CALLOUT_TYPES:
+                result.append(lines[i])
+                i += 1
+                continue
+
+            body_lines: list[str] = []
+            j = i + 1
+            while j < len(lines):
+                if lines[j].startswith(fence_char):
+                    break
+                body_lines.append(lines[j])
+                j += 1
+
+            if j >= len(lines):
+                result.append(lines[i])
+                i += 1
+                continue
+
+            escaped = html_escape("\n".join(body_lines))
+            icon = CALLOUT_ICONS.get(callout_type, "")
+            html = (
+                f'<div class="callout callout--{callout_type}">'
+                f'<span class="callout__icon">{icon}</span>'
+                f'<span class="callout__body">{escaped}</span></div>'
+            )
+            result.append(self.md.htmlStash.store(html))
+            i = j + 1
+
+        return result
+
+
+class CalloutExtension(Extension):
+    """Markdown extension for fenced callout blocks."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            CalloutBlockPreprocessor(md),
+            "callout",
+            27,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NewPage macro
+# ─────────────────────────────────────────────────────────────────────────────
+
+NEWPAGE_PATTERN = re.compile(
+    r"<<NewPage[(]\s*([^,)]+?)\s*(?:,\s*\"([^\"]*)\")?\s*(?:,\s*([^,)]+?))?[)]>>",
+    re.DOTALL,
+)
+
+
+def _render_newpage_macro(
+    template_name: str, button_label: str, parent_page: str | None
+) -> str:
+    """Render the <<NewPage(...)>> macro as an inline form."""
+    if not button_label:
+        button_label = "New page"
+    escaped_template = html_escape(template_name)
+    escaped_label = html_escape(button_label)
+    escaped_parent = html_escape(parent_page or "")
+
+    if parent_page:
+        onclick = (
+            f"var input=this.previousElementSibling.value;"
+            f"if(input){{window.location.href='/page/{escaped_parent}/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
+        )
+    else:
+        onclick = (
+            f"var input=this.previousElementSibling.value;"
+            f"if(input){{window.location.href='/page/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
+        )
+
+    return (
+        f'<span class="new-page-macro">'
+        f'<input type="text" class="new-page-input" placeholder="Page name" />'
+        '<button class="new-page-button" type="button" '
+        f'onclick="{onclick}">{escaped_label}</button>'
+        f"</span>"
+    )
+
+
+class NewPagePreprocessor(Preprocessor):
+    """Replace <<NewPage(...)>> macros with an inline page-creation form."""
+
+    def run(self, lines: list[str]) -> list[str]:
+        text = "\n".join(lines)
+        if "<<NewPage(" not in text:
+            return lines
+
+        code_block_re = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
+        code_blocks: list[str] = []
+
+        def stash_code(m: re.Match) -> str:
+            placeholder = f"\x00NPEBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(m.group(0))
+            return placeholder
+
+        text = code_block_re.sub(stash_code, text)
+
+        def replace_match(m: re.Match) -> str:
+            template_name = m.group(1).strip()
+            button_label = m.group(2) or ""
+            parent_page = m.group(3)
+            if parent_page:
+                parent_page = parent_page.strip()
+            html = _render_newpage_macro(template_name, button_label, parent_page)
+            return self.md.htmlStash.store(html)
+
+        text = NEWPAGE_PATTERN.sub(replace_match, text)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00NPEBLOCK{i}\x00", block)
+
+        return text.split("\n")
+
+
+class NewPageExtension(Extension):
+    """Markdown extension for <<NewPage(...)>> macros."""
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(NewPagePreprocessor(md), "newpage", 28)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EpicStatus macro
 # ─────────────────────────────────────────────────────────────────────────────
 
-EPICSTATUS_PATTERN = re.compile(r"<<EpicStatus>>")
+EPICSTATUS_PATTERN = re.compile(r"<<EpicStatus(?:\(\s*\))?>>")
 
 # Terminal states count as "complete" for progress calculation.
 _COMPLETE_STATES = {"merged", "done"}
-_EPIC_BADGE_CLASS = {
-    "planned": "gray",
-    "in_progress": "amber",
-    "review": "purple",
-    "merged": "green",
-    "done": "green",
-    "failed": "red",
-    "rejected": "red",
-    "blocked": "orange",
-}
 
 
 def _render_epic_status(page_name: str, page_metadata: dict) -> str:
@@ -870,7 +1869,7 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
         lines = ["flowchart TD"]
         # Epic root node
         safe_title = title.replace('"', "'")
-        lines.append(f'    epic["{html_escape(safe_title)}"]:::epic_node')
+        lines.append(f'    epic["{safe_title}"]:::epic_node')
 
         for i, task in enumerate(child_tasks):
             node_id = f"t{i}"
@@ -883,12 +1882,13 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
                 if status in _COMPLETE_STATES
                 else ("⚡" if status == "in_progress" else "○")
             )
-            lines.append(f'    {node_id}["{icon} {html_escape(label)}"]:::{status}')
+            lines.append(f'    {node_id}["{icon} {label}"]:::{status}')
             lines.append(f"    epic --> {node_id}")
 
         # classDefs
         lines.append(
-            "    classDef epic_node fill:#1e40af,color:#fff,stroke:#1d4ed8,font-weight:bold"
+            "    classDef epic_node "
+            "fill:#1e40af,color:#fff,stroke:#1d4ed8,font-weight:bold"
         )
         lines.append("    classDef planned fill:#94a3b8,color:#fff,stroke:#64748b")
         lines.append("    classDef decomposed fill:#94a3b8,color:#fff,stroke:#64748b")
@@ -983,6 +1983,12 @@ def create_parser(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
+    page_contents: dict[str, str] | None = None,
+    include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
+    pages: list | None = None,
+    toc_html: str = "",
 ) -> Markdown:
     """Create a Markdown parser with wiki link support.
 
@@ -991,6 +1997,13 @@ def create_parser(
                     Used to style missing page links differently.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
+        page_contents: Dict mapping page names to raw content for Include macro.
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
+        page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
+        toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
 
     Returns:
         Configured Markdown parser instance.
@@ -998,13 +2011,16 @@ def create_parser(
     return Markdown(
         extensions=[
             # Core formatting
-            "extra",  # Includes: abbreviations, attr_list, def_list, fenced_code, footnotes, md_in_html, tables
+            # Includes: abbreviations, attr_list, def_list, fenced_code, footnotes,
+            # md_in_html, tables
+            "extra",
             "sane_lists",  # Better list handling
             "smarty",  # Smart quotes and dashes
             "toc",  # Table of contents
             # PyMdown extensions
             "pymdownx.tasklist",  # Task lists with checkboxes
             # Custom extensions
+            MacroEscapeExtension(),  # \<<Macro>> escape — must run first (priority 200)
             StrikethroughExtension(),  # ~~strikethrough~~
             WikiLinkExtension(page_exists=page_exists),  # [[WikiLinks]]
             MetaTableExtension(),  # <<MetaTable(...)>>
@@ -1014,9 +2030,22 @@ def create_parser(
             EpicStatusExtension(
                 page_name=page_name, page_metadata=page_metadata
             ),  # <<EpicStatus>>
-            RecentChangesExtension(),  # <<RecentChanges(n)>>
+            CalloutExtension(),  # ```info``` etc. callout blocks
+            RecentChangesExtension(recent_pages=recent_pages),  # <<RecentChanges(n)>>
             PageCountExtension(),  # <<PageCount>>
+            RunningClockExtension(),  # <<RunningClock>>
+            TagListExtension(pages=pages),  # <<TagList>>
             BackLinksExtension(page_name=page_name),  # <<BackLinks>>
+            ChildrenExtension(page_metadata=page_metadata),  # <<Children>>
+            PageListExtension(pages=pages),  # <<PageList(...)>>
+            IncludeExtension(
+                page_contents=page_contents or {},
+                include_chain=include_chain or [],
+            ),  # <<Include(...)>>
+            NewPageExtension(),  # <<NewPage(...)>>
+            LastModifiedExtension(modified=page_modified),  # <<LastModified>>
+            CalloutExtension(),  # ```info / ```warning / ```tip / ```error / ```note
+            TableOfContentsExtension(toc_html=toc_html),  # <<TableOfContents>>
         ]
     )
 
@@ -1026,6 +2055,12 @@ def parse_wiki_content(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
+    page_contents: dict[str, str] | None = None,
+    include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
+    pages: list | None = None,
+    toc_html: str = "",
 ) -> str:
     """Parse wiki content (Markdown + wiki links) to HTML.
 
@@ -1034,14 +2069,42 @@ def parse_wiki_content(
         page_exists: Callback to check if a page exists.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
+        page_contents: Dict mapping page names to raw content for Include macro.
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
+        page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
+        toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
 
     Returns:
         HTML string.
     """
     parser = create_parser(
-        page_exists, page_name=page_name, page_metadata=page_metadata
+        page_exists,
+        page_name=page_name,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
+        page_contents=page_contents,
+        include_chain=include_chain or [],
+        page_modified=page_modified,
+        pages=pages,
+        toc_html=toc_html,
     )
     return parser.convert(content)
+
+
+def parse_markdown(content: str, toc_html: str = "") -> str:
+    """Parse Markdown content with wiki macros and optional TOC injection.
+
+    Args:
+        content: Raw Markdown source (may include <<TableOfContents>> macro).
+        toc_html: Pre-generated TOC HTML to inject at <<TableOfContents>> position.
+
+    Returns:
+        Rendered HTML string.
+    """
+    return parse_wiki_content(content, toc_html=toc_html)
 
 
 def parse_wiki_content_with_toc(
@@ -1049,6 +2112,11 @@ def parse_wiki_content_with_toc(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
     page_metadata: dict | None = None,
+    recent_pages: list | None = None,
+    page_contents: dict[str, str] | None = None,
+    include_chain: list[str] | None = None,
+    page_modified: datetime | None = None,
+    pages: list | None = None,
 ) -> tuple[str, str]:
     """Parse wiki content and return HTML with table of contents.
 
@@ -1057,12 +2125,25 @@ def parse_wiki_content_with_toc(
         page_exists: Callback to check if a page exists.
         page_name: Name of the page being rendered (for TaskStatus macro).
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
+        recent_pages: List of Page objects for RecentChanges macro.
+        page_contents: Dict mapping page names to raw content for Include macro.
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
+        page_modified: Last modified datetime of the page (for LastModified macro).
+        pages: List of all Page objects for TagList macro.
 
     Returns:
         Tuple of (html_content, toc_html).
     """
     parser = create_parser(
-        page_exists, page_name=page_name, page_metadata=page_metadata
+        page_exists,
+        page_name=page_name,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
+        page_contents=page_contents,
+        include_chain=include_chain or [],
+        page_modified=page_modified,
+        pages=pages,
     )
     html = parser.convert(content)
     toc_html = getattr(parser, "toc", "")

@@ -124,6 +124,94 @@ def create_parser(page_exists=None):
     ])
 ```
 
+## Data Access in Preprocessors
+
+> **Critical constraint:** Preprocessors run synchronously inside FastAPI's already-running event loop. **Never call `asyncio.run()` inside a preprocessor** — it raises `RuntimeError: This event loop is already running`.
+
+### Two patterns, depending on your data source
+
+#### Pattern A — Synchronous data (graph engine)
+
+The graph engine (`get_engine()`) is synchronous. Call it directly from the render function:
+
+```python
+def _render_my_macro() -> str:
+    from meshwiki.core.graph import get_engine
+    engine = get_engine()
+    if engine is None:
+        return '<em>graph engine not available</em>'
+    return engine.list_pages()  # synchronous, safe in preprocessor
+```
+
+#### Pattern B — Async data (storage, database)
+
+If your macro needs data from `storage` (or any async source), **do not fetch inside the preprocessor**. Instead:
+
+1. Fetch data in the async route handler (it already runs in the event loop)
+2. Pass it as a constructor parameter to your Extension
+3. Store it on the Preprocessor instance
+
+```python
+# 1. Render function takes pre-fetched data as a parameter
+def _render_my_macro(my_data: list) -> str:
+    ...
+
+# 2. Preprocessor stores data on self
+class MyMacroPreprocessor(Preprocessor):
+    def __init__(self, md: Markdown, my_data: list | None = None):
+        super().__init__(md)
+        self.my_data = my_data or []
+
+    def run(self, lines: list[str]) -> list[str]:
+        ...
+        html = _render_my_macro(self.my_data)
+        ...
+
+# 3. Extension accepts and threads data through
+class MyMacroExtension(Extension):
+    def __init__(self, my_data: list | None = None, **kwargs):
+        self.my_data = my_data or []
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.preprocessors.register(
+            MyMacroPreprocessor(md, self.my_data), "my_macro", 28
+        )
+
+# 4. create_parser() accepts and passes the data
+def create_parser(..., my_data: list | None = None) -> Markdown:
+    return Markdown(extensions=[
+        ...
+        MyMacroExtension(my_data=my_data),
+    ])
+
+# 5. parse_wiki_content() threads it through
+def parse_wiki_content(..., my_data: list | None = None) -> str:
+    parser = create_parser(..., my_data=my_data)
+    return parser.convert(content)
+```
+
+```python
+# 6. Route handler: fetch once, pass in
+@app.get("/page/{name}")
+async def view_page(name: str):
+    my_data = await storage.list_things()  # ✅ async here is fine
+    html = parse_wiki_content(content, my_data=my_data)
+```
+
+**Reference implementations:** `<<RecentChanges>>` and `<<PageList>>` in `parser.py` both follow Pattern B.
+
+**Anti-pattern (do not do this):**
+```python
+# ❌ WRONG — raises RuntimeError: This event loop is already running
+def _render_my_macro() -> str:
+    storage = asyncio.run(get_storage())  # crashes in FastAPI
+    pages = asyncio.run(storage.list_pages())
+    ...
+```
+
+---
+
 ## Adding a New Macro: Step-by-Step
 
 Let's build a `<<PageCount>>` macro that displays the total number of wiki pages.

@@ -106,7 +106,9 @@ async def test_list_tasks_filter_by_assignee(client):
         "/api/v1/pages",
         json={
             "name": "TaskAssigned",
-            "content": "---\ntype: task\nstatus: draft\nassignee: grinder-1\n---\nAssigned",
+            "content": (
+                "---\ntype: task\nstatus: draft\nassignee: grinder-1\n---\nAssigned"
+            ),
         },
         headers=_AUTH,
     )
@@ -183,7 +185,9 @@ async def test_transition_with_extra_fields(client):
         "/api/v1/pages",
         json={
             "name": "TaskTwelve",
-            "content": "---\ntype: task\nstatus: approved\n---\nTest",
+            "content": (
+                "---\ntype: task\nassignee: factory\nstatus: approved\n---\nTest"
+            ),
         },
         headers=_AUTH,
     )

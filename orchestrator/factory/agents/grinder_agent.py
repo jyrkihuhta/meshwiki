@@ -2,21 +2,73 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anthropic
 
+from ..armory_prompts import get_armory_prompt
 from ..config import get_settings
+from ..cost import sandbox_time_to_usd, tokens_to_usd
 from ..state import FactoryState, SubTask
+from .pm_agent import safe_messages_create
 
 if TYPE_CHECKING:
     from ..integrations.meshwiki_client import MeshWikiClient
 
 logger = logging.getLogger(__name__)
+
+
+def _scrub_secrets(text: str, *secrets: str) -> str:
+    """Redact secret values from text before it is relayed anywhere shared.
+
+    The grinder's terminal output is streamed to any client watching the
+    ``/ws/terminal`` WebSocket, so the GitHub token (which appears in the
+    ``git config`` insteadOf rule and the clone URL, and can be echoed back by
+    git in error messages) must never reach that stream verbatim.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+class _StreamScrubber:
+    """Redact secrets from a stream that arrives in arbitrary chunks.
+
+    Scrubbing each PTY chunk on its own misses a secret split across two
+    chunks. This keeps back the shortest tail of the buffered text that could
+    still be the start of a secret and releases it with the next chunk, so
+    ordinary output is not delayed. Call ``flush()`` when the stream ends.
+    """
+
+    def __init__(self, *secrets: str) -> None:
+        self._secrets = [s for s in secrets if s]
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        """Add *text* and return the portion that is now safe to emit."""
+        buf = _scrub_secrets(self._pending + text, *self._secrets)
+        hold = 0
+        max_len = max((len(s) for s in self._secrets), default=0)
+        for k in range(min(len(buf), max_len - 1), 0, -1):
+            tail = buf[-k:]
+            if any(s.startswith(tail) for s in self._secrets):
+                hold = k
+                break
+        self._pending = buf[len(buf) - hold :] if hold else ""
+        return buf[: len(buf) - hold]
+
+    def flush(self) -> str:
+        """Return any held-back text; the stream has ended so it is complete."""
+        rest, self._pending = self._pending, ""
+        return rest
+
 
 GRINDER_SYSTEM_PROMPT = """
 You are a software engineer working on MeshWiki. You implement tasks autonomously.
@@ -304,23 +356,53 @@ class GrinderToolExecutor:
             logger.exception("GrinderToolExecutor: error in tool %s", tool_name)
             return f"Error executing {tool_name}: {exc}"
 
+    def _resolve_in_repo(self, path: str) -> Path:
+        """Resolve *path* against repo_root and confine it to the repo tree.
+
+        The LLM's tool inputs are influenced by (untrusted) wiki task-page
+        content, so an absolute path or ``..`` traversal must not be able to
+        escape ``repo_root``.  Mirrors the guard in
+        ``meshwiki.core.storage.FileStorage._get_path``.
+
+        Raises:
+            ValueError: if *path* is absolute or resolves outside repo_root.
+        """
+        if os.path.isabs(path):
+            raise ValueError(f"Absolute paths are not allowed: {path!r}")
+        repo_root = self.repo_root.resolve()
+        full_path = (repo_root / path).resolve()
+        try:
+            full_path.relative_to(repo_root)
+        except ValueError as exc:
+            raise ValueError(f"Path escapes repository root: {path!r}") from exc
+        return full_path
+
     def _read_file(self, path: str) -> str:
         """Read a file relative to repo root."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "File not found"
         return full_path.read_text(encoding="utf-8")
 
     def _write_file(self, path: str, content: str) -> str:
         """Write content to a file, creating parent directories as needed."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
         return f"Written: {path}"
 
     def _list_directory(self, path: str) -> str:
         """List directory contents."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "Directory not found"
         entries = os.listdir(full_path)
@@ -333,54 +415,79 @@ class GrinderToolExecutor:
         file_glob: str | None = None,
     ) -> str:
         """Search code using ripgrep."""
-        search_path = str(self.repo_root / path) if path else str(self.repo_root)
+        if path:
+            try:
+                search_path = str(self._resolve_in_repo(path))
+            except ValueError as exc:
+                return f"Error: {exc}"
+        else:
+            search_path = str(self.repo_root)
         cmd = ["rg", pattern, search_path]
         if file_glob:
             cmd += ["--glob", file_glob]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            return "Error: search timed out"
         return result.stdout or "No matches"
 
     def _git_create_branch(self, branch_name: str) -> str:
         """Create and checkout a new branch from the configured base branch."""
         base = get_settings().pr_base_branch
-        result = subprocess.run(
-            ["git", "checkout", "-b", branch_name, f"origin/{base}"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "checkout", "-b", branch_name, f"origin/{base}"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git checkout timed out"
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         return f"Branch created: {branch_name}"
 
     def _git_commit(self, files: list[str], message: str) -> str:
         """Stage specified files and commit."""
-        add_result = subprocess.run(
-            ["git", "add"] + files,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            add_result = subprocess.run(
+                ["git", "add"] + files,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git add timed out"
         if add_result.returncode != 0:
             return f"Error staging files: {add_result.stderr}"
-        commit_result = subprocess.run(
-            ["git", "commit", "-m", message],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", message],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git commit timed out"
         if commit_result.returncode != 0:
             return f"Error committing: {commit_result.stderr}"
         return commit_result.stdout
 
     def _git_push(self, branch_name: str) -> str:
         """Push the branch to origin."""
-        result = subprocess.run(
-            ["git", "push", "-u", "origin", branch_name],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "push", "-u", "origin", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: git push timed out"
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         return result.stdout or f"Pushed: {branch_name}"
@@ -388,12 +495,16 @@ class GrinderToolExecutor:
     def _run_tests(self, test_path: str | None = None) -> str:
         """Run pytest and return the last 100 lines of output."""
         path = test_path or "src/tests/"
-        result = subprocess.run(
-            ["python", "-m", "pytest", path, "-v"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                ["python", "-m", "pytest", path, "-v"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: pytest timed out after 300s"
         output = result.stdout + result.stderr
         lines = output.splitlines()
         return "\n".join(lines[-100:])
@@ -403,13 +514,17 @@ class GrinderToolExecutor:
         venv_bin = self.repo_root / ".venv" / "bin"
         ruff = str(venv_bin / "ruff")
         black = str(venv_bin / "black")
-        result = subprocess.run(
-            f"{ruff} check src/ && {black} --check src/",
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                f"{ruff} check src/ && {black} --check src/",
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: lint timed out after 60s"
         return result.stdout + result.stderr
 
     def _run_autofix(self) -> str:
@@ -418,27 +533,65 @@ class GrinderToolExecutor:
         black = str(venv_bin / "black")
         isort = str(venv_bin / "isort")
         ruff = str(venv_bin / "ruff")
-        result = subprocess.run(
-            f"{black} src/ && {isort} --profile black src/ && {ruff} --fix src/",
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
-        )
+        try:
+            result = subprocess.run(
+                f"{black} src/ && {isort} --profile black src/ && {ruff} --fix src/",
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return "Error: autofix timed out after 120s"
         return result.stdout + result.stderr
 
     def _create_pr(self, title: str, body: str, branch_name: str) -> str:
-        """Create a GitHub pull request and return the PR URL."""
+        """Create a GitHub pull request and return the PR URL.
+
+        The PR body is written to a temp file and passed via ``--body-file`` so
+        that markdown content (backticks, unescaped newlines, ``$()`` references,
+        etc.) is never interpreted by a shell. Passing ``--body <body>`` directly
+        is safe here because ``subprocess.run`` is called with a list (no shell),
+        but using ``--body-file`` future-proofs the helper against callers that
+        might invoke it via ``shell=True`` and matches the convention the agent
+        prompt uses.
+        """
         base = get_settings().pr_base_branch
-        result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
-            capture_output=True,
-            text=True,
-            cwd=self.repo_root,
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", delete=False
         )
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-        return result.stdout.strip()
+        try:
+            tmp.write(body)
+            tmp.close()
+            try:
+                result = subprocess.run(
+                    [
+                        "gh",
+                        "pr",
+                        "create",
+                        "--title",
+                        title,
+                        "--body-file",
+                        tmp.name,
+                        "--base",
+                        base,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    cwd=self.repo_root,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return "Error: gh pr create timed out"
+            if result.returncode != 0:
+                return f"Error: {result.stderr}"
+            return result.stdout.strip()
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     async def _meshwiki_update_task(
         self,
@@ -449,6 +602,418 @@ class GrinderToolExecutor:
         """Transition a MeshWiki task to a new status."""
         await self.meshwiki_client.transition_task(page_name, status, extra_fields)
         return f"Task {page_name} transitioned to {status}"
+
+
+def _is_markdown_only_playbook_diff(
+    files_touched: list[str] | None,
+    task_repo_root: str | None,
+) -> bool:
+    """Return True if *files_touched* indicates a markdown-only playbook change.
+
+    The narrowing rule (loader-test only, no full ``pytest tests/``) applies
+    when the subtask touches **only** ``.md`` files inside the playbook
+    directory. The full suite is still required when any ``.py`` (or other
+    non-Markdown) file is in scope — ``test_playbook_loader.py`` doesn't
+    exercise Python module imports.
+
+    An empty or missing ``files_touched`` list is treated as "unknown" and
+    therefore returns ``False`` — better to run the safer full suite than to
+    silently skip validation for a subtask whose touched files we don't know.
+
+    Args:
+        files_touched: File paths the PM / frontmatter ``expected_files``
+            said this subtask will create or modify. May be ``None`` or ``[]``.
+        task_repo_root: Sub-path within the repo where playbooks live
+            (e.g. ``"playbooks"``). When set, files must start with this
+            prefix (with or without trailing slash) to qualify.
+
+    Returns:
+        ``True`` only when the list is non-empty AND every entry ends in
+        ``.md`` AND every entry is rooted inside ``task_repo_root`` (when
+        that prefix is known). Otherwise ``False``.
+    """
+    if not files_touched:
+        return False
+    root = (task_repo_root or "").rstrip("/")
+    for path in files_touched:
+        if not isinstance(path, str) or not path:
+            return False
+        if not path.lower().endswith(".md"):
+            return False
+        if root and not (path == root or path.startswith(root + "/")):
+            return False
+    return True
+
+
+def _artifact_intro(artifact_type: str | None, task_repo_root: str | None) -> str:
+    """Return a one-paragraph repo/artifact description for the grinder task prompt.
+
+    Used by :func:`grind_subtask_e2b` to replace the hardcoded MeshWiki
+    description when working on a non-MeshWiki repository (e.g. molly-armory).
+
+    Args:
+        artifact_type: Artifact type from task frontmatter (``tool``, ``playbook``,
+            ``wordlist``, or ``None``/``"code"`` for the MeshWiki default).
+        task_repo_root: Sub-path within the repo where the work lives, or ``None``.
+
+    Returns:
+        A short paragraph describing the repo context and what the grinder must produce.
+    """
+    root_note = f" Work primarily in `{task_repo_root}/`." if task_repo_root else ""
+
+    if artifact_type == "tool":
+        return (
+            "You are working on the Molly armory repository (molly-armory). "
+            "Your goal is to implement a new Molly security-testing tool as a Python module.  "
+            "Each tool is a class that inherits from `ToolBase` (in `molly.tools.base`), "
+            "exposes a `capability_name` class attribute, a `schema()` classmethod returning "
+            "an OpenAI function-calling schema, and an async `run(**kwargs)` method that "
+            "returns a result dict.  Tests live in `tests/`.  "
+            "Run tests with `python -m pytest tests/ -x -q`.  "
+            "Lint with `ruff check . && black --check .` from the repo root, BUT ONLY when "
+            "the diff actually touches `.py` files. Inspect `git diff --name-only origin/<base>...HEAD` "
+            "first and skip the repo-wide lint (both `ruff check` and `black --check`) entirely "
+            "if no `.py` files appear in the change set — running them on `.md` playbook files "
+            "always produces spurious `No Python files found` / `Cannot parse: 1:3: ---` errors "
+            "that waste a round-trip." + root_note
+        )
+    if artifact_type == "playbook":
+        return (
+            "You are working on the Molly armory repository (molly-armory). "
+            "Your goal is to create or update a YAML playbook for Molly's security-testing pipeline.  "
+            "Playbooks define attack patterns: capabilities required, mutation templates, "
+            "and expected response conditions.  "
+            "DO NOT run `ruff check` or `black --check` on playbook `.md` files — they are "
+            "Markdown with YAML frontmatter, not Python, and both linters will report spurious "
+            "`No Python files found` / `Cannot parse: 1:3: ---` errors that waste a round-trip.  "
+            "Instead, validate the frontmatter with a YAML-only parser (e.g. `python -c "
+            "\"import yaml,sys; yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1])\" <path>`) "
+            "or the repo's playbook validator script (e.g. "
+            "`scripts/validate_playbooks.py` if present)." + root_note
+        )
+    if artifact_type == "wordlist":
+        return (
+            "You are working on the Molly armory repository (molly-armory). "
+            "Your goal is to create or extend a wordlist file (plain text, one entry per line) "
+            "for use in Molly's security-testing scans.  "
+            "Place the file in the appropriate directory and update any index files."
+            + root_note
+        )
+    if artifact_type == "toolspec":
+        return (
+            "You are working on the Molly armory repository (molly-armory). "
+            "Your goal is to write a toolspec: a tracked PROPOSAL for a new Molly tool "
+            "capability, NOT a working implementation. It's a Markdown file with YAML "
+            "frontmatter (`toolspec`, `name`, `capability_name`, `status: proposed`, "
+            "`category`) plus Problem / Proposed Capability / Example Usage / References "
+            "sections. Do not write any Python — that's a separate, later task."
+            + root_note
+        )
+    # Default: MeshWiki
+    return "You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine)."
+
+
+def build_grinder_task_prompt(
+    *,
+    subtask: dict,
+    page_content: str,
+    review_feedback: str,
+    is_rework: bool,
+    artifact_type: str | None,
+    task_repo_root: str | None,
+    is_meshwiki: bool,
+    base_branch: str,
+) -> str:
+    """Build the e2b grinder task prompt.
+
+    Extracted from ``grind_subtask_e2b`` so the rework / fresh-start
+    branching logic is unit-testable. The grinder runs as a Claude Code
+    CLI session inside an e2b sandbox; this prompt is the *only* control
+    we have over its git workflow once it starts. Getting the rework
+    branch instructions wrong leads to PR-stall loops where the grinder
+    pushes corrected content to a new ``factory/foo-v2`` branch while
+    the actual PR continues to show the old broken file.
+
+    Args:
+        subtask: Active subtask dict (id, title, etc.).
+        page_content: Full MeshWiki task page content (markdown).
+        review_feedback: Last PM feedback (empty string for fresh runs).
+        is_rework: ``True`` when the grinder is being re-dispatched
+            after a ``changes_requested`` PM verdict.
+        artifact_type: One of ``"tool"``, ``"playbook"``, ``"wordlist"``,
+            ``"code"``, or ``None``.
+        task_repo_root: Subdirectory inside the cloned repo where the
+            artifact lives (e.g. ``"playbooks"``); ``None`` for MeshWiki.
+        is_meshwiki: ``True`` when targeting the MeshWiki repo (changes
+            the autofix/test commands).
+        base_branch: Base branch the PR targets (e.g. ``"main"`` or
+            ``"staging"``).
+
+    Returns:
+        Fully-rendered task prompt string the grinder receives as input.
+    """
+    subtask_id: str = subtask["id"]
+
+    if is_rework:
+        rework_pycache_preflight = (
+            "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
+            "   ('cannot rebase: You have unstaged changes'). .gitignore already excludes\n"
+            "   them, but files generated BEFORE the .gitignore rules took effect may still\n"
+            "   surface in `git status --porcelain`. Run BEFORE the rebase — this avoids\n"
+            "   any stash/rebase/stash-pop dance:\n"
+            "     git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__\n"
+            "   (The `-X` flag removes ONLY files matched by .gitignore, which lists\n"
+            "   `__pycache__/` and `*.pyc`, so untracked source files are safe.)\n"
+            "   Then re-run `git status --porcelain` to confirm the working tree is clean\n"
+            "   before proceeding to step 8. No `git stash` step is required.\n"
+        )
+        branch_instruction = (
+            f"2. Set up the branch — you MUST push fixes to the EXISTING PR branch:\n"
+            f"   git fetch origin\n"
+            f"   git checkout factory/{subtask_id} 2>/dev/null || \\\n"
+            f"     git checkout -B factory/{subtask_id} origin/factory/{subtask_id}\n"
+            f"   ⚠️  NON-NEGOTIABLE: the open PR is for branch `factory/{subtask_id}`.\n"
+            f"   You MUST push to that exact branch — NEVER create a new branch with a\n"
+            f"   semantic name like `factory/foo-v2`, `factory/foo-rework`, or any other\n"
+            f"   variant. Pushing to a different branch leaves the PR showing the OLD\n"
+            f"   broken file and the rework cycle stalls. If `git rebase` conflicts in\n"
+            f"   step 8, resolve them in place — do NOT abandon the branch.\n"
+            f"{rework_pycache_preflight}"
+        )
+        rework_section = (
+            f"\n## ⚠️ REWORK REQUIRED — Previous review feedback\n\n"
+            f"{review_feedback}\n\n"
+            f"Apply these changes on top of the existing `factory/{subtask_id}` branch.\n"
+            f"After committing, push with `git push origin factory/{subtask_id}`\n"
+            f"(or `git push --force-with-lease origin factory/{subtask_id}` if you\n"
+            f"rebased and need to overwrite). The existing PR will update automatically;\n"
+            f"do NOT open a new PR.\n"
+        )
+        push_cmd = f"git push --force-with-lease origin factory/{subtask_id}"
+        push_note = (
+            "(Force-with-lease is required because the branch has been "
+            "rebased; pushing to a different branch is FORBIDDEN.)"
+        )
+        step9_cmd = "gh pr view --json url --jq .url  # print existing PR URL"
+        step9_verb = "Update the existing PR"
+    else:
+        pycache_preflight = (
+            "   ⚠️  PRE-FLIGHT: pytest generates __pycache__/*.pyc files that block `git rebase`\n"
+            "   ('cannot rebase: You have unstaged changes') and force a wasteful\n"
+            "   stash/rebase/stash-pop cycle. .gitignore already excludes __pycache__/ and\n"
+            "   *.pyc, but files generated BEFORE the .gitignore rules took effect (or by\n"
+            "   other tools) may still appear in `git status --porcelain`. Run this BEFORE\n"
+            "   the rebase so no `git stash` step is needed:\n"
+            "     git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__\n"
+            "   (The `-X` flag removes ONLY files matched by .gitignore, which lists\n"
+            "   `__pycache__/` and `*.pyc`, so untracked source files are safe.)\n"
+            "   Then re-run `git status --porcelain` to confirm the working tree is clean\n"
+            "   before proceeding to step 8.\n"
+        )
+        branch_instruction = (
+            f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
+            f"   git fetch origin\n"
+            f"   git checkout factory/{subtask_id} 2>/dev/null || git checkout -b factory/{subtask_id} origin/{base_branch}\n"
+            f"   (If the branch already exists from a previous interrupted run, check out the existing branch.\n"
+            f"    Then check if there is already an open PR for this branch: gh pr list --head factory/{subtask_id} --json number,url\n"
+            f"    If an open PR exists and this is NOT a rework, skip straight to step 9 and print its URL.)\n"
+            f"{pycache_preflight}"
+        )
+        rework_section = ""
+        push_cmd = "git push -u origin HEAD"
+        push_note = (
+            "(Use 'git push -u origin HEAD' — do NOT use --force-with-lease; "
+            "the branch may have no upstream tracking yet.)"
+        )
+        step9_cmd = (
+            f"gh pr create --base {base_branch} --head factory/{subtask_id}"
+            f' --title "[Factory] ..." --body-file /tmp/pr-body.md'
+        )
+        step9_verb = "Create a PR"
+        step9_note = (
+            "   ⚠️  Write the PR body to a temp file (e.g. `cat > /tmp/pr-body.md <<'EOF'\\n"
+            "   ...body markdown here, including code spans like `playbooks/foo.md` ...\\n"
+            "   EOF`) and pass it via `--body-file /tmp/pr-body.md`.\\n"
+            '   DO NOT use `--body "..."` — bash interprets backticks, dollar signs,\\n'
+            "   and newlines inside the quoted string as commands, which breaks PR creation.\\n"
+        )
+
+    repo_intro = _artifact_intro(artifact_type, task_repo_root)
+    armory_protocol = get_armory_prompt(artifact_type)
+
+    if is_meshwiki:
+        autofix_step = (
+            "4. Run autofix on Python files only: black src/ && isort --profile black src/ && ruff check src/\n"
+            "   (Tools are installed globally — do NOT use .venv/bin/ prefix. black/isort are for .py files ONLY; do not run them on .js, .css, or other file types.)\n"
+        )
+        test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
+    elif artifact_type == "playbook":
+        lint_target = task_repo_root.rstrip("/") if task_repo_root else "playbooks"
+        autofix_step = (
+            f"4. SKIP `ruff check` / `black --check` / `isort` on playbook `.md` files — they are "
+            f"Markdown with YAML frontmatter, not Python. Both linters produce spurious "
+            f"`No Python files found` / `Cannot parse: 1:3: ---` errors that waste a round-trip.\n"
+            f"   Instead, validate each playbook with a frontmatter-only YAML parser:\n"
+            f"     for f in {lint_target}/*.md; do\n"
+            f"       python -c \"import yaml,sys; d=yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1]); "
+            f"assert d.get('playbook') and d.get('name') and d.get('leaf_type') and d.get('scope')\" \"$f\" \\\n"
+            f'         || echo "FAIL: $f"\n'
+            f"     done\n"
+            f"   If the repo provides `scripts/validate_playbooks.py` (or equivalent), use that instead.\n"
+        )
+        files_touched = (
+            subtask.get("files_touched") if isinstance(subtask, dict) else None
+        )
+        md_only = _is_markdown_only_playbook_diff(files_touched, task_repo_root)
+        if md_only:
+            test_step = (
+                "5. Run ONLY: python -m pytest tests/test_playbook_loader.py -q\n"
+                "   (This subtask touches only `.md` files inside `playbooks/`, so the full "
+                "`pytest tests/` suite is unnecessary — it pulls in `cryptography`-dependent "
+                "fixtures that aren't installed in this env and 120s-timeout. The loader test "
+                "covers playbook schema/loading without that dependency.)\n"
+                "   If the targeted test itself fails with `ModuleNotFoundError` (e.g. "
+                "missing `cryptography` or similar), REPORT that failure and CONTINUE — "
+                "do NOT retry the full `pytest tests/` suite, as it will fail the same way "
+                "and waste a full grinder iteration.\n"
+            )
+        else:
+            test_step = (
+                "5. Run: python -m pytest tests/ -x -q\n"
+                "   (This subtask touches Python files or files outside `playbooks/`, so the "
+                "full `tests/` suite is required — `test_playbook_loader.py` alone would not "
+                "cover module imports or other code paths affected by the change.)\n"
+            )
+    else:
+        lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
+        autofix_step = (
+            f"4. SKIP `ruff check` / `black --check` / `isort` if the diff contains no `.py` "
+            f"files — running Python linters on `.md` playbook files always produces spurious "
+            f"`No Python files found` / `Cannot parse: 1:3: ---` errors. Inspect the change "
+            f"set first:\n"
+            f"     changed=$(git diff --name-only origin/{base_branch}...HEAD)\n"
+            f"     if echo \"$changed\" | grep -q '\\.py$'; then\n"
+            f"       ruff check --fix {lint_target} && black {lint_target}\n"
+            f"     else\n"
+            f"       echo 'No Python files changed — skipping ruff/black/isort.'\n"
+            f"       # If the change set contains playbook `.md` files, validate the\n"
+            f"       # frontmatter with a YAML-only parser instead:\n"
+            f"       for f in $(echo \"$changed\" | grep '^playbooks/.*\\.md$'); do\n"
+            f"         python -c \"import yaml,sys; d=yaml.safe_load(open(sys.argv[1]).read().split('---',2)[1]); "
+            f"assert d.get('playbook') and d.get('name') and d.get('leaf_type') and d.get('scope')\" \"$f\" \\\n"
+            f'           || echo "FAIL: $f"\n'
+            f"       done\n"
+            f"     fi\n"
+            f"   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
+        )
+        test_step = "5. Run: python -m pytest tests/ -x -q\n"
+
+    return (
+        f"{repo_intro} "
+        f"Implement the following task and open a GitHub PR when done.\n\n"
+        f"{armory_protocol + chr(10) if armory_protocol else ''}"
+        f"## Task: {subtask['title']}\n\n"
+        f"{page_content}\n"
+        f"{rework_section}\n"
+        f"## Instructions\n"
+        f"1. Explore the codebase to understand context\n"
+        f"{branch_instruction}"
+        f"3. Implement the changes with tests\n"
+        f"{autofix_step}"
+        f"{test_step}"
+        f"6. Fix any lint/test failures\n"
+        f"7. Commit your changes\n"
+        f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
+        f"   First verify the working tree is clean — pytest will have left __pycache__/*.pyc\n"
+        f"   files behind. If `git status --porcelain` shows any `__pycache__/` or `*.pyc`\n"
+        f"   lines, run `git clean -fdX __pycache__ tests/__pycache__ tests/fixtures/__pycache__`\n"
+        f"   (the `-X` flag targets only .gitignore-matched paths, so untracked source files\n"
+        f"   are safe). No `git stash` is needed once the pre-flight in step 2 has run.\n"
+        f"   Then: git fetch origin && git rebase origin/{base_branch}\n"
+        f"   Resolve any conflicts, then push: {push_cmd}\n"
+        f"   {push_note}\n"
+        f"9. {step9_verb} targeting {base_branch}: {step9_cmd}\n"
+        f"{step9_note if step9_verb == 'Create a PR' else ''}"
+        f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
+        f"10. Print the PR URL on the last line of your output"
+    )
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI colour/escape codes from *text*.
+
+    Uses a simple regex so no extra dependencies are required.
+
+    Args:
+        text: Raw terminal text, possibly containing ANSI escape sequences.
+
+    Returns:
+        Text with ANSI codes removed.
+    """
+    import re as _re
+
+    return _re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
+
+def _truncate_log(text: str, max_chars: int) -> str:
+    """Return the last *max_chars* characters of *text*.
+
+    Args:
+        text: Full terminal log text.
+        max_chars: Maximum number of characters to keep (tail of the log).
+
+    Returns:
+        Truncated text (last ``max_chars`` characters), or the full text if
+        it is already shorter.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+async def _persist_terminal_log(
+    meshwiki_client: "MeshWikiClient",
+    wiki_page: str,
+    raw_output: str,
+    max_chars: int,
+) -> None:
+    """Append a collapsible terminal log block to the subtask wiki page.
+
+    This is fire-and-forget — any exception is logged but never re-raised so
+    that a wiki write failure cannot block the grinder.
+
+    Args:
+        meshwiki_client: Async client for the MeshWiki JSON API.
+        wiki_page: Name of the subtask wiki page to append to.
+        raw_output: Raw PTY/terminal output (may contain ANSI codes).
+        max_chars: Maximum number of characters to keep from the tail of the log.
+    """
+    try:
+        clean = _strip_ansi(raw_output)
+        truncated = _truncate_log(clean, max_chars)
+        block = (
+            "## Terminal Log\n\n"
+            "<details>\n"
+            "<summary>Full terminal output (click to expand)</summary>\n\n"
+            "```\n"
+            f"{truncated}\n"
+            "```\n\n"
+            "</details>"
+        )
+        await meshwiki_client.append_to_page(wiki_page, block)
+        logger.info(
+            "grinder: persisted terminal log (%d chars) to %s",
+            len(truncated),
+            wiki_page,
+        )
+    except Exception as exc:
+        logger.warning(
+            "grinder: failed to persist terminal log to %s (non-critical): %s",
+            wiki_page,
+            exc,
+        )
 
 
 async def grind_subtask_e2b(
@@ -468,12 +1033,17 @@ async def grind_subtask_e2b(
     """
     import os
     import re as _re
+    import time
 
     from e2b.sandbox.commands.command_handle import PtySize
     from e2b_code_interpreter import AsyncSandbox
 
     settings = get_settings()
     subtask = dict(subtask)
+
+    artifact_type: str | None = state.get("artifact_type") or None
+    task_repo_root: str | None = state.get("task_repo_root") or None
+    is_meshwiki = artifact_type is None or artifact_type == "code"
 
     # Transition to in_progress (best-effort — 422 is expected when the task was
     # already transitioned externally, e.g. skip_decomposition flow)
@@ -499,55 +1069,41 @@ async def grind_subtask_e2b(
     review_feedback = subtask.get("review_feedback") or ""
     is_rework = bool(review_feedback)
 
-    if is_rework:
-        branch_instruction = (
-            f"2. Set up the branch:\n"
-            f"   git fetch origin\n"
-            f"   git checkout factory/{subtask['id']} 2>/dev/null || git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
-            f"   (This is a REWORK iteration — you must apply the fixes below before pushing.)\n"
-        )
-        rework_section = (
-            f"\n## ⚠️ REWORK REQUIRED — Previous review feedback\n\n"
-            f"{review_feedback}\n\n"
-            f"Apply these changes on top of the existing branch, then push and update the PR.\n"
-        )
-    else:
-        branch_instruction = (
-            f"2. Set up the branch (handles both fresh start and interrupted-run resume):\n"
-            f"   git fetch origin\n"
-            f"   git checkout factory/{subtask['id']} 2>/dev/null || git checkout -b factory/{subtask['id']} origin/{base_branch}\n"
-            f"   (If the branch already exists from a previous interrupted run, check out the existing branch.\n"
-            f"    Then check if there is already an open PR for this branch: gh pr list --head factory/{subtask['id']} --json number,url\n"
-            f"    If an open PR exists and this is NOT a rework, skip straight to step 9 and print its URL.)\n"
-        )
-        rework_section = ""
-
-    task_prompt = (
-        f"You are working on the MeshWiki project (FastAPI + Python 3.12 + Rust graph engine). "
-        f"Implement the following task and open a GitHub PR when done.\n\n"
-        f"## Task: {subtask['title']}\n\n"
-        f"{page_content}\n"
-        f"{rework_section}\n"
-        f"## Instructions\n"
-        f"1. Explore the codebase to understand context\n"
-        f"{branch_instruction}"
-        f"3. Implement the changes with tests\n"
-        f"4. Run: .venv/bin/black src/ && .venv/bin/isort --profile black src/ && .venv/bin/ruff check src/\n"
-        f"5. Run: python -m pytest src/tests/ -x -q\n"
-        f"6. Fix any lint/test failures\n"
-        f"7. Commit your changes\n"
-        f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
-        f"   git fetch origin && git rebase origin/{base_branch}\n"
-        f"   Resolve any conflicts, then: git push --force-with-lease\n"
-        f"9. {'Update the existing PR' if is_rework else 'Create a PR'} targeting {base_branch}: "
-        f"{'gh pr view --json url --jq .url  # print existing PR URL' if is_rework else f'gh pr create --base {base_branch} --title \"[Factory] ...\" --body \"...\"'}\n"
-        f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
-        f"10. Print the PR URL on the last line of your output"
+    task_prompt = build_grinder_task_prompt(
+        subtask=subtask,
+        page_content=page_content,
+        review_feedback=review_feedback,
+        is_rework=is_rework,
+        artifact_type=artifact_type,
+        task_repo_root=task_repo_root,
+        is_meshwiki=is_meshwiki,
+        base_branch=base_branch,
     )
 
     pr_url: str | None = None
     branch_name = f"factory/{subtask['id']}"
     status = "failed"
+    sandbox_cost: float = 0.0
+    _pty_chunks: list[str] = []
+    _pty_scrubber = _StreamScrubber(settings.github_token)
+    wiki_page: str = subtask["wiki_page"]
+
+    # ── Dry-run short-circuit ─────────────────────────────────────────────
+    if settings.dry_run:
+        logger.info(
+            "e2b grinder: DRY RUN — simulating grind for %s (delay=%.1fs)",
+            subtask["id"],
+            settings.dry_run_step_delay_seconds,
+        )
+        await asyncio.sleep(settings.dry_run_step_delay_seconds)
+        subtask.update(
+            {
+                "status": "review",
+                "branch_name": branch_name,
+                "pr_url": "https://github.com/dry-run/fake/pull/0",
+            }
+        )
+        return {"subtask": subtask, "incremental_cost_usd": 0.0}
 
     # Expose E2B_API_KEY so AsyncSandbox.create() picks it up from the environment
     os.environ["E2B_API_KEY"] = settings.e2b_api_key
@@ -555,18 +1111,26 @@ async def grind_subtask_e2b(
     # Model string: Kilo expects "provider/model" format
     model_arg = f"minimax/{settings.grinder_model}"
 
+    t0 = time.monotonic()
     sbx = None
     try:
-        sbx = await AsyncSandbox.create(
-            "meshwiki-grinder",  # pre-baked template: Node.js 20 + Kilo + gh + Python tools
-            timeout=3600,  # sandbox lives up to 1 hour; default 5 min is too short
-            envs={
-                "MINIMAX_API_KEY": settings.minimax_api_key,
-                # KILO_API_KEY is what Kilo reads for the minimax provider
-                "KILO_API_KEY": settings.minimax_api_key,
-                "GITHUB_TOKEN": settings.github_token,
-                "GH_TOKEN": settings.github_token,
-            },
+        sbx = await asyncio.wait_for(
+            AsyncSandbox.create(
+                "meshwiki-grinder",  # pre-baked template: Node.js 20 + Kilo + gh + Python tools
+                timeout=3600,  # sandbox *lifetime* (not create timeout); default 5 min is too short
+                envs={
+                    "MINIMAX_API_KEY": settings.minimax_api_key,
+                    # KILO_API_KEY is what Kilo reads for the minimax provider
+                    "KILO_API_KEY": settings.minimax_api_key,
+                    "GITHUB_TOKEN": settings.github_token,
+                    "GH_TOKEN": settings.github_token,
+                    # Enable full colour output so Kilo renders its TUI properly
+                    "TERM": "xterm-256color",
+                    "COLORTERM": "truecolor",
+                    "FORCE_COLOR": "1",
+                },
+            ),
+            timeout=120,  # 2 min to create the sandbox; lifetime timeout is separate
         )
         logger.info("e2b grinder: sandbox created for subtask %s", subtask["id"])
 
@@ -575,24 +1139,23 @@ async def grind_subtask_e2b(
         # Bootstrap commands use on_stdout/on_stderr (plain-text lines).
         # Kilo runs inside a PTY; on_data delivers raw terminal bytes (ANSI etc.).
 
-        wiki_page = subtask["wiki_page"]
-
         async def _on_stdout(line: str) -> None:
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(wiki_page, line + "\r\n")
 
         async def _on_stderr(line: str) -> None:
             # Render stderr in yellow so it stands out in the terminal.
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(
                 wiki_page, f"\x1b[33m{line}\x1b[0m\r\n"
             )
 
-        # Accumulate raw PTY output so we can extract the PR URL afterwards.
-        _pty_chunks: list[str] = []
-
+        # _pty_chunks is initialised before the try block so it is always available.
         async def _on_pty_data(data: bytes) -> None:
-            text = data.decode("utf-8", errors="replace")
-            _pty_chunks.append(text)
-            await meshwiki_client.relay_terminal(wiki_page, text)
+            text = _pty_scrubber.feed(data.decode("utf-8", errors="replace"))
+            if text:
+                _pty_chunks.append(text)
+                await meshwiki_client.relay_terminal(wiki_page, text)
 
         # ── Bootstrap ─────────────────────────────────────────────────────────
         # Node.js 20, Kilo CLI, gh CLI, and common Python tools are pre-baked
@@ -602,35 +1165,50 @@ async def grind_subtask_e2b(
             'git config --global user.email "factory@meshwiki" && '
             'git config --global user.name "Factory Grinder" && '
             f'git config --global url."https://x-access-token:{settings.github_token}@github.com/".insteadOf "https://github.com/"',
-            timeout=0,
+            timeout=30,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
 
-        # Clone repo (shallow clone of the base branch so grinders start from the latest work)
-        repo = settings.github_repo
+        # Clone repo — prefer task_repo from state (set by task_intake from `repo:` frontmatter),
+        # fall back to FACTORY_GITHUB_REPO for backwards compatibility with existing tasks.
+        repo = state.get("task_repo") or settings.github_repo
         clone_url = (
             f"https://x-access-token:{settings.github_token}@github.com/{repo}.git"
         )
         result = await sbx.commands.run(
-            f"git clone --branch {base_branch} {clone_url} /tmp/repo",
-            timeout=0,
+            f"git clone --depth 1 --branch {base_branch} {clone_url} /tmp/repo",
+            timeout=300,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
         )
         if result.exit_code != 0:
-            raise RuntimeError(f"git clone failed: {result.stderr}")
+            raise RuntimeError(
+                "git clone failed: "
+                + _scrub_secrets(result.stderr or "", settings.github_token)
+            )
 
-        # Install Python deps
-        await sbx.commands.run(
-            "cd /tmp/repo && pip install -e '.[dev]' -q",
-            timeout=0,
-            on_stdout=_on_stdout,
-            on_stderr=_on_stderr,
-        )
+        # Install Python deps — MeshWiki only; armory repos are not Python packages.
+        if is_meshwiki:
+            await sbx.commands.run(
+                "cd /tmp/repo && pip install -e '.[dev]' -q --no-cache-dir",
+                timeout=600,
+                on_stdout=_on_stdout,
+                on_stderr=_on_stderr,
+            )
+
+        # Install orchestrator deps (langgraph, anthropic, etc.) — MeshWiki tasks only.
+        # Armory repos (tool/playbook/wordlist) do not have an orchestrator subdirectory.
+        if is_meshwiki:
+            await sbx.commands.run(
+                "cd /tmp/repo/orchestrator && pip install -e '.[dev]' -q --no-cache-dir",
+                timeout=600,
+                on_stdout=_on_stdout,
+                on_stderr=_on_stderr,
+            )
 
         # Write task file
-        await sbx.files.write("/tmp/task.md", task_prompt)
+        await asyncio.wait_for(sbx.files.write("/tmp/task.md", task_prompt), timeout=30)
 
         # ── Kilo run via PTY ──────────────────────────────────────────────────
         # PTY allocation makes Kilo render its full TUI (sidebars, progress
@@ -643,10 +1221,13 @@ async def grind_subtask_e2b(
             subtask["id"],
         )
 
-        pty_handle = await sbx.pty.create(
-            size=PtySize(cols=220, rows=50),
-            on_data=_on_pty_data,
-            timeout=0,  # no timeout — sandbox 1-hour limit applies
+        pty_handle = await asyncio.wait_for(
+            sbx.pty.create(
+                size=PtySize(cols=160, rows=50),
+                on_data=_on_pty_data,
+                timeout=2400,  # 40 min; matches asyncio.wait_for below; 0 = unlimited
+            ),
+            timeout=30,
         )
         pid = pty_handle.pid
 
@@ -655,25 +1236,36 @@ async def grind_subtask_e2b(
             f"cd /tmp/repo && kilo run --auto --model {model_arg}"
             f' "$(cat /tmp/task.md)" ; exit\n'
         )
-        await sbx.pty.send_stdin(pid, kilo_cmd.encode())
+        await asyncio.wait_for(sbx.pty.send_stdin(pid, kilo_cmd.encode()), timeout=10)
 
         try:
-            await pty_handle.wait()
+            await asyncio.wait_for(pty_handle.wait(), timeout=2400)  # 40 min max
+        except asyncio.TimeoutError:
+            logger.warning(
+                "e2b grinder: Kilo timed out after 40 min for %s", subtask["id"]
+            )
         except Exception as pty_exc:
             # Non-zero exit is normal if kilo fails; log but continue so we
             # can still check whether a PR was opened.
             logger.warning("e2b grinder: PTY exited with error: %s", pty_exc)
+
+        # The PTY has closed, so release any tail the scrubber was holding back.
+        if tail := _pty_scrubber.flush():
+            _pty_chunks.append(tail)
+            await meshwiki_client.relay_terminal(wiki_page, tail)
 
         # ── PR URL extraction ─────────────────────────────────────────────────
         # Search the accumulated PTY output for a GitHub PR URL.
         pty_output = "".join(_pty_chunks)
         logger.info("e2b grinder: PTY output tail: %s", pty_output[-2000:])
 
-        match = _re.search(
+        # Use findall + take the last match: Kilo may output placeholder URLs
+        # earlier in its thinking; the actual PR URL appears at the end (step 10).
+        all_urls = _re.findall(
             r'https://github\.com/[^/\s"]+/[^/\s"]+/pull/\d+', pty_output
         )
-        if match:
-            pr_url = match.group(0)
+        if all_urls:
+            pr_url = all_urls[-1]
 
         if pr_url:
             status = "review"
@@ -684,11 +1276,31 @@ async def grind_subtask_e2b(
     except Exception as exc:
         logger.exception("e2b grinder: sandbox error: %s", exc)
     finally:
+        elapsed = time.monotonic() - t0
+        # E2B compute cost only. Kilo CLI calls MiniMax internally inside the
+        # sandbox; those LLM token costs are opaque and not included here.
+        sandbox_cost = sandbox_time_to_usd(elapsed)
         if sbx is not None:
             try:
                 await sbx.kill()
             except Exception:
                 pass
+
+    # Persist terminal log to the subtask wiki page (fire-and-forget).
+    # Flush again in case the PTY stage raised before the flush above.
+    if tail := _pty_scrubber.flush():
+        _pty_chunks.append(tail)
+    raw_pty = "".join(_pty_chunks)
+    terminal_log_text = _truncate_log(
+        _strip_ansi(raw_pty), settings.terminal_log_max_chars
+    )
+    subtask["terminal_log"] = terminal_log_text
+    await _persist_terminal_log(
+        meshwiki_client,
+        wiki_page,
+        raw_pty,
+        settings.terminal_log_max_chars,
+    )
 
     subtask.update(
         {
@@ -697,7 +1309,7 @@ async def grind_subtask_e2b(
             "pr_url": pr_url,
         }
     )
-    return subtask  # type: ignore[return-value]
+    return {"subtask": subtask, "incremental_cost_usd": sandbox_cost}
 
 
 async def grind_subtask(
@@ -730,15 +1342,20 @@ async def grind_subtask(
         client = anthropic.AsyncAnthropic(
             api_key=settings.minimax_api_key or None,
             base_url="https://api.minimax.io/v1",
+            timeout=30.0,
         )
     elif settings.grinder_provider == "anthropic":
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key or None, timeout=30.0
+        )
     else:
         logger.warning(
             "grind_subtask: unknown grinder_provider %r, falling back to anthropic",
             settings.grinder_provider,
         )
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key or None, timeout=30.0
+        )
 
     executor = GrinderToolExecutor(
         repo_root=Path(settings.repo_root),
@@ -792,6 +1409,7 @@ async def grind_subtask(
     max_tool_calls = min(subtask["token_budget"] // 1000, 50)
     tool_calls_remaining = max_tool_calls
     tokens_used = 0
+    incremental_cost_usd: float = 0.0
     pr_url: str | None = None
     branch_name: str | None = subtask.get("branch_name")
 
@@ -802,7 +1420,8 @@ async def grind_subtask(
     )
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
+        response = await safe_messages_create(
+            client,
             model=settings.grinder_model,
             max_tokens=4096,
             system=GRINDER_SYSTEM_PROMPT,
@@ -810,10 +1429,13 @@ async def grind_subtask(
             messages=messages,
         )
 
-        # Track token usage
+        # Track token usage and cost
         if hasattr(response, "usage") and response.usage:
             tokens_used += getattr(response.usage, "input_tokens", 0)
             tokens_used += getattr(response.usage, "output_tokens", 0)
+            incremental_cost_usd += tokens_to_usd(
+                response.usage, settings.grinder_model
+            )
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
@@ -894,4 +1516,4 @@ async def grind_subtask(
             "status": final_status,
         }
     )
-    return updated
+    return {"subtask": updated, "incremental_cost_usd": incremental_cost_usd}

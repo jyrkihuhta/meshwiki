@@ -11,6 +11,64 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from meshwiki.core.models import Page, PageMetadata
+from meshwiki.main import build_page_tree_sync
+
+# ---------------------------------------------------------------------------
+# build_page_tree_sync unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_pages(*names: str) -> list[Page]:
+    return [Page(name=n, content="", metadata=PageMetadata()) for n in names]
+
+
+def test_build_page_tree_flat():
+    pages = _make_pages("Alpha", "Beta", "Gamma")
+    tree = build_page_tree_sync(pages)
+    assert [n["name"] for n in tree] == ["Alpha", "Beta", "Gamma"]
+
+
+def test_build_page_tree_no_children_all_are_roots():
+    """Without children: declarations, flat pages appear as independent roots.
+
+    Slash-named pages are hidden by _is_hidden_page (legacy subpage convention).
+    """
+    pages = _make_pages("Factory", "Notes", "Home")
+    tree = build_page_tree_sync(pages)
+    # All three are roots because none declares the others as children.
+    assert {n["name"] for n in tree} == {"Factory", "Notes", "Home"}
+
+
+def test_slash_named_pages_hidden_from_sidebar():
+    """Pages with '/' in their name are hidden; non-slash page is still a root."""
+    pages = _make_pages("Factory", "Factory/Macros", "Factory/Macros/Include")
+    tree = build_page_tree_sync(pages)
+    assert {n["name"] for n in tree} == {"Factory"}
+
+
+def test_build_page_tree_children_declaration_drives_nesting():
+    """children: frontmatter is authoritative for nesting."""
+    parent = Page(
+        name="Parent",
+        content="",
+        metadata=PageMetadata(children=["Child1", "Child2"]),
+    )
+    c1 = Page(name="Child1", content="", metadata=PageMetadata())
+    c2 = Page(name="Child2", content="", metadata=PageMetadata())
+    tree = build_page_tree_sync([parent, c1, c2])
+    assert len(tree) == 1
+    assert tree[0]["name"] == "Parent"
+    child_names = [c["name"] for c in tree[0]["children"]]
+    assert child_names == ["Child1", "Child2"]
+
+
+def test_build_page_tree_page_without_children_declaration_is_root():
+    """A page not listed as any child is a root."""
+    pages = _make_pages("OrphanChild")
+    tree = build_page_tree_sync(pages)
+    assert tree[0]["name"] == "OrphanChild"
+
 
 @pytest.fixture()
 def wiki_app(tmp_path):
@@ -418,3 +476,48 @@ class TestFullLifecycle:
         # 11. HomePage wiki link to Projects is now missing again
         resp = await client.get("/page/HomePage")
         assert "wiki-link-missing" in resp.text
+
+
+# ============================================================
+# Macro rendering
+# ============================================================
+
+
+class TestMacros:
+    @pytest.mark.asyncio
+    async def test_pagelist_macro_renders_without_error(self, client):
+        """<<PageList>> must not raise AttributeError (e.g. list_pages_with_metadata).
+
+        When the Rust engine is unavailable in tests, PageListPreprocessor
+        returns the line unchanged — the important thing is that the page
+        renders with 200, not a 500 from a wrong method call.
+        """
+        await client.post(
+            "/page/MacroTest",
+            data={"content": "# Macro Test\n\n<<PageList>>\n"},
+        )
+        resp = await client.get("/page/MacroTest")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_pagelist_macro_does_not_call_engine_list_pages_with_metadata(
+        self, wiki_app, client
+    ):
+        """PageListPreprocessor must NOT call engine.list_pages_with_metadata()
+        (that method doesn't exist on the Rust GraphEngine and raises AttributeError).
+        Pages are now injected from storage, so the engine is not involved.
+        """
+        from unittest.mock import MagicMock, patch
+
+        mock_engine = MagicMock()
+
+        await client.post(
+            "/page/MacroTestEngine",
+            data={"content": "# Test\n\n<<PageList>>\n"},
+        )
+
+        with patch("meshwiki.core.parser.get_engine", return_value=mock_engine):
+            resp = await client.get("/page/MacroTestEngine")
+
+        assert resp.status_code == 200
+        mock_engine.list_pages_with_metadata.assert_not_called()

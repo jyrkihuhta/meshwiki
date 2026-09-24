@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,10 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 import meshwiki.config as cfg
 from meshwiki.core.dependencies import get_storage
+from meshwiki.core.logging import get_logger
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import InvalidTransitionError, transition_task
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -80,9 +80,7 @@ async def _find_task_by_pr_number(
                 if results:
                     return results[0]
     except Exception:
-        logger.debug(
-            "Graph engine lookup failed, falling back to metadata scan", exc_info=True
-        )
+        log.debug("graph_engine_lookup_failed", exc_info=True)
 
     # Fallback: scan all pages
     pages = await storage.list_pages_with_metadata()
@@ -137,7 +135,7 @@ async def github_webhook(
 
     # Only handle pull_request events that represent a merge
     if event_type != "pull_request":
-        logger.debug("Ignoring GitHub event: %s", event_type)
+        log.debug("github_event_ignored", event_type=event_type)
         return {"status": "ignored"}
 
     action = payload.get("action")
@@ -145,7 +143,7 @@ async def github_webhook(
     merged = pr.get("merged", False)
 
     if action != "closed" or not merged:
-        logger.debug("Ignoring PR event: action=%s merged=%s", action, merged)
+        log.debug("github_pr_event_ignored", action=action, merged=merged)
         return {"status": "ignored"}
 
     pr_number: int = pr["number"]
@@ -160,18 +158,10 @@ async def github_webhook(
     # Look up matching task page
     page_name = await _find_task_by_pr_number(storage, pr_number)
     if page_name is None:
-        logger.warning(
-            "GitHub PR #%d merged but no matching task page found (pr_number=%s)",
-            pr_number,
-            pr_number,
-        )
+        log.warning("github_pr_no_task_found", pr_number=pr_number)
         return {"status": "no_task_found"}
 
-    logger.info(
-        "PR #%d merged — transitioning task page %r: review -> merged -> done",
-        pr_number,
-        page_name,
-    )
+    log.info("github_pr_merged", pr_number=pr_number, page=page_name)
 
     # Transition: review -> merged (store merged_at)
     try:
@@ -182,7 +172,7 @@ async def github_webhook(
             extra_fields={"merged_at": merged_at},
         )
     except (ValueError, InvalidTransitionError) as exc:
-        logger.error("Failed to transition %r to 'merged': %s", page_name, exc)
+        log.error("task_transition_failed", page=page_name, to="merged", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Transition to 'merged' failed: {exc}",
@@ -192,7 +182,7 @@ async def github_webhook(
     try:
         await transition_task(storage, page_name, "done")
     except (ValueError, InvalidTransitionError) as exc:
-        logger.error("Failed to transition %r to 'done': %s", page_name, exc)
+        log.error("task_transition_failed", page=page_name, to="done", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Transition to 'done' failed: {exc}",

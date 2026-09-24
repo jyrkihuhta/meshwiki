@@ -73,7 +73,7 @@ async def disabled_client(disabled_settings):
 
 @pytest.fixture
 def open_settings(tmp_path):
-    """Factory enabled but no API key set — open access."""
+    """Factory enabled but no API key set — must fail closed (no open access)."""
     original = cfg.settings
     cfg.settings = cfg.Settings(
         data_dir=tmp_path,
@@ -132,6 +132,17 @@ async def test_api_200_with_correct_key(client):
 
 
 @pytest.mark.asyncio
-async def test_api_open_when_no_key_configured(open_client):
+async def test_api_fails_closed_when_no_key_configured(open_client):
+    # With no factory_api_key configured the API must NOT be open — it fails
+    # closed (503) so anonymous writes/deletes are impossible.
     resp = await open_client.get("/api/v1/pages")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_api_write_fails_closed_when_no_key_configured(open_client):
+    # A write route must also be refused when no key is configured.
+    resp = await open_client.post(
+        "/api/v1/pages", json={"name": "Sneaky", "content": "x"}
+    )
+    assert resp.status_code == 503

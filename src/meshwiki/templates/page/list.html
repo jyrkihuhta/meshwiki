@@ -22,6 +22,9 @@
     {% endif %}
 
     <h1>All Pages</h1>
+    {% if sub_page_count %}
+    <p class="sub-page-note">Showing {{ all_pages | length }} root-level pages — {{ sub_page_count }} sub-pages are accessible via their parent pages.</p>
+    {% endif %}
 
     {% if all_pages %}
     <div class="page-list-table-wrap">

@@ -1,0 +1,7 @@
+{
+  "graphql_introspect": {
+    "execution_mode": "deterministic",
+    "tool_module": "graphql_introspect",
+    "tool_class": "GraphQLIntrospectTool"
+  }
+}

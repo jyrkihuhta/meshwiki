@@ -214,6 +214,26 @@ impl FileWatcher {
     ) -> Vec<GraphEvent> {
         let mut events = Vec::new();
 
+        // Cheap short-circuit for spurious events (e.g. IN_ATTRIB storms on
+        // Docker bind mounts — the debouncer above only coalesces events
+        // within one 500ms window, not across an ongoing stream of them; see
+        // deck's PLAN.md M2, 2026-09-05 incident). If the file's on-disk
+        // mtime hasn't advanced past what we indexed it at last time, nothing
+        // actually changed — skip the read+parse+graph-lock entirely. A real
+        // edit always bumps mtime; a metadata-only event (permission/owner/
+        // atime) does not.
+        if let Ok(meta) = fs::metadata(file_path) {
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(graph_guard) = graph.lock() {
+                    if let Some(existing) = graph_guard.get_page(page_name) {
+                        if existing.last_modified >= mtime {
+                            return events;
+                        }
+                    }
+                }
+            }
+        }
+
         // Read and parse the file
         let content = match fs::read_to_string(file_path) {
             Ok(c) => c,
@@ -396,5 +416,53 @@ mod tests {
 
         // Should have no events for .txt file
         assert!(events.is_empty(), "Expected no events, got: {:?}", events);
+    }
+
+    #[test]
+    fn test_handle_file_changed_skips_when_mtime_unchanged() {
+        // Regression test for the 2026-09-05 incident (deck PLAN.md M2): a
+        // spurious event (e.g. IN_ATTRIB on a Docker bind mount) for a file
+        // whose content — and therefore mtime — hasn't actually changed
+        // since we last indexed it must not trigger a re-parse + graph
+        // update. Without this check every such event costs a full read +
+        // markdown parse + graph mutex lock, and a continuous stream of them
+        // pins a CPU core indefinitely.
+        let graph = Arc::new(Mutex::new(WikiGraph::new()));
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("Test.md");
+        fs::write(&file_path, "# Test\n\nContent").unwrap();
+        let relative_path = Path::new("Test.md");
+
+        // First call: page doesn't exist yet, must process and create it.
+        let events = FileWatcher::handle_file_changed(&graph, "Test", &file_path, relative_path);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GraphEvent::PageCreated { name } if name == "Test")),
+            "expected PageCreated on first call, got: {:?}",
+            events
+        );
+
+        // Second call: same file, untouched — mtime hasn't advanced past
+        // what we just stored. Must be a no-op, not another PageUpdated.
+        let events = FileWatcher::handle_file_changed(&graph, "Test", &file_path, relative_path);
+        assert!(
+            events.is_empty(),
+            "expected no events for an unchanged file, got: {:?}",
+            events
+        );
+
+        // Sanity check: a real content change (which bumps mtime) must still
+        // be picked up.
+        sleep(Duration::from_millis(10));
+        fs::write(&file_path, "# Test\n\nChanged content").unwrap();
+        let events = FileWatcher::handle_file_changed(&graph, "Test", &file_path, relative_path);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GraphEvent::PageUpdated { name } if name == "Test")),
+            "expected PageUpdated after a real content change, got: {:?}",
+            events
+        );
     }
 }

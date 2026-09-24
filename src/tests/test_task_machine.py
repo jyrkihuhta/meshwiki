@@ -1,7 +1,13 @@
 """Unit tests for the task state machine."""
 
-import pytest
+import asyncio
+import importlib
 
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+import meshwiki.config as cfg
+import meshwiki.main
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import (
     CANONICAL_EVENTS,
@@ -17,7 +23,7 @@ def storage(tmp_path):
 
 
 async def _make_task(storage: FileStorage, name: str, status: str = "draft") -> None:
-    content = f"---\ntype: task\nstatus: {status}\n---\nTest task."
+    content = f"---\ntype: task\nassignee: factory\nstatus: {status}\n---\nTest task."
     await storage.save_page(name, content)
 
 
@@ -127,3 +133,170 @@ async def test_done_has_no_transitions(storage):
 async def test_missing_page_raises(storage):
     with pytest.raises(ValueError, match="not found"):
         await transition_task(storage, "NonExistent", "planned")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transitions_are_serialised(storage, monkeypatch):
+    """Two concurrent draft→planned transitions: only one may win.
+
+    get_page is made to yield so the two calls genuinely interleave. Without
+    the per-page lock both would validate against the stale "draft" status and
+    both succeed; with it, the second sees "planned" and is rejected.
+    """
+    await _make_task(storage, "Task_Race", "draft")
+    original_get_page = storage.get_page
+
+    async def yielding_get_page(name):
+        page = await original_get_page(name)
+        await asyncio.sleep(0)
+        return page
+
+    monkeypatch.setattr(storage, "get_page", yielding_get_page)
+
+    results = await asyncio.gather(
+        transition_task(storage, "Task_Race", "planned"),
+        transition_task(storage, "Task_Race", "planned"),
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, InvalidTransitionError)]
+    successes = [r for r in results if isinstance(r, dict)]
+    assert len(successes) == 1
+    assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# C13: assignee:factory guardrail on planned/approved → in_progress
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c13_rejects_in_progress_without_assignee(storage):
+    """task/epic without assignee:factory cannot be transitioned to in_progress."""
+    content = "---\ntype: task\nstatus: planned\nassignee: human\n---\nBody."
+    await storage.save_page("Task_C13_NoAssignee", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Task_C13_NoAssignee", "in_progress")
+
+
+@pytest.mark.asyncio
+async def test_c13_rejects_in_progress_missing_assignee(storage):
+    """task/epic with no assignee field at all is also rejected."""
+    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    await storage.save_page("Task_C13_Missing", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Task_C13_Missing", "in_progress")
+
+
+@pytest.mark.asyncio
+async def test_c13_allows_in_progress_with_factory_assignee(storage):
+    """task with assignee:factory transitions normally."""
+    content = "---\ntype: task\nstatus: planned\nassignee: factory\n---\nBody."
+    await storage.save_page("Task_C13_Factory", content)
+    result = await transition_task(storage, "Task_C13_Factory", "in_progress")
+    assert result["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_c13_non_task_page_not_affected(storage):
+    """Regular pages (no type field) are not subject to the guardrail."""
+    content = "---\nstatus: planned\n---\nBody."
+    await storage.save_page("Regular_C13", content)
+    result = await transition_task(storage, "Regular_C13", "in_progress")
+    assert result["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_c13_approved_to_in_progress_also_guarded(storage):
+    """The guardrail also applies to the approved → in_progress path."""
+    content = "---\ntype: epic\nstatus: approved\nassignee: human\n---\nBody."
+    await storage.save_page("Epic_C13_Approved", content)
+    with pytest.raises(InvalidTransitionError, match="assignee"):
+        await transition_task(storage, "Epic_C13_Approved", "in_progress")
+
+
+# ---------------------------------------------------------------------------
+# C1: save route must route status changes through the state machine
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def factory_settings(tmp_path):
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        data_dir=tmp_path,
+        factory_enabled=True,
+        factory_api_key="test-key",
+        graph_watch=False,
+        auth_enabled=False,
+    )
+    importlib.reload(meshwiki.main)
+    yield cfg.settings
+    cfg.settings = original
+    importlib.reload(meshwiki.main)
+
+
+@pytest.fixture
+async def factory_client(factory_settings):
+    async with AsyncClient(
+        transport=ASGITransport(app=meshwiki.main.app),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_save_valid_status_transition(factory_client, factory_settings):
+    """Saving a task page with a valid status change transitions it correctly."""
+    page_name = "Task_Save_Test"
+    content = "---\ntype: task\nassignee: factory\nstatus: planned\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\ntype: task\nassignee: factory\nstatus: in_progress\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code in (200, 302)
+
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_save_invalid_status_transition_returns_422(
+    factory_client, factory_settings
+):
+    """Saving a task page with an illegal status change returns 422."""
+    page_name = "Task_Invalid_Transition"
+    content = "---\ntype: task\nstatus: planned\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\ntype: task\nstatus: done\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code == 422
+
+    # Status must not have changed
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "planned"
+
+
+@pytest.mark.asyncio
+async def test_save_non_task_page_status_change_allowed(
+    factory_client, factory_settings
+):
+    """Regular (non-task) pages can freely change any frontmatter field."""
+    page_name = "Regular_Page"
+    content = "---\nstatus: some_value\n---\nBody."
+    await meshwiki.main.storage.save_page(page_name, content)
+
+    new_content = "---\nstatus: other_value\n---\nBody."
+    resp = await factory_client.post(
+        f"/page/{page_name}", data={"content": new_content}
+    )
+    assert resp.status_code in (200, 302)
+
+    page = await meshwiki.main.storage.get_page(page_name)
+    assert (page.metadata.model_extra or {}).get("status") == "other_value"

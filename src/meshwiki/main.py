@@ -1,7 +1,9 @@
 """MeshWiki FastAPI application."""
 
+import asyncio
 import json
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -9,7 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import structlog
 from fastapi import (
+    Depends,
     FastAPI,
     Form,
     HTTPException,
@@ -22,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from meshwiki.auth import (
@@ -32,7 +37,13 @@ from meshwiki.auth import (
     verify_password,
 )
 from meshwiki.config import settings
-from meshwiki.core.dependencies import set_storage
+from meshwiki.core import page_cache
+from meshwiki.core.dependencies import (
+    get_revision_store,
+    get_storage,
+    set_revision_store,
+    set_storage,
+)
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
 from meshwiki.core.logging import configure_logging, get_logger
 from meshwiki.core.metrics import (
@@ -44,11 +55,15 @@ from meshwiki.core.metrics import (
 )
 from meshwiki.core.models import Page
 from meshwiki.core.parser import (
+    FRONTMATTER_PATTERN,
     parse_wiki_content,
     parse_wiki_content_with_toc,
     word_count,
 )
+from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
+from meshwiki.core.task_machine import TASK_TRANSITIONS
+from meshwiki.core.task_machine import transition_task as _machine_transition
 from meshwiki.core.ws_manager import manager
 
 # Configure structured logging before anything else
@@ -86,6 +101,9 @@ templates_path = Path(__file__).parent / "templates"
 static_path = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(templates_path))
+if not settings.debug:
+    templates.env.auto_reload = False
+    templates.env.cache_size = 400
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 
@@ -98,6 +116,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = str(uuid.uuid4())
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
         start = time.monotonic()
         response = await call_next(request)
         duration_ms = round((time.monotonic() - start) * 1000, 2)
@@ -108,7 +128,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         log.info(
             "http_request",
-            request_id=request_id,
             method=method,
             path=request.url.path,
             status_code=response.status_code,
@@ -143,8 +162,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             )
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
-            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://unpkg.com "
+            "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com "
+            "https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
             "connect-src 'self' wss:; "
             "font-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;"
@@ -153,7 +174,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # Middleware stack (added in reverse — last added runs outermost):
-# LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware → AuthMiddleware
+# GZipMiddleware → LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware →
+# AuthMiddleware
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
 app.add_middleware(
@@ -161,6 +183,7 @@ app.add_middleware(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 def timeago_filter(dt: datetime | None) -> str:
@@ -192,8 +215,17 @@ templates.env.filters["timeago"] = timeago_filter
 templates.env.globals["word_count"] = word_count
 
 # Initialize storage
-storage = FileStorage(settings.data_dir)
+_revision_store = (
+    RevisionStore(settings.data_dir / ".revisions.db")
+    if settings.history_enabled
+    else None
+)
+storage = FileStorage(settings.data_dir, revision_store=_revision_store)
 set_storage(storage)
+# clear cache from any prior storage instance (e.g. test reloads)
+page_cache.hard_invalidate()
+if _revision_store is not None:
+    set_revision_store(_revision_store)
 
 # Mount factory API if enabled
 if settings.factory_enabled:
@@ -205,43 +237,202 @@ if settings.factory_enabled:
 # Template context helper
 async def get_page_tree() -> list[dict]:
     """Get hierarchical page tree for sidebar navigation."""
-    pages = await storage.list_pages_with_metadata()
+    pages = await page_cache.get_pages_metadata()
     return build_page_tree_sync(pages)
 
 
+# Tags whose pages are hidden as sidebar roots (still appear as children under their
+# parent)
+_SIDEBAR_HIDDEN_TAGS: frozenset[str] = frozenset({"intel-entry"})
+
+
+def _is_hidden_page(page: Page) -> bool:
+    """Return True for pages that should not appear in the sidebar."""
+    if "/" in page.name:
+        return True
+    extra = page.metadata.model_extra or {}
+    if extra.get("sidebar") is False:
+        return True
+    return bool(set(page.metadata.tags) & _SIDEBAR_HIDDEN_TAGS)
+
+
 def build_page_tree_sync(pages: list[Page]) -> list[dict]:
-    """Build a hierarchical tree from flat page list.
+    """Build a hierarchy from ``children:`` frontmatter and ``parent_task:`` fields.
 
-    Each node: {"name": str, "title": str, "children": list[dict], "level": int}
-    Supports up to 3 levels of nesting.
+    Each node: {"name": str, "title": str, "children": list[dict], "level": int,
+    "status": str, "stub": bool}
+
+    - Pages with ``children:`` declare explicit child order.
+    - Pages with ``parent_task:`` are implicitly appended as children of that parent.
+    - Pages never declared as anyone's child are roots.
+    - A page can appear under multiple parents (DAG).
+    - Cycles are detected per-path; back-edges are dropped with a warning.
+    - Missing children render as stub nodes (no page exists yet).
+    - ``Home`` is pinned as the first root.
     """
-    tree: list[dict] = []
-    nodes: dict[str, dict] = {}
+    page_map: dict[str, Page] = {p.name: p for p in pages}
 
-    for page in sorted(pages, key=lambda p: p.name.lower()):
-        parts = page.name.split("/")
-        level = len(parts) - 1
+    # storage._path_to_name (storage.py) converts underscores to spaces when
+    # loading pages from disk, so stored page names always use spaces.  Frontmatter
+    # authors often write children: [Foo_Bar] with underscores.  _ref() normalises
+    # both forms to spaces so all comparisons are consistent.
+    def _ref(name: str) -> str:
+        return name.replace("_", " ")
 
-        if level > 2:
-            level = 2
+    # Build children_of from both explicit children: lists and parent_task: fields.
+    children_of: dict[str, list[str]] = {}
+    for page in pages:
+        if _is_hidden_page(page):
+            continue
+        declared = page.metadata.children
+        if declared:
+            children_of[page.name] = [_ref(c) for c in declared]
 
-        node = {
+    # Derive implicit children from parent_task: (append after explicitly declared
+    # ones).
+    # Compare normalised names to prevent duplicates when a page is both in children:
+    # (underscore form) and has parent_task: (space form) pointing at the same parent.
+    for page in pages:
+        if _is_hidden_page(page):
+            continue
+        extra = page.metadata.model_extra or {}
+        parent = extra.get("parent_task")
+        if parent:
+            bucket = children_of.setdefault(_ref(parent), [])
+            if _ref(page.name) not in {_ref(c) for c in bucket}:
+                bucket.append(page.name)
+
+    all_declared_children: set[str] = {
+        child for kids in children_of.values() for child in kids
+    }
+
+    roots = [
+        p
+        for p in pages
+        if not _is_hidden_page(p) and p.name not in all_declared_children
+    ]
+    roots.sort(key=lambda p: (p.name != "Home", p.name.lower()))
+
+    def _node(page_name: str, level: int) -> dict:
+        page = page_map.get(page_name)
+        if page is None:
+            return {
+                "name": page_name,
+                "title": page_name.replace("_", " "),
+                "children": [],
+                "level": level,
+                "status": "",
+                "stub": True,
+            }
+        extra = page.metadata.model_extra or {}
+        status = extra.get("status", "") or ""
+        if isinstance(status, list):
+            status = status[0] if status else ""
+        return {
             "name": page.name,
             "title": page.title,
             "children": [],
             "level": level,
+            "status": status,
+            "stub": False,
         }
-        nodes[page.name] = node
 
-        if level == 0:
-            tree.append(node)
+    def _subtree(page_name: str, level: int, ancestors: frozenset[str]) -> dict | None:
+        if page_name in ancestors:
+            log.warning("page_tree_cycle_detected", page=page_name)
+            return None
+        node = _node(page_name, level)
+        path = ancestors | {page_name}
+        for child_name in children_of.get(page_name, []):
+            child = _subtree(child_name, level + 1, path)
+            if child is not None:
+                node["children"].append(child)
+        return node
+
+    # Classify roots into sections: epics → "Factory", standalone factory tasks →
+    # "Standalone Tasks", everything else → regular wiki tree.
+    epic_roots: list[Page] = []
+    standalone_task_roots: list[Page] = []
+    wiki_roots: list[Page] = []
+
+    for root in roots:
+        page = page_map.get(root.name)
+        if page is None:
+            wiki_roots.append(root)
+            continue
+        extra = page.metadata.model_extra or {}
+        page_type = extra.get("type")
+        is_factory = extra.get("assignee") == "factory"
+        has_children = bool(children_of.get(root.name))
+        if page_type == "epic" or (is_factory and has_children and not page_type):
+            epic_roots.append(root)
+        elif (page_type == "task" or is_factory) and not extra.get("parent_task"):
+            standalone_task_roots.append(root)
         else:
-            parent_name = "/".join(parts[:-1])
-            if parent_name in nodes:
-                nodes[parent_name]["children"].append(node)
-            else:
-                tree.append(node)
+            wiki_roots.append(root)
 
+    def _section(label: str, slug: str, section_roots: list[Page]) -> dict:
+        children = []
+        for root in section_roots:
+            node = _subtree(root.name, 1, frozenset())
+            if node is not None:
+                children.append(node)
+        return {
+            "name": f"__section__{slug}",
+            "title": label,
+            "children": children,
+            "level": 0,
+            "status": "",
+            "stub": False,
+            "section": True,
+        }
+
+    tree: list[dict] = []
+    for root in wiki_roots:
+        node = _subtree(root.name, 0, frozenset())
+        if node is not None:
+            tree.append(node)
+
+    if epic_roots or standalone_task_roots:
+        factory_children = _section("Factory", "factory", epic_roots)["children"]
+        if standalone_task_roots:
+            factory_children.append(
+                _section("Standalone Tasks", "standalone", standalone_task_roots)
+            )
+        tree.append(
+            {
+                "name": "__section__factory",
+                "title": "Factory",
+                "children": factory_children,
+                "level": 0,
+                "status": "",
+                "stub": False,
+                "section": True,
+            }
+        )
+
+    # Orphan recovery: pages that form pure cycles (or are only referenced by
+    # cycle members) are unreachable from normal roots. Surface them at the root
+    # level so they don't silently vanish from the sidebar.
+    def _mark_reachable(page_name: str, path: frozenset[str], seen: set[str]) -> None:
+        if page_name in path or page_name in seen:
+            return
+        seen.add(page_name)
+        for child in children_of.get(page_name, []):
+            _mark_reachable(child, path | {page_name}, seen)
+
+    reachable: set[str] = set()
+    for root in roots:
+        _mark_reachable(root.name, frozenset(), reachable)
+
+    orphans = sorted(
+        [p for p in pages if not _is_hidden_page(p) and p.name not in reachable],
+        key=lambda p: (p.name != "Home", p.name.lower()),
+    )
+    for orphan in orphans:
+        node = _subtree(orphan.name, 0, frozenset())
+        if node is not None:
+            tree.append(node)
     return tree
 
 
@@ -249,41 +440,24 @@ def get_context(**kwargs) -> dict:
     """Create base context for templates."""
     return {
         "app_title": settings.app_title,
+        "factory_enabled": settings.factory_enabled,
         **kwargs,
     }
 
 
 # ── Page name validation ──────────────────────────────────────────────────────
 
-_MAX_DEPTH = 3  # maximum number of slashes allowed in a page name
-
 
 def _validate_page_name(name: str) -> None:
-    """Raise HTTPException 400 for invalid or potentially dangerous page names.
-
-    Allows forward slashes for subpages (up to _MAX_DEPTH levels deep), but
-    blocks any pattern that could escape the data directory.
-    """
+    """Raise HTTPException 400 for invalid or potentially dangerous page names."""
     if not name:
         raise HTTPException(status_code=400, detail="Invalid page name")
     # Block null bytes and backslashes (Windows path separator)
     if "\x00" in name or "\\" in name:
         raise HTTPException(status_code=400, detail="Invalid page name")
-    # Block absolute paths and trailing slashes
-    if name.startswith("/") or name.endswith("/"):
-        raise HTTPException(status_code=400, detail="Invalid page name")
-    # Block consecutive slashes
-    if "//" in name:
-        raise HTTPException(status_code=400, detail="Invalid page name")
-    segments = name.split("/")
-    # Enforce depth limit
-    if len(segments) > _MAX_DEPTH + 1:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Page nesting limited to {_MAX_DEPTH} levels",
-        )
-    # Block empty segments and directory traversal
-    if any(seg in (".", "..") or seg == "" for seg in segments):
+    # Block slashes entirely — the MoC system uses flat page names; slash pages
+    # are hidden from the sidebar with no warning, so creation should be rejected.
+    if "/" in name:
         raise HTTPException(status_code=400, detail="Invalid page name")
 
 
@@ -305,32 +479,43 @@ def page_exists_sync(name: str) -> bool:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Home page - list all pages."""
-    all_pages = await storage.list_pages_with_metadata()
+    all_pages = await page_cache.get_pages_metadata()
+    # Root pages: no `parent` frontmatter (leaf/sub-pages are navigable via hierarchy)
+    root_pages = [p for p in all_pages if not p.metadata.model_extra.get("parent")]
     recent_pages = sorted(
-        [p for p in all_pages if p.metadata.modified],
+        [p for p in root_pages if p.metadata.modified],
         key=lambda p: p.metadata.modified,
         reverse=True,
     )[:10]
-    page_tree = await get_page_tree()
+    page_tree = await page_cache.get_page_tree()
     return templates.TemplateResponse(
         request,
         "page/list.html",
         get_context(
-            all_pages=all_pages, recent_pages=recent_pages, page_tree=page_tree
+            all_pages=root_pages,
+            sub_page_count=len(all_pages) - len(root_pages),
+            recent_pages=recent_pages,
+            page_tree=page_tree,
         ),
     )
 
 
 @app.get("/page/{name:path}/edit", response_class=HTMLResponse)
-async def edit_page(request: Request, name: str):
+async def edit_page(request: Request, name: str, template: str = ""):
     """Edit page form."""
     _validate_page_name(name)
     page = await storage.get_page(name)
 
     if page is None:
-        # New page
         page = Page(name=name, content="", exists=False)
-        raw_content = ""
+        if template:
+            template_content = await storage.get_raw_content(template)
+            if template_content:
+                raw_content = FRONTMATTER_PATTERN.sub("", template_content)
+            else:
+                raw_content = ""
+        else:
+            raw_content = ""
     else:
         raw_content = await storage.get_raw_content(name) or ""
 
@@ -338,7 +523,9 @@ async def edit_page(request: Request, name: str):
         request,
         "page/edit.html",
         get_context(
-            page=page, raw_content=raw_content, page_tree=await get_page_tree()
+            page=page,
+            raw_content=raw_content,
+            page_tree=await page_cache.get_page_tree(),
         ),
     )
 
@@ -353,9 +540,155 @@ async def raw_page(name: str):
     return {"content": page.content}
 
 
+@app.get("/page/{name:path}/history", response_class=HTMLResponse)
+async def page_history(request: Request, name: str, page: int = 1):
+    """Show revision history for a page."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    per_page = 25
+    offset = (page - 1) * per_page
+    revisions = store.list_revisions(name, limit=per_page, offset=offset)
+    total = store.revision_count(name)
+    return templates.TemplateResponse(
+        request,
+        "page/history.html",
+        get_context(
+            page_name=name,
+            revisions=revisions,
+            total=total,
+            page=page,
+            per_page=per_page,
+            page_tree=await page_cache.get_page_tree(),
+        ),
+    )
+
+
+@app.get("/page/{name:path}/history/{rev:int}", response_class=HTMLResponse)
+async def page_revision(request: Request, name: str, rev: int):
+    """Show a specific past revision of a page."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    revision = store.get_revision(name, rev)
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    html_content = parse_wiki_content(revision.content)
+
+    total = store.revision_count(name)
+    prev_rev = rev - 1 if rev > 1 else None
+    next_rev = rev + 1 if rev < total else None
+
+    return templates.TemplateResponse(
+        request,
+        "page/revision.html",
+        get_context(
+            page_name=name,
+            revision=revision,
+            html_content=html_content,
+            prev_rev=prev_rev,
+            next_rev=next_rev,
+            page_tree=await page_cache.get_page_tree(),
+        ),
+    )
+
+
+@app.post("/page/{name:path}/restore/{rev:int}")
+async def restore_page(name: str, rev: int):
+    """Restore a page to a specific revision."""
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+    old_revision = store.get_revision(name, rev)
+    if old_revision is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    await storage.save_page(name, old_revision.content)
+    latest = store.get_latest_revision(name)
+    if latest is not None:
+        with store._conn:
+            store._conn.execute(
+                "UPDATE revisions SET operation = 'restore', message = ? WHERE id = ?",
+                (f"Restored from revision {rev}", latest.id),
+            )
+    log.info("page_restored", page=name, revision=rev)
+    return RedirectResponse(
+        url=f"/page/{name.replace(' ', '_')}?toast=restored", status_code=302
+    )
+
+
+@app.get("/page/{name:path}/diff/{rev_range}", response_class=HTMLResponse)
+async def page_diff(request: Request, name: str, rev_range: str):
+    """Show the diff between two revisions.
+
+    Format: 'A..B', or a single rev N (diffs N-1..N).
+    """
+    _validate_page_name(name)
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail="History is disabled")
+    store = get_revision_store()
+
+    if ".." in rev_range:
+        parts = rev_range.split("..", 1)
+        try:
+            rev_a, rev_b = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid revision range")
+    else:
+        try:
+            rev_b = int(rev_range)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid revision number")
+        rev_a = rev_b - 1
+
+    if rev_a < 1:
+        raise HTTPException(
+            status_code=400, detail="No earlier revision to compare against"
+        )
+
+    revision_a = store.get_revision(name, rev_a)
+    revision_b = store.get_revision(name, rev_b)
+    if revision_a is None or revision_b is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    diff = store.diff_revisions(name, rev_a, rev_b)
+    return templates.TemplateResponse(
+        request,
+        "page/diff.html",
+        get_context(
+            page_name=name,
+            rev_a=rev_a,
+            rev_b=rev_b,
+            revision_a=revision_a,
+            revision_b=revision_b,
+            diff=diff,
+            page_tree=await page_cache.get_page_tree(),
+        ),
+    )
+
+
 @app.get("/page/{name:path}", response_class=HTMLResponse)
 async def view_page(request: Request, name: str):
     """View a wiki page."""
+    # 301 redirect for legacy slash-path URLs (e.g. /page/Docs/Getting_Started →
+    # /page/Getting_Started).
+    # Only handles one-level-deep legacy paths; deeper nesting is left to fall through.
+    if "/" in name:
+        parts = name.split("/")
+        if len(parts) == 2:
+            slug = parts[1]
+            if slug:
+                try:
+                    _validate_page_name(slug)
+                except HTTPException:
+                    slug = ""
+                if slug and storage._get_path(slug).exists():
+                    qs = request.url.query
+                    target = f"/page/{slug}" + (f"?{qs}" if qs else "")
+                    return RedirectResponse(url=target, status_code=301)
     _validate_page_name(name)
     page = await storage.get_page(name)
 
@@ -366,10 +699,11 @@ async def view_page(request: Request, name: str):
     log.info("page_viewed", page=name)
     page_views_total.labels(page=name).inc()
 
-    # Get backlinks and frontmatter metadata from graph engine first so the
-    # TaskStatus macro can use them during parsing.
+    # Get backlinks, outlinks and frontmatter metadata from graph engine first so
+    # the TaskStatus macro can use them during parsing.
     backlinks: list[str] = []
-    frontmatter: dict[str, list[str]] = {}
+    outlinks: list[str] = []
+    frontmatter: dict = {}
     engine = get_engine()
     if engine is not None:
         try:
@@ -377,49 +711,103 @@ async def view_page(request: Request, name: str):
         except Exception:
             pass
         try:
+            outlinks = sorted(engine.get_outlinks(name))
+        except Exception:
+            pass
+        try:
             frontmatter = engine.get_metadata(name) or {}
         except Exception:
             pass
 
+    # page_metadata is passed to the parser for macro context.  It starts from
+    # the engine result but falls back to storage-parsed model_extra when the
+    # engine hasn't indexed this page yet (new page, or no graph_core).
+    # `frontmatter` is kept engine-only so the Properties card only appears
+    # when the engine is available.
+    _storage_extra = (
+        dict(page.metadata.model_extra)
+        if hasattr(page.metadata, "model_extra") and page.metadata.model_extra
+        else {}
+    )
+    page_metadata: dict = frontmatter if frontmatter else _storage_extra
+
     # For epic pages, fetch child tasks so <<EpicStatus>> can render them.
-    page_type = frontmatter.get("type", "")
+    page_type = page_metadata.get("type", "")
     if isinstance(page_type, list):
         page_type = page_type[0] if page_type else ""
     if page_type == "epic":
-        all_pages = await storage.list_pages_with_metadata()
+        all_pages_for_epic = await page_cache.get_pages_metadata()
         child_tasks = []
-        for p in all_pages:
+        for p in all_pages_for_epic:
             if p.metadata is None:
                 continue
             meta = p.metadata.model_dump()
-            parent_epic = (
-                meta.get("parent_epic") or p.metadata.model_extra.get("parent_epic")
-                if hasattr(p.metadata, "model_extra")
-                else None
+            extra = p.metadata.model_extra if hasattr(p.metadata, "model_extra") else {}
+            # Tasks link to an epic via parent_task (factory standard) or parent_epic.
+            parent_ref = (
+                meta.get("parent_task")
+                or extra.get("parent_task")
+                or meta.get("parent_epic")
+                or extra.get("parent_epic")
             )
-            if isinstance(parent_epic, list):
-                parent_epic = parent_epic[0] if parent_epic else None
-            if parent_epic == name or p.name.startswith(name + "/"):
-                status = (
-                    meta.get("status")
-                    or (
-                        p.metadata.model_extra.get("status")
-                        if hasattr(p.metadata, "model_extra")
-                        else None
-                    )
-                    or "planned"
-                )
+            if isinstance(parent_ref, list):
+                parent_ref = parent_ref[0] if parent_ref else None
+            if parent_ref == name or p.name.startswith(name + "/"):
+                status = meta.get("status") or extra.get("status") or "planned"
                 if isinstance(status, list):
                     status = status[0] if status else "planned"
                 child_tasks.append({"name": p.name, "title": p.title, "status": status})
-        frontmatter["_child_tasks"] = child_tasks
+        page_metadata["_child_tasks"] = child_tasks
+
+    # Fetch recent pages for <<RecentChanges>> macro.
+    all_pages_for_recent = await page_cache.get_pages_metadata()
+    _engine = get_engine()
+    if _engine is not None:
+        # Use filesystem mtime from Rust engine (in-memory, covers all pages).
+        # getattr guard: last_modified was added in PR5; old images lack it.
+        _ts: dict[str, float] = {
+            p.name: lm
+            for p in _engine.list_pages()
+            if (lm := getattr(p, "last_modified", None)) is not None
+        }
+        if _ts:
+            recent_pages = sorted(
+                all_pages_for_recent,
+                key=lambda p: _ts.get(p.name, 0.0),
+                reverse=True,
+            )
+        else:
+            recent_pages = sorted(
+                [p for p in all_pages_for_recent if p.metadata.modified],
+                key=lambda p: p.metadata.modified,
+                reverse=True,
+            )
+    else:
+        recent_pages = sorted(
+            [p for p in all_pages_for_recent if p.metadata.modified],
+            key=lambda p: p.metadata.modified,
+            reverse=True,
+        )
+
+    # Fetch all page contents for <<Include>> macro.
+    page_contents: dict[str, str] = {}
+    if "<<Include(" in page.content:
+        all_page_names = await storage.list_pages()
+        pages = await asyncio.gather(*(storage.get_page(n) for n in all_page_names))
+        page_contents = {
+            n: p.content for n, p in zip(all_page_names, pages) if p is not None
+        }
 
     # Parse content with wiki links, TOC, and page context for macros.
     html_content, toc_html = parse_wiki_content_with_toc(
         page.content,
         page_exists=page_exists_sync,
         page_name=name,
-        page_metadata=frontmatter,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
+        page_contents=page_contents,
+        page_modified=page.metadata.modified,
+        pages=all_pages_for_recent,
     )
 
     return templates.TemplateResponse(
@@ -430,8 +818,93 @@ async def view_page(request: Request, name: str):
             html_content=html_content,
             toc_html=toc_html,
             backlinks=backlinks,
+            outlinks=outlinks,
             frontmatter=frontmatter,
-            page_tree=await get_page_tree(),
+            page_tree=await page_cache.get_page_tree(),
+        ),
+    )
+
+
+@app.get("/api/pages/{name:path}/fragment", response_class=HTMLResponse)
+async def page_content_fragment(name: str, request: Request):
+    """Return rendered inner content of a page for HTMX MetaTable refresh.
+
+    Replaces only the innerHTML of ``#page-content``; does not return a full
+    page layout.  Called by the ``metatable-refresh`` HTMX trigger wired to
+    the ``/ws/graph`` ``page_updated`` WebSocket event.
+    """
+    _validate_page_name(name)
+    page = await storage.get_page(name)
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    frontmatter: dict = {}
+    engine = get_engine()
+    if engine is not None:
+        try:
+            frontmatter = engine.get_metadata(name) or {}
+        except Exception:
+            pass
+
+    _storage_extra = (
+        dict(page.metadata.model_extra)
+        if hasattr(page.metadata, "model_extra") and page.metadata.model_extra
+        else {}
+    )
+    page_metadata: dict = frontmatter if frontmatter else _storage_extra
+
+    all_pages_for_recent = await page_cache.get_pages_metadata()
+    if engine is not None:
+        _ts2: dict[str, float] = {
+            p.name: lm
+            for p in engine.list_pages()
+            if (lm := getattr(p, "last_modified", None)) is not None
+        }
+        if _ts2:
+            recent_pages = sorted(
+                all_pages_for_recent,
+                key=lambda p: _ts2.get(p.name, 0.0),
+                reverse=True,
+            )
+        else:
+            recent_pages = sorted(
+                [p for p in all_pages_for_recent if p.metadata.modified],
+                key=lambda p: p.metadata.modified,
+                reverse=True,
+            )
+    else:
+        recent_pages = sorted(
+            [p for p in all_pages_for_recent if p.metadata.modified],
+            key=lambda p: p.metadata.modified,
+            reverse=True,
+        )
+
+    page_contents: dict[str, str] = {}
+    if "<<Include(" in page.content:
+        all_page_names = await storage.list_pages()
+        pages = await asyncio.gather(*(storage.get_page(n) for n in all_page_names))
+        page_contents = {
+            n: p.content for n, p in zip(all_page_names, pages) if p is not None
+        }
+
+    html_content, _ = parse_wiki_content_with_toc(
+        page.content,
+        page_exists=page_exists_sync,
+        page_name=name,
+        page_metadata=page_metadata,
+        recent_pages=recent_pages,
+        page_contents=page_contents,
+        page_modified=page.metadata.modified,
+        pages=all_pages_for_recent,
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "partials/page_content_fragment.html",
+        get_context(
+            page=page,
+            html_content=html_content,
+            frontmatter=frontmatter,
         ),
     )
 
@@ -443,6 +916,7 @@ async def delete_page(name: str):
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail="Page not found")
+    page_cache.hard_invalidate()
     log.info("page_deleted", page=name)
     page_writes_total.labels(operation="delete").inc()
     return RedirectResponse(url="/?toast=deleted", status_code=302)
@@ -452,20 +926,61 @@ async def delete_page(name: str):
 async def save_page(request: Request, name: str, content: str = Form("")):
     """Save page content."""
     _validate_page_name(name)
+
+    # C1: status changes on task/epic pages must go through the state machine so
+    # webhooks fire and invalid transitions are rejected.
+    pending_transition: tuple[str, str] | None = None
+    if settings.factory_enabled:
+        old_page = await storage.get_page(name)
+        if old_page is not None:
+            old_extras = old_page.metadata.model_extra or {}
+            old_status = old_extras.get("status")
+            old_type = old_extras.get("type")
+            if old_status and old_type in {"task", "epic"}:
+                new_meta, new_body = storage._parse_frontmatter(content)
+                new_status = (new_meta.model_extra or {}).get("status")
+                if new_status and new_status != old_status:
+                    allowed = TASK_TRANSITIONS.get(old_status, [])
+                    if new_status not in allowed:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Cannot transition from '{old_status}' to "
+                                f"'{new_status}'. Allowed: {allowed}"
+                            ),
+                        )
+                    # Revert status in content — transition_task() will write it
+                    setattr(new_meta, "status", old_status)
+                    content = storage._create_frontmatter(new_meta) + new_body
+                    pending_transition = (old_status, new_status)
+
     page = await storage.save_page(name, content)
+    page_cache.hard_invalidate()
     log.info("page_saved", page=name)
     page_writes_total.labels(operation="save").inc()
+
+    if pending_transition:
+        _, new_status = pending_transition
+        await _machine_transition(storage, name, new_status)
+        updated = await storage.get_page(name)
+        if updated:
+            page = updated
 
     # Check if this is an HTMX request
     if request.headers.get("HX-Request"):
         # Return just the content area for HTMX swap
         html_content = parse_wiki_content(page.content, page_exists=page_exists_sync)
         backlinks: list[str] = []
+        outlinks_htmx: list[str] = []
         frontmatter: dict[str, list[str]] = {}
         engine = get_engine()
         if engine is not None:
             try:
                 backlinks = sorted(engine.get_backlinks(name))
+            except Exception:
+                pass
+            try:
+                outlinks_htmx = sorted(engine.get_outlinks(name))
             except Exception:
                 pass
             try:
@@ -479,6 +994,7 @@ async def save_page(request: Request, name: str, content: str = Form("")):
                 page=page,
                 html_content=html_content,
                 backlinks=backlinks,
+                outlinks=outlinks_htmx,
                 frontmatter=frontmatter,
             ),
         )
@@ -494,10 +1010,24 @@ async def save_page(request: Request, name: str, content: str = Form("")):
 # ========== Editor API ==========
 
 
+@app.get("/api/pages/{name:path}/preview", response_class=HTMLResponse)
+async def api_page_preview(name: str):
+    """Render a page for hover card preview."""
+    page = await storage.get_page(name)
+    if page is None:
+        return HTMLResponse("")
+    return HTMLResponse(page.content)
+
+
 @app.post("/api/preview", response_class=HTMLResponse)
 async def api_preview(content: str = Form("")):
     """Render markdown preview for the editor."""
-    html = parse_wiki_content(content, page_exists=page_exists_sync)
+    recent_pages = await page_cache.get_pages_metadata()
+    html = parse_wiki_content(
+        content,
+        page_exists=page_exists_sync,
+        recent_pages=recent_pages,
+    )
     return HTMLResponse(html)
 
 
@@ -534,9 +1064,14 @@ async def api_autocomplete(request: Request, q: str = ""):
     """Return matching page names for wiki link autocomplete."""
     if not q:
         return HTMLResponse("")
-    pages = await storage.list_pages()
+    engine = get_engine()
+    if engine is not None:
+        page_infos = engine.list_pages()
+        all_names = [p.name for p in page_infos]
+    else:
+        all_names = await storage.list_pages()
     q_lower = q.lower()
-    matches = [p for p in pages if q_lower in p.lower()][:10]
+    matches = [p for p in all_names if q_lower in p.lower()][:10]
     items = "".join(
         f'<li class="autocomplete-item" data-value="{name}">{name}</li>'
         for name in matches
@@ -576,14 +1111,19 @@ async def search_page(request: Request, q: str = "", tag: str = ""):
     return templates.TemplateResponse(
         request,
         "search.html",
-        get_context(results=results, query=q, tag=tag, page_tree=await get_page_tree()),
+        get_context(
+            results=results,
+            query=q,
+            tag=tag,
+            page_tree=await page_cache.get_page_tree(),
+        ),
     )
 
 
 @app.get("/tags", response_class=HTMLResponse)
 async def tags_page(request: Request):
     """Tag index page with counts."""
-    pages = await storage.list_pages_with_metadata()
+    pages = await page_cache.get_pages_metadata()
     tag_counts: dict[str, int] = {}
     for page in pages:
         for tag in page.metadata.tags:
@@ -592,7 +1132,7 @@ async def tags_page(request: Request):
     return templates.TemplateResponse(
         request,
         "tags.html",
-        get_context(tags=tags_sorted, page_tree=await get_page_tree()),
+        get_context(tags=tags_sorted, page_tree=await page_cache.get_page_tree()),
     )
 
 
@@ -605,19 +1145,111 @@ async def graph_view(request: Request):
     return templates.TemplateResponse(
         request,
         "graph.html",
-        get_context(page_tree=await get_page_tree()),
+        get_context(page_tree=await page_cache.get_page_tree()),
     )
 
 
+@app.get("/factory/live", response_class=HTMLResponse)
+async def factory_live(request: Request):
+    """Factory command-center dashboard."""
+    if not settings.factory_enabled:
+        raise HTTPException(status_code=404, detail="Factory not enabled")
+    return templates.TemplateResponse(
+        request,
+        "factory_live.html",
+        get_context(page_tree=None),
+    )
+
+
+@app.get("/api/factory/tasks")
+async def factory_tasks(
+    status: str | None = None,
+    storage: FileStorage = Depends(get_storage),
+):
+    """Return factory tasks (all statuses or filtered) without requiring an API key.
+
+    The dashboard JS calls this instead of /api/v1/tasks directly so that
+    the factory_api_key auth requirement doesn't block unauthenticated browsers.
+    """
+    statuses_filter = {status} if status else None
+    pages = await page_cache.get_pages_metadata()
+    results = []
+    for page in pages:
+        extra = page.metadata.model_extra or {}
+        if extra.get("type") not in ("task", "epic"):
+            continue
+        if extra.get("assignee") != "factory":
+            continue
+        if statuses_filter and extra.get("status") not in statuses_filter:
+            continue
+        results.append({"name": page.name, "metadata": page.metadata.model_dump()})
+    return results
+
+
+@app.get("/api/factory/activity")
+async def factory_activity():
+    """Return the server-side activity ring buffer for the factory dashboard."""
+    if not settings.factory_enabled:
+        raise HTTPException(status_code=404, detail="Factory not enabled")
+    from meshwiki.core.factory_ws_manager import factory_ws_manager
+
+    return factory_ws_manager.get_activity()
+
+
+@app.websocket("/ws/factory")
+async def ws_factory(websocket: WebSocket):
+    """Push-based factory event stream for the live dashboard."""
+    if not settings.factory_enabled:
+        await websocket.close(code=1008)
+        return
+    from meshwiki.core.factory_ws_manager import factory_ws_manager
+
+    await websocket.accept()
+    client_id, queue = factory_ws_manager.connect()
+    try:
+        while True:
+            msg = await queue.get()
+            await websocket.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        factory_ws_manager.disconnect(client_id)
+
+
+@app.get("/api/factory/status")
+async def factory_status_proxy():
+    """Proxy the orchestrator /status endpoint for the dashboard."""
+    if not settings.factory_enabled or not settings.factory_webhook_url:
+        raise HTTPException(status_code=404, detail="Factory not enabled")
+    import httpx
+
+    orchestrator_base = settings.factory_webhook_url.removesuffix("/webhook")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{orchestrator_base}/status")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        return {
+            "bots": [],
+            "active_graphs": [],
+            "resources": {},
+            "error": "orchestrator unreachable",
+        }
+
+
 @app.get("/api/graph")
-async def api_graph():
+async def api_graph(request: Request):
     """Return full graph as JSON for visualization."""
+    if settings.auth_enabled and not request.session.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Authentication required")
     engine = get_engine()
     if engine is None:
         return {"nodes": [], "links": []}
 
     pages = engine.list_pages()
     nodes = []
+    node_ids: set[str] = set()
     for p in pages:
         backlinks = engine.get_backlinks(p.name)
         tags = p.metadata.get("tags", [])
@@ -628,20 +1260,46 @@ async def api_graph():
                 "backlinks_count": len(backlinks),
             }
         )
+        node_ids.add(p.name)
 
     links = []
+    missing_targets: set[str] = set()
     for page in pages:
         for target in engine.get_outlinks(page.name):
             links.append({"source": page.name, "target": target})
+            # list_pages excludes link-only stubs, so a link target that is
+            # not a real page must still be emitted as a node (flagged missing)
+            # or D3's forceLink would fail on the dangling reference.
+            if target not in node_ids:
+                missing_targets.add(target)
 
-    # Add implicit parent→child edges for subpages (pages with "/" in name)
+    for target in sorted(missing_targets):
+        nodes.append(
+            {
+                "id": target,
+                "tags": [],
+                "backlinks_count": len(engine.get_backlinks(target)),
+                "missing": True,
+            }
+        )
+
+    # Add parent→child edges from declared children: frontmatter.
+    # Normalise underscore→space so children: [Foo_Bar] matches stored page 'Foo Bar'.
+    def _ref_graph(name: str) -> str:
+        return name.replace("_", " ")
+
     page_ids = {p.name for p in pages}
+    page_ids_norm = {_ref_graph(n): n for n in page_ids}  # normalised → canonical
     for page in pages:
-        if "/" in page.name:
-            parent_name = page.name.rsplit("/", 1)[0]
-            if parent_name in page_ids:
+        meta = page.metadata
+        children = (
+            meta.children if hasattr(meta, "children") else meta.get("children", [])
+        )
+        for child_name in children:
+            canonical = page_ids_norm.get(_ref_graph(child_name))
+            if canonical:
                 links.append(
-                    {"source": parent_name, "target": page.name, "type": "parent"}
+                    {"source": page.name, "target": canonical, "type": "parent"}
                 )
 
     return {"nodes": nodes, "links": links}
@@ -650,6 +1308,11 @@ async def api_graph():
 @app.websocket("/ws/graph")
 async def ws_graph(websocket: WebSocket):
     """WebSocket endpoint for real-time graph events."""
+    if settings.auth_enabled:
+        session = websocket.scope.get("session", {})
+        if not session.get("authenticated"):
+            await websocket.close(code=1008)
+            return
     await websocket.accept()
     client_id, queue = manager.connect()
     try:
@@ -668,10 +1331,26 @@ async def ws_terminal(websocket: WebSocket, name: str):
 
     Replays the full buffer to late-joining clients, then streams new chunks
     as they arrive.  Multiple concurrent connections are supported.
+
+    When ``auth_enabled`` is True the client must hold a valid session cookie
+    (obtained via the normal /login flow).  Unauthenticated connections are
+    rejected with close code 1008 (policy violation) before any output is sent.
     """
-    from meshwiki.core.terminal_sessions import get_session, subscribe, unsubscribe
+    from meshwiki.core.terminal_sessions import (
+        get_session,
+        resolve_session_name,
+        subscribe,
+        unsubscribe,
+    )
+
+    if settings.auth_enabled:
+        session = websocket.scope.get("session", {})
+        if not session.get("authenticated"):
+            await websocket.close(code=1008)
+            return
 
     await websocket.accept()
+    name = resolve_session_name(name)
     session = get_session(name)
     if session is None:
         await websocket.send_text(
@@ -718,7 +1397,7 @@ async def login_page(request: Request):
     if request.session.get("authenticated"):
         return RedirectResponse(url="/", status_code=302)
     return templates.TemplateResponse(
-        request, "login.html", get_context(page_tree=await get_page_tree())
+        request, "login.html", get_context(page_tree=await page_cache.get_page_tree())
     )
 
 
@@ -801,8 +1480,20 @@ async def health_ready():
 
 
 @app.get("/metrics")
-async def metrics_endpoint():
-    """Prometheus metrics endpoint — exempt from auth."""
+async def metrics_endpoint(request: Request):
+    """Prometheus metrics endpoint.
+
+    When ``auth_enabled`` is True, requires either a valid session cookie or
+    an ``Authorization: Bearer <MESHWIKI_API_KEY>`` header so Prometheus
+    scrapers can authenticate without a browser session.
+    """
+    if settings.auth_enabled:
+        authed = request.session.get("authenticated")
+        if not authed:
+            auth_header = request.headers.get("Authorization", "")
+            token = auth_header.removeprefix("Bearer ").strip()
+            if not token or not secrets.compare_digest(token, settings.factory_api_key):
+                raise HTTPException(status_code=401, detail="Authentication required")
     engine = get_engine()
     if engine is not None:
         try:

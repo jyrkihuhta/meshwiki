@@ -1,13 +1,18 @@
 """Storage abstraction for wiki pages."""
 
 import re
+import uuid as uuid_mod
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from meshwiki.core.models import Page, PageMetadata
+
+if TYPE_CHECKING:
+    from meshwiki.core.revision_store import RevisionStore
 
 
 class Storage(ABC):
@@ -78,6 +83,15 @@ class Storage(ABC):
         """
         ...
 
+    @abstractmethod
+    async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
+        """Move a page to a new name/location.
+
+        Returns the page at its new location, or None if the source page
+        does not exist.
+        """
+        ...
+
 
 class FileStorage(Storage):
     """File-based storage implementation.
@@ -91,9 +105,10 @@ class FileStorage(Storage):
         re.DOTALL,
     )
 
-    def __init__(self, base_path: Path):
+    def __init__(self, base_path: Path, revision_store: "RevisionStore | None" = None):
         self.base_path = base_path
         self.base_path.mkdir(parents=True, exist_ok=True)
+        self._revisions = revision_store
 
     def _get_path(self, name: str) -> Path:
         """Get full path for a page.
@@ -173,15 +188,34 @@ class FileStorage(Storage):
         # Parse any frontmatter from the content
         metadata, body = self._parse_frontmatter(content)
 
-        # Update modification time
+        # Carry forward uuid and created from the file on disk when the incoming
+        # content has no frontmatter (e.g. programmatic saves without frontmatter).
+        if path.exists() and (not metadata.created or not metadata.uuid):
+            existing_raw = path.read_text(encoding="utf-8")
+            existing_meta, _ = self._parse_frontmatter(existing_raw)
+            if not metadata.created:
+                metadata.created = existing_meta.created
+            if not metadata.uuid:
+                metadata.uuid = existing_meta.uuid
+
+        # Update modification time; assign stable UUID on first save.
         now = datetime.now()
         if not metadata.created:
             metadata.created = now
+            if not metadata.uuid:
+                metadata.uuid = str(uuid_mod.uuid4())
         metadata.modified = now
 
         # Write with frontmatter
         frontmatter = self._create_frontmatter(metadata)
-        path.write_text(frontmatter + body, encoding="utf-8")
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        if self._revisions is not None:
+            operation = (
+                "create" if self._revisions.revision_count(name) == 0 else "edit"
+            )
+            self._revisions.record(name, raw, operation=operation)
 
         return Page(
             name=name,
@@ -203,6 +237,8 @@ class FileStorage(Storage):
                     parent = parent.parent
                 else:
                     break
+            if self._revisions is not None:
+                self._revisions.delete_page_history(name)
             return True
         return False
 
@@ -272,8 +308,8 @@ class FileStorage(Storage):
         content_matches.sort(key=lambda x: x["name"].lower())
         return name_matches + content_matches
 
-    async def list_pages_with_metadata(self) -> list[Page]:
-        """List all pages with full metadata."""
+    def list_pages_with_metadata_sync(self) -> list[Page]:
+        """Scan pages on disk synchronously; call it via run_in_executor."""
         pages = []
         for path in self.base_path.glob("**/*.md"):
             name = self._path_to_name(path)
@@ -281,6 +317,10 @@ class FileStorage(Storage):
             metadata, body = self._parse_frontmatter(raw)
             pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
         return sorted(pages, key=lambda p: p.name.lower())
+
+    async def list_pages_with_metadata(self) -> list[Page]:
+        """List all pages with full metadata."""
+        return self.list_pages_with_metadata_sync()
 
     async def search_by_tag(self, tag: str) -> list[Page]:
         """Filter pages by tag."""
@@ -325,7 +365,13 @@ class FileStorage(Storage):
 
         # Write back
         frontmatter = self._create_frontmatter(metadata)
-        path.write_text(frontmatter + body, encoding="utf-8")
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        if self._revisions is not None:
+            self._revisions.record(
+                name, raw, operation="frontmatter_update", message=f"Updated {field}"
+            )
 
         return Page(
             name=name,
@@ -333,3 +379,70 @@ class FileStorage(Storage):
             metadata=metadata,
             exists=True,
         )
+
+    async def patch_frontmatter(
+        self, name: str, fields: dict[str, str | None]
+    ) -> "Page | None":
+        """Update multiple frontmatter fields without touching the page body.
+
+        Pass ``None`` as a value to remove an extra field.  Known metadata
+        fields (``title``, ``tags``) follow the same coercion rules as
+        ``update_frontmatter_field``.
+        """
+        path = self._get_path(name)
+        if not path.exists():
+            return None
+
+        raw = path.read_text(encoding="utf-8")
+        metadata, body = self._parse_frontmatter(raw)
+
+        for field, value in fields.items():
+            if field == "tags":
+                metadata.tags = (
+                    [t.strip() for t in value.split(",") if t.strip()] if value else []
+                )
+            elif field == "children":
+                # children is a list field — split on commas or newlines
+                if value:
+                    metadata.children = [
+                        v.strip() for v in re.split(r"[,\n]", value) if v.strip()
+                    ]
+                else:
+                    metadata.children = []
+            elif field == "title":
+                metadata.title = value if value else None
+            elif value is not None:
+                setattr(metadata, field, value)
+            else:
+                extras = getattr(metadata, "__pydantic_extra__", None)
+                if extras and field in extras:
+                    del extras[field]
+
+        metadata.modified = datetime.now()
+
+        frontmatter = self._create_frontmatter(metadata)
+        raw = frontmatter + body
+        path.write_text(raw, encoding="utf-8")
+
+        field_names = ", ".join(fields)
+        if self._revisions is not None:
+            self._revisions.record(
+                name,
+                raw,
+                operation="frontmatter_update",
+                message=f"Updated {field_names}",
+            )
+
+        return Page(name=name, content=body, metadata=metadata, exists=True)
+
+    async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
+        """Move a page to a new name/location."""
+        old_path = self._get_path(old_name)
+        if not old_path.exists():
+            return None
+        new_path = self._get_path(new_name)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.rename(new_path)
+        if self._revisions is not None:
+            self._revisions.rename_history(old_name, new_name)
+        return await self.get_page(new_name)

@@ -5,12 +5,19 @@ connected WebSocket clients via per-client asyncio queues.
 """
 
 import asyncio
-import logging
+import time
 from typing import Any
 
+from meshwiki.core import page_cache
 from meshwiki.core.graph import get_engine
+from meshwiki.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
+
+# Minimum seconds between broadcasts of the same page_updated event.
+# Prevents event floods (e.g. inotify IN_ATTRIB storms on Docker bind mounts)
+# from spamming fragment refreshes in connected browsers.
+_PAGE_EVENT_DEDUP_SECS = 60.0
 
 
 def _event_to_dict(event: Any) -> dict[str, Any]:
@@ -32,6 +39,7 @@ class ConnectionManager:
         self._next_id: int = 0
         self._poll_task: asyncio.Task | None = None
         self._running: bool = False
+        self._last_page_broadcast: dict[str, float] = {}
 
     def connect(self) -> tuple[int, asyncio.Queue[dict[str, Any]]]:
         """Register a new client. Returns (client_id, queue)."""
@@ -39,20 +47,14 @@ class ConnectionManager:
         self._next_id += 1
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
         self._clients[client_id] = queue
-        logger.info(
-            "WebSocket client %d connected (%d total)",
-            client_id,
-            len(self._clients),
-        )
+        log.info("ws_client_connected", client_id=client_id, total=len(self._clients))
         return client_id, queue
 
     def disconnect(self, client_id: int) -> None:
         """Unregister a client."""
         self._clients.pop(client_id, None)
-        logger.info(
-            "WebSocket client %d disconnected (%d total)",
-            client_id,
-            len(self._clients),
+        log.info(
+            "ws_client_disconnected", client_id=client_id, total=len(self._clients)
         )
 
     @property
@@ -75,7 +77,17 @@ class ConnectionManager:
             self._poll_task = None
 
     async def _poll_loop(self, interval: float) -> None:
-        """Poll engine for events and broadcast to all clients."""
+        """Poll engine for events and broadcast to all clients.
+
+        The dedup check below gates ``page_cache.invalidate()`` as well as
+        the broadcast — not just the broadcast, as before. On Docker bind
+        mounts the graph engine's inotify watch can IN_ATTRIB-storm (same
+        page, hundreds of events/sec, no real content change); previously
+        every single one called invalidate(), and since a cache rebuild scans
+        every page on disk (see page_cache.py), a storm meant the rebuild
+        kept restarting the instant it finished — permanent high CPU with no
+        real change ever landing. See PLAN.md M2, 2026-09-05 incident.
+        """
         while self._running:
             try:
                 engine = get_engine()
@@ -83,20 +95,31 @@ class ConnectionManager:
                     events = engine.poll_events()
                     for event in events:
                         msg = _event_to_dict(event)
+                        if msg.get("type") == "page_updated":
+                            page = msg.get("page", "")
+                            now = time.monotonic()
+                            if (
+                                now - self._last_page_broadcast.get(page, 0.0)
+                                < _PAGE_EVENT_DEDUP_SECS
+                            ):
+                                continue
+                            self._last_page_broadcast[page] = now
+                        page_cache.invalidate()
                         await self._broadcast(msg)
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("Error polling graph events")
+                log.exception("ws_poll_error")
             await asyncio.sleep(interval)
 
     async def _broadcast(self, msg: dict[str, Any]) -> None:
-        """Send a message to all connected clients."""
+        """Send a message to all connected clients. Dedup happens in the
+        caller (_poll_loop) so it also gates page_cache.invalidate()."""
         for client_id, queue in list(self._clients.items()):
             try:
                 queue.put_nowait(msg)
             except asyncio.QueueFull:
-                logger.warning("Client %d queue full, dropping event", client_id)
+                log.warning("ws_queue_full", client_id=client_id)
 
 
 # Module-level singleton

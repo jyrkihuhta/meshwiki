@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page_name }} — Revision {{ revision.revision }} - {{ app_title }}{% endblock %}
+
+{% block content %}
+<article class="page">
+    <div class="page-header-wrapper">
+        <header class="page-header">
+            <div class="page-header-left">
+                <nav class="breadcrumb" aria-label="breadcrumb">
+                    <a href="/">Home</a>
+                    /
+                    <a href="/page/{{ page_name.replace(' ', '_') }}">{{ page_name }}</a>
+                    /
+                    <a href="/page/{{ page_name.replace(' ', '_') }}/history">History</a>
+                    /
+                    <span>Revision {{ revision.revision }}</span>
+                </nav>
+                <h1>{{ page_name }} <span class="revision-label">— Revision {{ revision.revision }}</span></h1>
+            </div>
+            <div class="page-actions">
+                <a href="/page/{{ page_name.replace(' ', '_') }}/history" class="btn">History</a>
+                {% if prev_rev %}
+                <a href="/page/{{ page_name.replace(' ', '_') }}/diff/{{ revision.revision - 1 }}..{{ revision.revision }}" class="btn">Diff</a>
+                {% endif %}
+                <form method="post"
+                      action="/page/{{ page_name.replace(' ', '_') }}/restore/{{ revision.revision }}"
+                      onsubmit="return confirm('Restore &quot;{{ page_name }}&quot; to this revision?');"
+                      style="display:inline">
+                    <button type="submit" class="btn btn-primary">Restore this revision</button>
+                </form>
+            </div>
+        </header>
+    </div>
+
+    <div class="revision-meta">
+        <span class="revision-meta-item">
+            <strong>Date:</strong>
+            <time datetime="{{ revision.timestamp.isoformat() }}"
+                  title="{{ revision.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}">{{ revision.timestamp | timeago }}</time>
+        </span>
+        <span class="revision-meta-item">
+            <strong>Type:</strong>
+            <span class="history-badge history-badge--{{ revision.operation }}">{{ revision.operation_label }}</span>
+        </span>
+        {% if revision.message %}
+        <span class="revision-meta-item">
+            <strong>Note:</strong> {{ revision.message }}
+        </span>
+        {% endif %}
+    </div>
+
+    <nav class="revision-nav">
+        {% if prev_rev %}
+        <a href="/page/{{ page_name.replace(' ', '_') }}/history/{{ prev_rev }}" class="btn btn-small">&laquo; Revision {{ prev_rev }}</a>
+        {% endif %}
+        {% if next_rev %}
+        <a href="/page/{{ page_name.replace(' ', '_') }}/history/{{ next_rev }}" class="btn btn-small">Revision {{ next_rev }} &raquo;</a>
+        {% endif %}
+    </nav>
+
+    <div class="page-body">
+        <div class="page-content">
+            {{ html_content | safe }}
+        </div>
+    </div>
+</article>
+{% endblock %}

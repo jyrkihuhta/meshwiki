@@ -40,4 +40,5 @@ async def collect_results_node(state: FactoryState) -> dict:
         "completed_subtask_ids": completed,
         "failed_subtask_ids": failed,
         "graph_status": "reviewing",
+        "active_grinders": [],
     }

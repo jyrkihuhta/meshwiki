@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import re
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import anthropic
 
+from ..armory_prompts import get_armory_prompt
 from ..config import get_settings
+from ..cost import tokens_to_usd
 from ..integrations.github_client import _extract_pr_number
 from ..state import FactoryState, SubTask
 
@@ -18,22 +25,132 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MINIMAX_BASE_URL = "https://api.minimax.io/v1"
+# ---------------------------------------------------------------------------
+# Anthropic circuit breaker
+# ---------------------------------------------------------------------------
+# When Anthropic returns a billing/hard-limit error we block further calls
+# for a cooldown window.  The scheduler and PM callers check this before
+# dispatching so we don't burn E2B slots on work that can't be reviewed.
+
+_anthropic_blocked_until: float = 0.0
+_anthropic_block_reason: str = ""
 
 
-def _pm_client_and_model() -> tuple[anthropic.AsyncAnthropic, str]:
-    """PM's Anthropic-SDK client — MiniMax primary when configured, falling
-    back to direct Anthropic. Mirrors the provider selection already used for
-    the grinder in ``grind_subtask`` (MiniMax exposes an Anthropic
-    Messages-API-compatible endpoint at a different base_url).
+def _is_anthropic_blocked() -> bool:
+    return time.monotonic() < _anthropic_blocked_until
+
+
+def anthropic_blocked_seconds_remaining() -> float:
+    """Return seconds remaining on the Anthropic circuit breaker (0 = not blocked)."""
+    return max(0.0, _anthropic_blocked_until - time.monotonic())
+
+
+def anthropic_block_reason() -> str:
+    """Return the reason the circuit breaker was last tripped (empty if never)."""
+    return _anthropic_block_reason
+
+
+def _block_anthropic(seconds: float = 900.0, reason: str = "") -> None:
+    """Trip the Anthropic circuit breaker for `seconds` (caps at 30 days)."""
+    global _anthropic_blocked_until, _anthropic_block_reason
+    seconds = min(max(seconds, 60.0), 30 * 86400.0)
+    _anthropic_blocked_until = time.monotonic() + seconds
+    _anthropic_block_reason = reason[:300] if reason else ""
+    logger.warning(
+        "anthropic circuit breaker engaged — blocked for %.0fs (reason: %s)",
+        seconds,
+        reason[:120] if reason else "(none)",
+    )
+
+
+# Patterns that identify a hard billing / usage-limit error in the message body.
+# Anthropic returns these with assorted status codes depending on the limit type:
+#   - 402: credit balance is too low
+#   - 429: rate / token-per-minute limits with the message containing limit keywords
+#   - 400 invalid_request_error: "You have reached your specified API usage limits"
+_BILLING_KEYWORDS = (
+    "credit",
+    "spend",
+    "billing",
+    "quota",
+    "usage limit",
+    "specified api usage",
+    "monthly limit",
+    "usage limits",
+    "regain access",
+)
+
+
+def _is_billing_error(exc: anthropic.APIStatusError) -> bool:
+    """Return True if the error is a hard billing/spend limit (not a transient overload)."""
+    if exc.status_code == 402:
+        return True
+    msg = str(exc).lower()
+    if exc.status_code in (400, 401, 429):
+        # 400 only when invalid_request_error with usage-limit wording — be specific
+        if exc.status_code == 400 and "invalid_request_error" not in msg:
+            return False
+        return any(w in msg for w in _BILLING_KEYWORDS)
+    return False
+
+
+# Message format: "regain access on 2026-06-01 at 00:00 UTC"
+_REGAIN_RE = re.compile(
+    r"regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC",
+    re.IGNORECASE,
+)
+
+
+def _extract_regain_seconds(exc: anthropic.APIStatusError) -> float:
+    """Parse a regain-access timestamp from the error message.
+
+    Returns seconds until that time (clamped non-negative), or 0.0 if not parseable.
+    Used to set the circuit breaker cooldown to the exact moment Anthropic says
+    access returns, rather than guessing with a fixed value.
     """
-    settings = get_settings()
-    if settings.minimax_api_key:
-        return (
-            anthropic.AsyncAnthropic(api_key=settings.minimax_api_key, base_url=_MINIMAX_BASE_URL),
-            settings.pm_model,
+    m = _REGAIN_RE.search(str(exc))
+    if not m:
+        return 0.0
+    try:
+        ts = datetime.fromisoformat(f"{m.group(1)} {m.group(2)}:00").replace(
+            tzinfo=timezone.utc
         )
-    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None), "claude-sonnet-4-6"
+        return max(0.0, ts.timestamp() - time.time())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+async def safe_messages_create(
+    client: anthropic.AsyncAnthropic, **kwargs: Any
+) -> Any:
+    """Wrap ``client.messages.create`` so any direct Anthropic call site trips
+    the shared circuit breaker on billing errors.
+
+    Callers should also check ``_is_anthropic_blocked()`` before invoking this
+    — if the breaker is already tripped, calling here will raise
+    ``AnthropicBlockedError`` immediately so we don't incur another failed
+    request.
+    """
+    if _is_anthropic_blocked():
+        remaining = anthropic_blocked_seconds_remaining()
+        raise AnthropicBlockedError(
+            f"Anthropic circuit breaker active ({remaining:.0f}s remaining): "
+            f"{_anthropic_block_reason or 'no reason recorded'}"
+        )
+    try:
+        return await client.messages.create(**kwargs)
+    except anthropic.APIStatusError as exc:
+        if _is_billing_error(exc):
+            seconds = _extract_regain_seconds(exc) or 900.0
+            _block_anthropic(seconds=seconds, reason=str(exc)[:300])
+        raise
+
+
+class AnthropicBlockedError(RuntimeError):
+    """Raised when a caller attempts an Anthropic API call while the circuit
+    breaker is tripped. Bots should catch this and skip their cycle gracefully
+    instead of producing a generic error.
+    """
 
 
 PM_SYSTEM_PROMPT = """
@@ -48,10 +165,30 @@ MeshWiki tech stack: FastAPI, Jinja2, HTMX, Python 3.12+, Rust (graph engine via
 All code must follow PEP 8, have type hints, use async/await for storage, and include tests.
 
 When decomposing:
-- Each subtask should be completable in one grinder session (< 50k tokens)
+- Subtasks must be FLAT — never create subtasks of subtasks. Every subtask's
+  `wiki_page` must use the format "{parent_page_name}_TASK{N:03d}_{Short_title}"
+  (underscores, no slashes), e.g. "Epic_0001_graph_view_TASK001_Add_search".
+  Never nest further: set `parent_task` to the parent epic page, not another subtask.
+- Prefer SMALL, ATOMIC subtasks. One subtask = one focused file change. Smaller
+  scope means fewer things the grinder can get wrong.
+- The task requirements specify how many subtasks to create — follow that exactly.
+  Do not split further unless the requirements explicitly ask for it.
 - Subtasks must be as independent as possible (minimize file overlap)
 - Include file paths you expect will be touched in each subtask
 - Write clear acceptance criteria
+- **Always use `github_read_file` to read relevant source files before writing subtask
+  descriptions.** When a subtask requires mirroring an existing pattern (e.g. a new
+  Preprocessor, Extension, API route, or storage method), read the file, find the closest
+  existing example, and paste it verbatim into the `code_skeleton` field of
+  `meshwiki_create_subtask`. The grinder will adapt this skeleton — don't just describe
+  the pattern in prose, show it. This is the most important thing you can do to ensure
+  grinder success.
+- If the subtask adds a new wiki macro (<<MacroName>>) that needs async data
+  (storage, database), include this constraint in the description:
+  "Preprocessors run inside FastAPI's event loop — never use asyncio.run().
+  Pre-fetch data in the async route handler and pass it as a constructor
+  parameter to the Extension class. Follow the RecentChanges/PageList pattern
+  in parser.py."
 
 When reviewing:
 - Check that tests cover the new code
@@ -61,6 +198,29 @@ When reviewing:
 """.strip()
 
 PM_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "github_read_file",
+        "description": (
+            "Read a raw source file from the GitHub repository (staging branch). "
+            "Use this during decomposition to read existing source files and extract "
+            "code patterns to include as skeletons in subtask descriptions. "
+            "Always read the relevant files before writing subtasks that touch them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to repo root, e.g. 'src/meshwiki/core/parser.py'.",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch or commit ref. Defaults to 'staging'.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
     {
         "name": "meshwiki_read_page",
         "description": "Read a MeshWiki wiki page to gather context.",
@@ -83,7 +243,7 @@ PM_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "page_name": {
                     "type": "string",
-                    "description": "The MeshWiki page name for this subtask. Use the format '{parent_page_name}/TASK{N:03d} - {Short descriptive title}' where parent_page_name is the wiki page being decomposed and N starts at 001 for each epic (e.g. if decomposing 'Factory/GraphViewEnhancements', create 'Factory/GraphViewEnhancements/TASK001 - Add search feature'). Scan existing subpages of the parent to find the highest N and increment by 1.",
+                    "description": "The MeshWiki page name for this subtask. Use the format '{parent_page_name}_TASK{N:03d}_{Short_descriptive_title}' (underscores, no slashes) where parent_page_name is the wiki page being decomposed and N starts at 001 for each epic (e.g. if decomposing 'Epic_0001_graph_view', create 'Epic_0001_graph_view_TASK001_Add_search_feature'). Scan existing pages with the parent prefix to find the highest N and increment by 1.",
                 },
                 "title": {
                     "type": "string",
@@ -111,6 +271,16 @@ PM_TOOLS: list[dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "File paths expected to be created or modified.",
+                },
+                "code_skeleton": {
+                    "type": "string",
+                    "description": (
+                        "Optional starter code skeleton the grinder should adapt. "
+                        "Paste the most relevant existing implementation from the codebase "
+                        "(e.g. a similar Preprocessor, Extension, or route handler) verbatim, "
+                        "then annotate with comments like '# TODO: change X to Y'. "
+                        "This is shown in a code block on the subtask wiki page."
+                    ),
                 },
                 "token_budget": {
                     "type": "integer",
@@ -162,7 +332,7 @@ PM_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "pm_request_changes",
-        "description": "Request changes on a subtask PR — the implementation does not meet acceptance criteria.",
+        "description": "Request changes on a subtask PR — the implementation does not meet acceptance criteria. You MUST provide non-empty feedback: the grinder has no other way to know what to fix.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -172,13 +342,352 @@ PM_TOOLS: list[dict[str, Any]] = [
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Detailed feedback describing what needs to change.",
+                    "description": "Detailed, actionable feedback describing exactly what needs to change. Must be non-empty — the grinder will fail immediately if this is blank.",
                 },
             },
             "required": ["subtask_id", "feedback"],
         },
     },
 ]
+
+
+class _ToolUseBlock:
+    """Duck-typed Anthropic ToolUseBlock backed by an OpenAI tool_call."""
+
+    type = "tool_use"
+
+    def __init__(self, tool_call: Any) -> None:
+        self.id: str = tool_call.id
+        self.name: str = tool_call.function.name
+        self.input: dict[str, Any] = json.loads(tool_call.function.arguments or "{}")
+
+
+class _TextBlock:
+    """Duck-typed Anthropic TextBlock backed by an OpenAI content string."""
+
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _OpenAIUsageAdapter:
+    """Exposes OpenAI usage in Anthropic's ``input_tokens``/``output_tokens`` shape."""
+
+    def __init__(self, oai_usage: Any) -> None:
+        self.input_tokens: int = getattr(oai_usage, "prompt_tokens", 0) or 0
+        self.output_tokens: int = getattr(oai_usage, "completion_tokens", 0) or 0
+
+
+class _OpenAIResponseAdapter:
+    """Wraps an OpenAI ChatCompletion to match the Anthropic Messages interface.
+
+    The PM agent loops inspect ``response.stop_reason``, ``response.content``,
+    and ``response.usage``. This adapter translates the OpenAI shape so the
+    existing loop code works without modification.
+
+    ``_response_model`` is set to the actual model used so callers can price
+    the response at the correct rate rather than the Anthropic model's rate.
+    """
+
+    def __init__(self, oai_resp: Any, model: str) -> None:
+        self._response_model: str = model
+        choice = oai_resp.choices[0]
+        msg = choice.message
+
+        finish = choice.finish_reason  # "stop" | "tool_calls" | "length"
+        self.stop_reason = "end_turn" if finish == "stop" else "tool_use"
+
+        blocks: list[Any] = []
+        if msg.content:
+            blocks.append(_TextBlock(msg.content))
+        for tc in msg.tool_calls or []:
+            blocks.append(_ToolUseBlock(tc))
+        self.content = blocks
+
+        self.usage = _OpenAIUsageAdapter(oai_resp.usage) if oai_resp.usage else None
+
+
+def _anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic tool schema format to OpenAI function-calling format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {}),
+            },
+        }
+        for t in tools
+    ]
+
+
+def _convert_to_oai_messages(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert Anthropic-style messages/system to OpenAI chat format."""
+    oai_messages: list[dict[str, Any]] = []
+    for msg in kwargs.get("messages", []):
+        if msg["role"] == "assistant":
+            content = msg["content"]
+            if isinstance(content, list):
+                text_parts = [b.text for b in content if hasattr(b, "text")]
+                tool_calls = [
+                    {
+                        "id": b.id,
+                        "type": "function",
+                        "function": {"name": b.name, "arguments": json.dumps(b.input)},
+                    }
+                    for b in content
+                    if hasattr(b, "type") and b.type == "tool_use"
+                ]
+                oai_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": " ".join(text_parts) or None,
+                }
+                if tool_calls:
+                    oai_msg["tool_calls"] = tool_calls
+                oai_messages.append(oai_msg)
+            else:
+                oai_messages.append({"role": "assistant", "content": content})
+        elif msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        oai_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block["tool_use_id"],
+                                "content": str(block.get("content", "")),
+                            }
+                        )
+                    else:
+                        oai_messages.append({"role": "user", "content": str(block)})
+            else:
+                oai_messages.append({"role": "user", "content": content})
+    system = kwargs.get("system", "")
+    if system:
+        oai_messages.insert(0, {"role": "system", "content": system})
+    return oai_messages
+
+
+async def _call_openai_compatible(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: float = 120.0,
+    extra_headers: dict[str, str] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Call an OpenAI-compatible endpoint with Anthropic-style kwargs.
+
+    Uses ``httpx`` directly rather than the ``openai`` Python package — the
+    package isn't pinned as a dependency and the request shape is simple
+    enough to build manually. Same wire format MiniMax / OpenRouter /
+    OpenAI all accept.
+    """
+    import httpx
+
+    oai_messages = _convert_to_oai_messages(kwargs)
+    oai_tools = _anthropic_tools_to_openai(kwargs.get("tools", []))
+
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+        "messages": oai_messages,
+    }
+    if oai_tools:
+        body["tools"] = oai_tools
+        body["tool_choice"] = "auto"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return _OpenAIResponseAdapter(_RawOpenAIResponse(data), model)
+
+
+class _RawOpenAIResponse:
+    """Shim over a raw OpenAI-compatible JSON response so it presents the
+    handful of attributes the adapter reaches for (choices, usage)."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._raw = data
+        self.choices = [
+            _RawOpenAIChoice(c) for c in data.get("choices", [])
+        ]
+        self.usage = _RawOpenAIUsage(data.get("usage") or {})
+
+    def __getattr__(self, name: str) -> Any:
+        return self._raw.get(name)
+
+
+class _RawOpenAIChoice:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.message = _RawOpenAIMessage(data.get("message") or {})
+        self.finish_reason = data.get("finish_reason")
+
+
+class _RawOpenAIMessage:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.content = data.get("content")
+        self.role = data.get("role", "assistant")
+        # Wrap each raw tool_call dict in a small shim so the existing
+        # _ToolUseBlock adapter can access tc.id / tc.function.name / etc.
+        self.tool_calls = [
+            _RawOpenAIToolCall(tc) for tc in (data.get("tool_calls") or [])
+        ]
+
+
+class _RawOpenAIToolCall:
+    """Shim over a raw OpenAI tool_call JSON dict so it presents the
+    same attribute shape as the openai SDK's ToolCall object."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.id: str = data.get("id", "")
+        self.type: str = data.get("type", "function")
+        fn = data.get("function") or {}
+        self.function = _RawOpenAIFunction(fn)
+
+
+class _RawOpenAIFunction:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.name: str = data.get("name", "")
+        # OpenAI sends arguments as a JSON-encoded string
+        self.arguments: str = data.get("arguments", "{}")
+
+
+class _RawOpenAIUsage:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.prompt_tokens = int(data.get("prompt_tokens", 0) or 0)
+        self.completion_tokens = int(data.get("completion_tokens", 0) or 0)
+        self.total_tokens = int(data.get("total_tokens", 0) or 0)
+        # Anthropic-style alias used by some cost-accounting paths
+        self.input_tokens = self.prompt_tokens
+        self.output_tokens = self.completion_tokens
+
+
+async def _messages_create_with_retry(
+    client: anthropic.AsyncAnthropic,
+    *,
+    max_overload_attempts: int = 5,
+    **kwargs: Any,
+) -> Any:
+    """Call client.messages.create with retry, circuit breaker, and provider fallback.
+
+    Provider selection:
+    - If the requested ``model`` starts with ``claude-``, try Anthropic first
+      and fall back to OpenRouter → MiniMax on retryable errors / circuit
+      breaker tripped.
+    - Otherwise (e.g. ``MiniMax-M2.7``), skip Anthropic entirely and route
+      directly to the matching provider. This lets operators set
+      ``FACTORY_PM_REVIEW_MODEL=MiniMax-M2.7`` to make MiniMax the primary
+      without touching code.
+
+    Retry strategy:
+    - 529 overloaded: up to ``max_overload_attempts`` times with 30s backoff.
+    - 402/429/400-with-usage-limit billing: trip the circuit breaker and
+      fall through to fallbacks.
+    - Circuit breaker active: skip Anthropic entirely on this call.
+    """
+    settings = get_settings()
+    last_exc: BaseException | None = None
+
+    # Strip 'model' from forwarded kwargs — every downstream caller takes it
+    # as an explicit kwarg, and having it in **kwargs would collide.
+    requested_model = kwargs.pop("model", "")
+    anthropic_primary = requested_model.startswith("claude-")
+
+    if anthropic_primary and not _is_anthropic_blocked():
+        for attempt in range(max_overload_attempts):
+            try:
+                return await client.messages.create(model=requested_model, **kwargs)
+            except anthropic.APIStatusError as exc:
+                if exc.status_code == 529 and attempt < max_overload_attempts - 1:
+                    wait = 30 * (2**attempt)
+                    logger.warning(
+                        "pm_agent: Anthropic overloaded (529), retrying in %ds "
+                        "(attempt %d/%d)",
+                        wait,
+                        attempt + 1,
+                        max_overload_attempts,
+                    )
+                    await asyncio.sleep(wait)
+                    last_exc = exc
+                elif _is_billing_error(exc):
+                    seconds = _extract_regain_seconds(exc) or 900.0
+                    _block_anthropic(seconds=seconds, reason=str(exc)[:300])
+                    last_exc = exc
+                    break  # fall through to fallback chain
+                else:
+                    raise
+    elif anthropic_primary:
+        logger.info("pm_agent: Anthropic circuit breaker active — using fallback")
+    else:
+        logger.info(
+            "pm_agent: routing direct to non-Anthropic provider (model=%s)",
+            requested_model,
+        )
+
+    # ── Provider chain: pick MiniMax first if the requested model matches it,
+    #    else OpenRouter, else MiniMax with its default model. The kwargs
+    #    object has 'model' already stripped above so it's safe to forward.
+    minimax_requested = requested_model.lower().startswith("minimax")
+
+    if minimax_requested and settings.minimax_api_key:
+        logger.info("pm_agent: calling MiniMax (model=%s)", requested_model)
+        return await _call_openai_compatible(
+            api_key=settings.minimax_api_key,
+            base_url="https://api.minimax.io/v1",
+            model=requested_model,
+            timeout=60.0,
+            **kwargs,
+        )
+
+    if settings.openrouter_api_key:
+        # If the operator asked for a non-Anthropic model and we have an
+        # OpenRouter key, send the operator's requested model through OR;
+        # otherwise use the configured fallback model.
+        or_model = requested_model if not anthropic_primary else settings.pm_openrouter_model
+        logger.warning("pm_agent: routing via OpenRouter (model=%s)", or_model)
+        return await _call_openai_compatible(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            model=or_model,
+            timeout=120.0,
+            extra_headers={
+                "HTTP-Referer": settings.meshwiki_url,
+                "X-Title": "MeshWiki Factory",
+            },
+            **kwargs,
+        )
+
+    if settings.minimax_api_key:
+        logger.warning("pm_agent: falling back to MiniMax default")
+        return await _call_openai_compatible(
+            api_key=settings.minimax_api_key,
+            base_url="https://api.minimax.io/v1",
+            model="MiniMax-M3",
+            timeout=60.0,
+            **kwargs,
+        )
+
+    if last_exc is not None:
+        raise last_exc  # type: ignore[misc]
+    raise RuntimeError("No Anthropic, OpenRouter, or MiniMax API key configured")
 
 
 def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask:
@@ -195,6 +704,7 @@ def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask
     return SubTask(
         id=subtask_id,
         wiki_page=tool_input["page_name"],
+        parent_task=tool_input.get("parent_task", ""),
         title=tool_input["title"],
         description=tool_input["description"],
         status="pending",
@@ -206,9 +716,11 @@ def _build_subtask(tool_input: dict[str, Any], parent_thread_id: str) -> SubTask
         max_attempts=3,
         error_log=[],
         files_touched=tool_input.get("expected_files", []),
+        acceptance_criteria=tool_input.get("acceptance_criteria", []),
         token_budget=tool_input.get("token_budget", 50000),
         tokens_used=0,
         review_feedback=None,
+        code_skeleton=tool_input.get("code_skeleton") or None,
     )
 
 
@@ -216,13 +728,16 @@ async def decompose_with_pm(
     state: FactoryState,
     meshwiki_client: "MeshWikiClient",
     github_client: "GitHubClient | None",
-) -> list[SubTask]:
+    *,
+    redecompose_context: str | None = None,
+) -> dict[str, Any]:
     """Run the PM agentic loop to decompose a parent task into subtasks.
 
     1. Reads context pages from MeshWiki.
     2. Builds a user message asking Claude to decompose the task.
     3. Runs the agentic loop (max 20 tool calls).
     4. Returns the list of SubTask objects created via ``meshwiki_create_subtask``.
+    5. Tracks incremental cost from Anthropic API responses.
 
     Args:
         state: Current FactoryState with task details.
@@ -230,11 +745,15 @@ async def decompose_with_pm(
         github_client: GitHub client (unused during decomposition, may be None).
 
     Returns:
-        List of SubTask TypedDicts produced by the PM agent.
+        Dict with ``subtasks`` list and ``incremental_cost_usd`` float.
     """
-    client, pm_model = _pm_client_and_model()
+    client = anthropic.AsyncAnthropic(
+        api_key=get_settings().anthropic_api_key or None, timeout=600.0
+    )
     subtasks: list[SubTask] = []
     parent_thread_id = state["thread_id"]
+    incremental_cost_usd: float = 0.0
+    model = get_settings().pm_decompose_model
 
     # Read context pages
     context_parts: list[str] = []
@@ -249,12 +768,29 @@ async def decompose_with_pm(
 
     context_block = "\n\n---\n\n".join(context_parts) if context_parts else "(none)"
 
+    task_wiki_page = state["task_wiki_page"]
+    task_title = state.get("title", task_wiki_page)
+    redecompose_block = (
+        f"\n\n## ⚠️ Redecompose Notice\n\n"
+        f"A previous decomposition of this task was attempted but failed. "
+        f"Here is what went wrong:\n\n{redecompose_context}\n\n"
+        f"**Please produce a significantly different decomposition.** "
+        f"Use smaller, more atomic subtasks and/or a different technical approach "
+        f"to avoid repeating the same failures."
+        if redecompose_context
+        else ""
+    )
     user_message = (
-        f"## Parent Task: {state.get('title', state['task_wiki_page'])}\n\n"
+        f"## Parent Task: {task_title}\n\n"
+        f"**Wiki page path:** `{task_wiki_page}`\n\n"
         f"**Requirements:**\n{state.get('requirements', '')}\n\n"
-        f"## Context Pages\n\n{context_block}\n\n"
+        f"## Context Pages\n\n{context_block}"
+        f"{redecompose_block}\n\n"
         "Please decompose this task into concrete, independently implementable subtasks. "
         "Use the `meshwiki_create_subtask` tool for each subtask. "
+        f"Subtask page names must use the format `{task_wiki_page}_TASK001_Short_title`, "
+        f"`{task_wiki_page}_TASK002_Short_title`, etc. "
+        "Use underscores throughout — do NOT use slashes in page names. "
         "Read additional wiki pages with `meshwiki_read_page` if you need more context."
     )
 
@@ -263,13 +799,18 @@ async def decompose_with_pm(
     tool_calls_remaining = 20
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
-            model=pm_model,
+        response = await _messages_create_with_retry(
+            client,
+            model=model,
             max_tokens=8192,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
             messages=messages,
         )
+
+        if hasattr(response, "usage") and response.usage:
+            effective_model = getattr(response, "_response_model", model)
+            incremental_cost_usd += tokens_to_usd(response.usage, effective_model)
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
@@ -311,6 +852,17 @@ async def decompose_with_pm(
                     result_content = page.get("content", "")
                 else:
                     result_content = f"Page '{tool_input['page_name']}' not found."
+            elif tool_name == "github_read_file":
+                if github_client is not None:
+                    try:
+                        result_content = await github_client.get_file_content(
+                            tool_input["path"],
+                            ref=tool_input.get("ref", "staging"),
+                        )
+                    except Exception as exc:
+                        result_content = f"Error reading file: {exc}"
+                else:
+                    result_content = "GitHub client not available."
             else:
                 result_content = "Tool not available during decomposition"
 
@@ -335,7 +887,7 @@ async def decompose_with_pm(
             )
             break
 
-    return subtasks
+    return {"subtasks": subtasks, "incremental_cost_usd": incremental_cost_usd}
 
 
 async def review_with_pm(
@@ -356,7 +908,11 @@ async def review_with_pm(
         Dict with ``decision`` ("approved" | "changes_requested") and
         optional ``feedback`` string.
     """
-    client, pm_model = _pm_client_and_model()
+    settings = get_settings()
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key or None, timeout=600.0
+    )
+    incremental_cost_usd: float = 0.0
 
     pr_number: int | None = subtask.get("pr_number") or _extract_pr_number(
         subtask.get("pr_url", "")
@@ -371,14 +927,143 @@ async def review_with_pm(
     if page:
         acceptance_criteria = page.get("content", "")
 
+    branch_name = subtask.get("branch_name") or ""
+
+    # Cap diff size to avoid burning tokens on huge diffs
+    diff_lines = diff.splitlines()
+    max_lines = settings.pm_review_max_diff_lines
+    diff_truncated = False
+    if len(diff_lines) > max_lines:
+        diff = "\n".join(diff_lines[:max_lines])
+        diff_truncated = True
+
+    truncation_notice = (
+        f"\n\n*(Diff truncated at {max_lines} lines. "
+        "Use `github_read_file` to inspect full files if needed.)*"
+        if diff_truncated
+        else ""
+    )
+
+    # Armory artifact PRs (playbook/tool/wordlist) need a different review
+    # bar than MeshWiki code PRs — they have a strict schema we must enforce
+    # at review time. Without this, the LLM falls back to generic style/
+    # acceptance review and lets through structurally-broken artifacts
+    # (e.g. `mode: intruder` instead of `deterministic`, `mutations:` as
+    # bare strings, empty `checks:` lists). See armory_prompts.PLAYBOOK_SCHEMA.
+    artifact_type: str | None = state.get("artifact_type")
+    armory_addendum = get_armory_prompt(artifact_type)
+    armory_review_section = ""
+    if armory_addendum:
+        armory_review_section = (
+            f"\n\n## Armory Artifact Review\n\n"
+            f"This PR contributes a `{artifact_type}` to the molly-armory. "
+            f"Standard code-review heuristics do NOT apply — what matters is "
+            f"strict conformance to Molly's loader schema. A playbook that "
+            f"parses but uses the wrong mode vocabulary or string mutations "
+            f"will silently no-op at runtime, costing real coverage cycles.\n\n"
+            f"REQUEST CHANGES if any of the following hold:\n"
+            f"- `checks:` is missing, empty, or in a fenced YAML block in the body "
+            f"(it must be inside the `---` frontmatter).\n"
+            f"- Any check has `mode:` set to something other than "
+            f"`deterministic`, `analytical`, `idea`, or `oob`. The words "
+            f"`intruder`, `forge`, `nuclei`, `feroxbuster` are NEVER valid in "
+            f"the `mode` field — those are routed via `requires_capabilities`.\n"
+            f"- Any check's `mutations:` is a list of strings rather than "
+            f"a list of mappings with `body|header|value|url_override|note` keys.\n"
+            f"- Frontmatter is missing `playbook`, `name`, or `leaf_type`.\n"
+            f"- Any check is missing `id`, `name`, `mode`, `category`, or `severity`.\n"
+            f"- `severity:` uses a value outside "
+            f"`critical|high|medium|low|info|unknown`.\n\n"
+            f"For reference, the schema the artifact must conform to:\n\n"
+            f"{armory_addendum}"
+        )
+
     user_message = (
         f"## Subtask: {subtask['title']}\n\n"
         f"**Acceptance Criteria (from wiki page):**\n{acceptance_criteria}\n\n"
-        f"## PR Diff\n\n```diff\n{diff}\n```\n\n"
+        f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```"
+        f"{truncation_notice}"
+        f"{armory_review_section}\n\n"
+        "**Important:** The diff above shows only changes relative to the PR base branch "
+        "(staging), not relative to main. Changes that were already on staging will NOT "
+        "appear in the diff even if they are part of the full implementation. Before "
+        "requesting changes for a missing feature, use `github_read_file` with "
+        f'`ref: "{branch_name}"` to read the actual current file and verify whether '
+        "the feature is already present.\n\n"
         "Please review this PR. "
         "Use `pm_approve_pr` if the implementation meets all acceptance criteria, "
         "or `pm_request_changes` with specific feedback if it does not."
     )
+
+    # ── Triage pass (cheap model) ─────────────────────────────────────────────
+    # Run a fast single-shot review with the triage model. If it approves,
+    # skip the full agentic review entirely. If it requests changes, fall
+    # through to the full Sonnet review so the grinder gets detailed feedback.
+    #
+    # Armory artifacts (playbook/tool/wordlist) bypass the triage pass: their
+    # loader schema is strict and most failure modes (wrong mode vocabulary,
+    # bare-string mutations, empty checks lists) are silent at runtime, so a
+    # diff-only triage cannot reliably gate them. Force them through the full
+    # review which has file-inspection tools and the armory schema embedded.
+    triage_model = settings.pm_triage_model
+    if triage_model and armory_addendum:
+        logger.info(
+            "review_with_pm: skipping triage for armory %s (subtask %s) — "
+            "going straight to full review",
+            artifact_type,
+            subtask["id"],
+        )
+    if triage_model and not armory_addendum:
+        triage_prompt = (
+            f"## Subtask: {subtask['title']}\n\n"
+            f"**Acceptance Criteria:**\n{acceptance_criteria}\n\n"
+            f"## PR Diff (branch: `{branch_name}`)\n\n```diff\n{diff}\n```"
+            f"{truncation_notice}\n\n"
+            "Quick triage: does this PR meet its acceptance criteria? "
+            "Reply with exactly one of:\n"
+            "- APPROVED — implementation is correct and complete\n"
+            "- CHANGES_REQUESTED — briefly state what is missing or wrong\n\n"
+            "Be lenient on style; flag only functional gaps or missing acceptance criteria."
+        )
+        try:
+            # Use _messages_create_with_retry (not safe_messages_create) so the
+            # triage model name drives the provider routing — when triage_model
+            # is non-Anthropic (e.g. "MiniMax-M2.7"), this routes direct to
+            # the matching provider rather than failing with an unknown-model
+            # error against the Anthropic API.
+            triage_response = await _messages_create_with_retry(
+                client,
+                model=triage_model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": triage_prompt}],
+            )
+            if hasattr(triage_response, "usage") and triage_response.usage:
+                incremental_cost_usd += tokens_to_usd(
+                    triage_response.usage, triage_model
+                )
+            triage_text = "".join(
+                b.text for b in triage_response.content if hasattr(b, "text")
+            ).strip()
+            logger.info(
+                "review_with_pm: triage (%s) verdict for %s: %s",
+                triage_model,
+                subtask["id"],
+                triage_text[:120],
+            )
+            if triage_text.upper().startswith("APPROVED"):
+                return {
+                    "decision": "approved",
+                    "feedback": triage_text,
+                    "incremental_cost_usd": incremental_cost_usd,
+                }
+            # Triage flagged issues — fall through to full review with Sonnet
+            # so the grinder gets actionable, detailed feedback.
+            logger.info(
+                "review_with_pm: triage requested changes — escalating to full review (%s)",
+                settings.pm_review_model,
+            )
+        except Exception as exc:
+            logger.warning("review_with_pm: triage pass failed (%s) — skipping", exc)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
 
@@ -387,13 +1072,23 @@ async def review_with_pm(
     tool_calls_remaining = 10
 
     while tool_calls_remaining > 0:
-        response = await client.messages.create(
-            model=pm_model,
+        # Use _messages_create_with_retry (not safe_messages_create) so the
+        # configured pm_review_model can be a non-Anthropic provider (e.g.
+        # MiniMax-M2.7). safe_messages_create only knows the direct-Anthropic
+        # path and would trip the circuit breaker for non-Anthropic models.
+        response = await _messages_create_with_retry(
+            client,
+            model=settings.pm_review_model,
             max_tokens=4096,
             system=PM_SYSTEM_PROMPT,
             tools=PM_TOOLS,
             messages=messages,
         )
+
+        if hasattr(response, "usage") and response.usage:
+            incremental_cost_usd += tokens_to_usd(
+                response.usage, settings.pm_review_model
+            )
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -422,7 +1117,12 @@ async def review_with_pm(
                 )
             elif tool_name == "pm_request_changes":
                 decision = "changes_requested"
-                feedback = tool_input.get("feedback")
+                feedback = tool_input.get("feedback") or None
+                if not feedback:
+                    logger.warning(
+                        "review_with_pm: pm_request_changes called with empty feedback for subtask %s",
+                        tool_input.get("subtask_id"),
+                    )
                 result_content = "Changes requested."
                 logger.info(
                     "review_with_pm: changes requested for subtask %s",
@@ -434,6 +1134,14 @@ async def review_with_pm(
                     result_content = page.get("content", "")
                 else:
                     result_content = f"Page '{tool_input['page_name']}' not found."
+            elif tool_name == "github_read_file":
+                try:
+                    ref = tool_input.get("ref") or "staging"
+                    result_content = await github_client.get_file_content(
+                        tool_input["path"], ref=ref
+                    )
+                except Exception as exc:
+                    result_content = f"Error reading file: {exc}"
             else:
                 result_content = "Tool not available during review"
 
@@ -461,4 +1169,72 @@ async def review_with_pm(
     return {
         "decision": decision or "changes_requested",
         "feedback": feedback,
+        "incremental_cost_usd": incremental_cost_usd,
+    }
+
+
+async def diagnose_with_pm(
+    subtask: "SubTask",
+    terminal_log: str,
+    meshwiki_client: "MeshWikiClient",
+) -> dict[str, Any]:
+    """Ask the PM to diagnose a grinder failure and rewrite the task description.
+
+    Sends the terminal log and current task description to the PM in a single
+    non-tool-use message and asks it to produce a revised description that will
+    unblock the grinder on retry.
+
+    Args:
+        subtask: The failed SubTask.
+        terminal_log: Raw terminal output from the failed grinder run.
+        meshwiki_client: Client for reading the subtask wiki page.
+
+    Returns:
+        Dict with ``revised_description`` (str) and ``incremental_cost_usd`` (float).
+    """
+    settings = get_settings()
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key or None, timeout=600.0
+    )
+
+    page = await meshwiki_client.get_page(subtask["wiki_page"])
+    wiki_content = page.get("content", "") if page else ""
+
+    user_message = (
+        f"## Failed subtask: {subtask['title']}\n\n"
+        f"**Current description / acceptance criteria:**\n{subtask.get('description', '')}\n\n"
+        f"**Wiki page content:**\n{wiki_content}\n\n"
+        f"**Terminal log from failed grinder run (last attempt):**\n```\n{terminal_log[-6000:]}\n```\n\n"
+        "Diagnose why the grinder failed and produce a revised task description that will "
+        "unblock the next retry. Rewrite the acceptance criteria to remove impossible "
+        "constraints (e.g. unavailable tools, wrong test frameworks) and add explicit "
+        "guidance based on what went wrong. Be concrete and actionable.\n\n"
+        "Reply with ONLY the revised description/acceptance criteria — no preamble, "
+        "no explanation, just the updated text the grinder should receive."
+    )
+
+    response = await _messages_create_with_retry(
+        client,
+        model=settings.pm_decompose_model,
+        max_tokens=2048,
+        system=PM_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    effective_model = getattr(response, "_response_model", settings.pm_decompose_model)
+    incremental_cost_usd = tokens_to_usd(response.usage, effective_model)
+
+    revised = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            revised += block.text
+
+    logger.info(
+        "diagnose_with_pm: produced revised description for subtask %s (%d chars)",
+        subtask["id"],
+        len(revised),
+    )
+    return {
+        "revised_description": revised.strip(),
+        "incremental_cost_usd": incremental_cost_usd,
     }

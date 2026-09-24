@@ -25,22 +25,46 @@ pub struct PageNode {
 
     /// Last modification time of the file
     pub last_modified: SystemTime,
+
+    /// Whether this node corresponds to a real page backed by a file on disk.
+    ///
+    /// `false` means the node is a link-only stub, created because another
+    /// page links to it (e.g. `[[MissingPage]]`) even though no file exists.
+    /// `page_exists` and page listings must treat stubs as non-existent so
+    /// missing-link styling and page counts stay correct.
+    pub exists: bool,
 }
 
 impl PageNode {
-    /// Create a new PageNode with the given name and file path.
+    /// Create a new real PageNode with the given name and file path.
     ///
     /// Metadata is initialized as empty, and last_modified is set to now.
+    /// The node is marked as existing (backed by a real page).
     pub fn new(name: String, file_path: PathBuf) -> Self {
         Self {
             name,
             file_path,
             metadata: HashMap::new(),
             last_modified: SystemTime::now(),
+            exists: true,
         }
     }
 
-    /// Create a new PageNode with metadata.
+    /// Create a link-only stub PageNode for a target that has no file yet.
+    ///
+    /// The node is marked as non-existent (`exists = false`) so it does not
+    /// count as a real page.
+    pub fn new_stub(name: String, file_path: PathBuf) -> Self {
+        Self {
+            name,
+            file_path,
+            metadata: HashMap::new(),
+            last_modified: SystemTime::now(),
+            exists: false,
+        }
+    }
+
+    /// Create a new real PageNode with metadata.
     pub fn with_metadata(
         name: String,
         file_path: PathBuf,
@@ -52,6 +76,7 @@ impl PageNode {
             file_path,
             metadata,
             last_modified,
+            exists: true,
         }
     }
 }

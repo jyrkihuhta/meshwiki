@@ -200,3 +200,165 @@ async def test_delete_existing_page_returns_204(client):
 async def test_delete_nonexistent_page_returns_404(client):
     resp = await client.delete("/api/v1/pages/Ghost", headers=_AUTH)
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Rename page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rename_page_moves_to_new_name(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "Factory/Macros/MyTask",
+            "content": "---\nstatus: done\n---\nBody",
+        },
+        headers=_AUTH,
+    )
+    resp = await client.post(
+        "/api/v1/pages/Factory/Macros/MyTask/rename",
+        json={"new_name": "Factory/Macros/Done/MyTask"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Factory/Macros/Done/MyTask"
+
+    # Old location should be gone
+    old = await client.get("/api/v1/pages/Factory/Macros/MyTask", headers=_AUTH)
+    assert old.status_code == 404
+
+    # New location should exist
+    new = await client.get("/api/v1/pages/Factory/Macros/Done/MyTask", headers=_AUTH)
+    assert new.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rename_nonexistent_page_returns_404(client):
+    resp = await client.post(
+        "/api/v1/pages/Ghost/rename",
+        json={"new_name": "Done/Ghost"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PATCH frontmatter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_updates_frontmatter_field(client):
+    await client.post(
+        "/api/v1/pages",
+        json={"name": "PatchTarget", "content": "---\nstatus: draft\n---\nBody text."},
+        headers=_AUTH,
+    )
+    resp = await client.patch(
+        "/api/v1/pages/PatchTarget",
+        json={"fields": {"status": "planned", "priority": "high"}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    meta = resp.json()["metadata"]
+    assert meta["status"] == "planned"
+    assert meta["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_patch_preserves_page_body(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "PatchBody",
+            "content": "---\nstatus: draft\n---\nOriginal body.",
+        },
+        headers=_AUTH,
+    )
+    await client.patch(
+        "/api/v1/pages/PatchBody",
+        json={"fields": {"status": "planned"}},
+        headers=_AUTH,
+    )
+    resp = await client.get("/api/v1/pages/PatchBody", headers=_AUTH)
+    assert "Original body." in resp.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_patch_removes_field_when_null(client):
+    await client.post(
+        "/api/v1/pages",
+        json={
+            "name": "PatchNull",
+            "content": "---\nstatus: draft\nbranch: old\n---\nBody.",
+        },
+        headers=_AUTH,
+    )
+    resp = await client.patch(
+        "/api/v1/pages/PatchNull",
+        json={"fields": {"branch": None}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    assert "branch" not in resp.json()["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_patch_nonexistent_page_returns_404(client):
+    resp = await client.patch(
+        "/api/v1/pages/NoSuchPage",
+        json={"fields": {"status": "planned"}},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Page-name validation (path traversal defense)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_traversal_name(client):
+    resp = await client.post(
+        "/api/v1/pages",
+        json={"name": "../../etc/passwd", "content": "pwned"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_traversal_name(client):
+    resp = await client.put(
+        "/api/v1/pages/..%2F..%2Fetc%2Fpasswd",
+        json={"name": "x", "content": "pwned"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_rename_rejects_traversal_target(client):
+    await client.post(
+        "/api/v1/pages", json={"name": "Legit", "content": "ok"}, headers=_AUTH
+    )
+    resp = await client.post(
+        "/api/v1/pages/Legit/rename",
+        json={"new_name": "../../escape"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_slash_name_still_allowed(client):
+    # Forward slashes are legitimate for factory hierarchical page names.
+    resp = await client.post(
+        "/api/v1/pages",
+        json={"name": "Factory/Tasks/T1", "content": "ok"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 201

@@ -6,7 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from meshwiki.api.auth import require_api_key
-from meshwiki.core.dependencies import get_storage
+from meshwiki.api.validation import validate_api_page_name
+from meshwiki.core.dependencies import get_revision_store, get_storage
+from meshwiki.core.models import Revision
+from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -15,6 +18,14 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 class PageCreate(BaseModel):
     name: str
     content: str
+
+
+class PagePatch(BaseModel):
+    fields: dict[str, str | None]
+
+
+class PageRename(BaseModel):
+    new_name: str
 
 
 class PageResponse(BaseModel):
@@ -68,6 +79,7 @@ async def get_page(
     storage: FileStorage = Depends(get_storage),
 ) -> PageResponse:
     """Get a single page by name."""
+    validate_api_page_name(name)
     page = await storage.get_page(name)
     if page is None or not page.exists:
         raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
@@ -83,6 +95,7 @@ async def create_page(
     storage: FileStorage = Depends(get_storage),
 ) -> PageResponse:
     """Create a new page."""
+    validate_api_page_name(body.name)
     page = await storage.save_page(body.name, body.content)
     return _page_response(page)
 
@@ -94,7 +107,37 @@ async def update_page(
     storage: FileStorage = Depends(get_storage),
 ) -> PageResponse:
     """Create or update a page."""
+    validate_api_page_name(name)
     page = await storage.save_page(name, body.content)
+    return _page_response(page)
+
+
+@router.patch("/pages/{name:path}", response_model=PageResponse)
+async def patch_page_frontmatter(
+    name: str,
+    body: PagePatch,
+    storage: FileStorage = Depends(get_storage),
+) -> PageResponse:
+    """Update frontmatter fields without replacing the page body."""
+    validate_api_page_name(name)
+    page = await storage.patch_frontmatter(name, body.fields)
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
+    return _page_response(page)
+
+
+@router.post("/pages/{name:path}/rename", response_model=PageResponse)
+async def rename_page(
+    name: str,
+    body: PageRename,
+    storage: FileStorage = Depends(get_storage),
+) -> PageResponse:
+    """Move a page to a new name/location."""
+    validate_api_page_name(name)
+    validate_api_page_name(body.new_name)
+    page = await storage.rename_page(name, body.new_name)
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
     return _page_response(page)
 
 
@@ -104,6 +147,33 @@ async def delete_page(
     storage: FileStorage = Depends(get_storage),
 ) -> None:
     """Delete a page."""
+    validate_api_page_name(name)
     deleted = await storage.delete_page(name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Page not found: {name!r}")
+
+
+@router.get("/pages/{name:path}/history", response_model=list[Revision])
+async def list_page_history(
+    name: str,
+    limit: int = 50,
+    offset: int = 0,
+    store: RevisionStore = Depends(get_revision_store),
+) -> list[Revision]:
+    """List revision history for a page, newest first."""
+    return store.list_revisions(name, limit=limit, offset=offset)
+
+
+@router.get("/pages/{name:path}/history/{rev}", response_model=Revision)
+async def get_page_revision(
+    name: str,
+    rev: int,
+    store: RevisionStore = Depends(get_revision_store),
+) -> Revision:
+    """Fetch a specific revision of a page."""
+    revision = store.get_revision(name, rev)
+    if revision is None:
+        raise HTTPException(
+            status_code=404, detail=f"Revision {rev} not found for {name!r}"
+        )
+    return revision

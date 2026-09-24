@@ -6,22 +6,25 @@ from .decompose import decompose_node
 from .escalate import escalate_node
 from .finalize import finalize_node
 from .grind import grind_node
-from .human_review import human_review_code_node, human_review_plan_node
+from .human_review import human_review_code_node
 from .merge_check import merge_check_node
+from .pm_diagnose import pm_diagnose_node
 from .pm_review import pm_review_node
 from .task_intake import task_intake_node
+from .validate_armory import validate_armory_node
 
 __all__ = [
     "task_intake_node",
     "decompose_node",
-    "human_review_plan_node",
     "assign_grinders_node",
     "route_grinders",
     "grind_node",
     "collect_results_node",
     "pm_review_node",
+    "pm_diagnose_node",
     "human_review_code_node",
     "merge_check_node",
     "finalize_node",
     "escalate_node",
+    "validate_armory_node",
 ]

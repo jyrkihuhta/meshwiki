@@ -72,7 +72,18 @@ fi
 # ── Install Python dependencies ──────────────────────────────
 
 echo "==> Installing Python dependencies..."
-pip install -e "$SRC_DIR[dev]" --quiet
+pip install -e "$ROOT_DIR[dev]" --quiet  # pyproject.toml is at the repo root
+
+# Ensure cryptography is available for test fixtures (see CONTRIBUTING.md).
+# The `cryptography` package is also declared in pyproject.toml under [dev]
+# so `pip install -e .[dev]` covers it on a fresh checkout, but we install
+# it explicitly here so older Python environments without an editable
+# install (e.g. CI bootstrap containers) don't fail at pytest collection
+# with `ModuleNotFoundError: No module named 'cryptography'`.
+if ! python3 -c "import cryptography" &>/dev/null; then
+    echo "==> Installing cryptography (required by test fixtures)..."
+    pip install --quiet "cryptography>=42.0"
+fi
 
 # ── Ensure data directory exists ─────────────────────────────
 

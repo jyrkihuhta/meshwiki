@@ -6,18 +6,145 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import time
+import uuid
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from .config import get_settings
+from .bots.bookkeeper import BookkeeperBot
+from .bots.ci_fixer import CIFixerBot
+from .bots.class_gap_researcher import ClassGapResearcherBot
+from .bots.insight import InsightBot
+from .bots.purgatory import PurgatoryBot
+from .bots.registry import BotRegistry
+from .bots.scheduler import SchedulerBot
+from .bots.stale_pr_bot import StalePRBot
+from .bots.terminal_review import TerminalReviewBot
+from .bots.worker_heartbeat import WorkerHeartbeatBot
+from .config import FACTORY_MAX_CONCURRENT_SANDBOXES, get_settings, validate_settings
 from .graph import build_graph
+from .hbr import get_hbr
 from .integrations.meshwiki_client import MeshWikiClient
 from .state import FactoryState
 
 logger = logging.getLogger(__name__)
+
+
+def _spawn_graph_task(
+    app: "FastAPI", coro, *, name: str, thread_id: str
+) -> "asyncio.Task":
+    """Dispatch a graph run as a tracked background task.
+
+    ``asyncio.create_task`` only keeps a *weak* reference to the task, so a task
+    stored in a bare local can be garbage-collected and cancelled mid-run. We
+    keep a strong reference in ``app.state.background_tasks`` for the task's
+    lifetime and attach a done-callback that logs any exception and records the
+    thread as no longer in flight (used for idempotency).
+    """
+    # Lazily initialise the tracking sets so callers that don't go through the
+    # lifespan (e.g. unit tests, or a resume triggered very early) still work.
+    if not hasattr(app.state, "background_tasks"):
+        app.state.background_tasks = set()
+    if not hasattr(app.state, "inflight_threads"):
+        app.state.inflight_threads = set()
+    if not hasattr(app.state, "pending_resumes"):
+        app.state.pending_resumes = {}
+
+    task = asyncio.create_task(coro, name=name)
+    app.state.background_tasks.add(task)
+    app.state.inflight_threads.add(thread_id)
+
+    def _done(t: "asyncio.Task") -> None:
+        app.state.background_tasks.discard(t)
+        app.state.inflight_threads.discard(thread_id)
+        if not t.cancelled() and (exc := t.exception()):
+            logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
+        # Replay a resume (approval / rework) that arrived while this run was
+        # still in flight, now that the thread has checkpointed and is free.
+        pending = app.state.pending_resumes.pop(thread_id, None)
+        if pending is not None:
+            make_coro, pending_name = pending
+            logger.info("graph: replaying queued %s", pending_name)
+            _spawn_graph_task(app, make_coro(), name=pending_name, thread_id=thread_id)
+
+    task.add_done_callback(_done)
+    return task
+
+
+def _queue_or_spawn_resume(
+    app: "FastAPI",
+    make_coro: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    name: str,
+    thread_id: str,
+) -> bool:
+    """Resume a graph thread now, or queue the resume if a run is in flight.
+
+    Approval and rework webhooks must not be dropped: the graph can post
+    "awaiting approval" to the wiki slightly before its run returns, so a fast
+    approval may arrive while the thread is still in flight. Starting a second
+    concurrent run on the same thread would corrupt its checkpoint, so the
+    resume is held and replayed by ``_spawn_graph_task``'s done-callback. Only
+    the latest queued resume per thread is kept.
+
+    Returns:
+        True if the resume started immediately, False if it was queued.
+    """
+    if thread_id not in getattr(app.state, "inflight_threads", set()):
+        _spawn_graph_task(app, make_coro(), name=name, thread_id=thread_id)
+        return True
+    if not hasattr(app.state, "pending_resumes"):
+        app.state.pending_resumes = {}
+    if thread_id in app.state.pending_resumes:
+        logger.warning(
+            "graph: replacing queued resume for thread_id=%s with %s",
+            thread_id,
+            name,
+        )
+    app.state.pending_resumes[thread_id] = (make_coro, name)
+    return False
+
+
+async def _clear_stuck_grinders(graph, config: dict, page_name: str) -> None:
+    """Clear active_grinders entries whose subtasks never completed before a crash.
+
+    When the orchestrator dies mid-fan-out, grinder IDs remain in
+    ``active_grinders`` even though their subtasks are still ``pending``.
+    ``route_grinders`` skips those IDs, so the graph would stall forever.
+    This function removes the stale entries so the next ``ainvoke`` re-dispatches
+    the affected subtasks.
+    """
+    try:
+        snapshot = await graph.aget_state(config)
+        if snapshot is None:
+            return
+        active: list[str] = list(snapshot.values.get("active_grinders") or [])
+        subtasks: list[dict] = list(snapshot.values.get("subtasks") or [])
+        stuck = {
+            s["id"]
+            for s in subtasks
+            if s["id"] in active and s.get("status") in ("pending", "changes_requested")
+        }
+        if not stuck:
+            return
+        logger.info(
+            "factory: clearing %d stuck grinder(s) for %s: %s",
+            len(stuck),
+            page_name,
+            stuck,
+        )
+        await graph.aupdate_state(
+            config,
+            {"active_grinders": [gid for gid in active if gid not in stuck]},
+        )
+    except Exception as exc:
+        logger.warning(
+            "factory: could not clear stuck grinders for %s: %s", page_name, exc
+        )
 
 
 async def _resume_interrupted_tasks(graph, saver, settings) -> None:
@@ -27,62 +154,247 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
     1. Ask MeshWiki for all tasks with status=in_progress or status=review
        that are assigned to factory (both statuses represent active graph runs).
     2. For each, check if the SQLite checkpointer has a saved state.
-    3. If yes, call ainvoke(None) with the same thread_id — LangGraph resumes
-       from the last node boundary rather than restarting from scratch.
+    3. Clear any stale active_grinders entries left over from a mid-fan-out crash
+       so route_grinders can re-dispatch those subtasks.
+    4. Call ainvoke(None) with the same thread_id — LangGraph resumes from the
+       last node boundary rather than restarting from scratch.
     """
-    client = MeshWikiClient(settings.meshwiki_url, settings.meshwiki_api_key)
-    all_factory_tasks: list[dict] = []
-    for status in ("in_progress", "review"):
-        try:
-            tasks = await client.list_tasks(status=status)
-        except Exception as exc:
-            logger.warning("factory: could not fetch %s tasks on startup: %s", status, exc)
-            continue
-        all_factory_tasks.extend(
-            t for t in tasks
-            if t.get("metadata", {}).get("assignee") == "factory"
-            or t.get("assignee") == "factory"  # flat format (defensive)
-        )
+    async with MeshWikiClient(
+        settings.meshwiki_url, settings.meshwiki_api_key
+    ) as client:
+        all_factory_tasks: list[dict] = []
+        for status in ("in_progress", "review"):
+            try:
+                tasks = await client.list_tasks(status=status)
+            except Exception as exc:
+                logger.warning(
+                    "factory: could not fetch %s tasks on startup: %s", status, exc
+                )
+                continue
+            all_factory_tasks.extend(
+                t
+                for t in tasks
+                if t.get("metadata", {}).get("assignee") == "factory"
+                or t.get("assignee") == "factory"  # flat format (defensive)
+            )
 
-    if not all_factory_tasks:
+        if not all_factory_tasks:
+            return
+
+        factory_tasks = all_factory_tasks
+        logger.info(
+            "factory: found %d active factory task(s) on startup", len(factory_tasks)
+        )
+        for task in factory_tasks:
+            page_name = task.get("name", "")
+            if not page_name:
+                continue
+
+            # Prefer UUID as thread_id; fall back to page name for legacy tasks.
+            task_uuid: str | None = (task.get("metadata") or {}).get("uuid")
+            thread_id = task_uuid or page_name
+            config = {"configurable": {"thread_id": thread_id}}
+            checkpoint_tuple = await saver.aget_tuple(config)
+            if checkpoint_tuple is None and task_uuid:
+                # Old checkpoint may be keyed by page name — try that too.
+                config = {"configurable": {"thread_id": page_name}}
+                checkpoint_tuple = await saver.aget_tuple(config)
+            if checkpoint_tuple is None:
+                # No saved state to resume from. For `in_progress` tasks this
+                # means the task was claimed but the orchestrator never wrote
+                # a checkpoint before dying — almost always a crash before the
+                # first graph node completed. Mark them `failed` so the next
+                # scheduler tick re-queues fresh attempts instead of waiting
+                # the bookkeeper's 2h stale window. For `review` tasks we
+                # leave the page alone — a PR is live and stale-pr / ci-fixer
+                # bots own that lifecycle.
+                current_status = (
+                    (task.get("metadata") or {}).get("status") or task.get("status")
+                )
+                if current_status == "in_progress":
+                    logger.info(
+                        "factory: no checkpoint for %s — marking failed "
+                        "(orchestrator crashed pre-checkpoint)",
+                        page_name,
+                    )
+                    try:
+                        await client.transition_task(
+                            page_name,
+                            "failed",
+                            extra_fields={
+                                "factory_note": (
+                                    "Auto-failed on orchestrator startup: "
+                                    "no LangGraph checkpoint found for this "
+                                    "in_progress task. Re-queue by editing "
+                                    "status to planned."
+                                ),
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "factory: could not transition %s to failed: %s",
+                            page_name,
+                            exc,
+                        )
+                else:
+                    logger.info(
+                        "factory: no checkpoint for %s (status=%s) — "
+                        "skipping resume",
+                        page_name,
+                        current_status,
+                    )
+                continue
+
+            await _clear_stuck_grinders(graph, config, page_name)
+
+            # Register the page→thread_id mapping so /status can resolve it.
+            thread_id = config["configurable"]["thread_id"]
+            if hasattr(app, "state") and hasattr(app.state, "page_thread_map"):
+                app.state.page_thread_map[page_name] = thread_id
+
+            logger.info(
+                "factory: resuming interrupted task %s from checkpoint (thread_id=%s)",
+                page_name,
+                thread_id,
+            )
+
+            _spawn_graph_task(
+                app,
+                graph.ainvoke(None, config=config),
+                name=f"graph:{page_name}:resume",
+                thread_id=thread_id,
+            )
+
+
+async def _drain_graph_tasks(timeout_seconds: float) -> None:
+    """Wait for in-flight ``graph:*`` asyncio tasks to finish their current node.
+
+    Called from the lifespan shutdown path so a SIGTERM (e.g. ``docker restart``)
+    doesn't kill graph runs mid-LLM-call. LangGraph writes a checkpoint after
+    every node, so tasks that don't finish in time are cancelled but resume
+    cleanly from the last completed node on the next startup via
+    ``_resume_interrupted_tasks``.
+    """
+    pending = [
+        t
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("graph:") and not t.done()
+    ]
+    if not pending:
+        logger.info("factory: shutdown — no in-flight graph tasks to drain")
         return
 
-    factory_tasks = all_factory_tasks
-    logger.info("factory: found %d active factory task(s) on startup", len(factory_tasks))
-    for task in factory_tasks:
-        page_name = task.get("name", "")
-        if not page_name:
-            continue
-
-        config = {"configurable": {"thread_id": page_name}}
-        # Check whether a checkpoint exists for this thread.
-        checkpoint_tuple = await saver.aget_tuple(config)
-        if checkpoint_tuple is None:
-            logger.info("factory: no checkpoint for %s — skipping resume", page_name)
-            continue
-
-        logger.info("factory: resuming interrupted task %s from checkpoint", page_name)
-
-        def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
-            if not t.cancelled() and (exc := t.exception()):
-                logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
-
-        resume_task = asyncio.create_task(
-            graph.ainvoke(None, config=config),
-            name=f"graph:{page_name}:resume",
-        )
-        resume_task.add_done_callback(_log_exc)
+    logger.info(
+        "factory: shutdown — draining %d in-flight graph task(s) "
+        "with timeout=%.1fs",
+        len(pending),
+        timeout_seconds,
+    )
+    done, still_running = await asyncio.wait(pending, timeout=timeout_seconds)
+    logger.info(
+        "factory: shutdown — %d graph task(s) completed gracefully, "
+        "%d cancelled (will resume on next startup)",
+        len(done),
+        len(still_running),
+    )
+    # Cancel anything that didn't finish so the event loop can exit cleanly.
+    for t in still_running:
+        t.cancel()
+    # Give cancelled tasks a brief window to unwind before lifespan returns.
+    if still_running:
+        try:
+            await asyncio.wait(still_running, timeout=2.0)
+        except Exception:
+            pass
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open the SQLite checkpoint DB, build the graph, close on shutdown."""
+    """Open the SQLite checkpoint DB, build the graph, start bots, close on shutdown."""
     settings = get_settings()
+    validate_settings(settings)
+
+    # Per-orchestrator instance ID. Written to each in-flight task's page
+    # frontmatter by WorkerHeartbeatBot. If this orchestrator dies and a
+    # different one inherits its tasks, the new worker_id signals the
+    # transition; bookkeeper uses last_heartbeat staleness to release.
+    app.state.worker_id = str(uuid.uuid4())
+    logger.info("factory: worker_id=%s", app.state.worker_id)
+
+    # Build bot registry
+    bot_registry = BotRegistry()
+    bot_registry.register(BookkeeperBot())
+    bot_registry.register(TerminalReviewBot())
+    bot_registry.register(WorkerHeartbeatBot(worker_id=app.state.worker_id))
+    if settings.scheduler_enabled:
+        bot_registry.register(SchedulerBot())
+        logger.info(
+            "factory: scheduler bot enabled (interval=%ds)",
+            settings.scheduler_interval_seconds,
+        )
+    if settings.ci_fixer_enabled:
+        bot_registry.register(CIFixerBot())
+        logger.info(
+            "factory: ci-fixer bot enabled (interval=%ds)",
+            settings.ci_fixer_interval_seconds,
+        )
+    if settings.insight_enabled:
+        bot_registry.register(InsightBot())
+        logger.info(
+            "factory: insight bot enabled (interval=%ds)",
+            settings.insight_interval_seconds,
+        )
+    if settings.stale_pr_enabled:
+        bot_registry.register(StalePRBot())
+        logger.info(
+            "factory: stale-pr bot enabled (interval=%ds, failure_minutes=%d)",
+            settings.stale_pr_interval_seconds,
+            settings.stale_pr_failure_minutes,
+        )
+    if settings.class_gap_researcher_enabled:
+        bot_registry.register(ClassGapResearcherBot())
+        logger.info(
+            "factory: class-gap-researcher bot enabled (interval=%ds, model=%s)",
+            settings.class_gap_researcher_interval_seconds,
+            settings.class_gap_researcher_model,
+        )
+    if settings.purgatory_enabled:
+        bot_registry.register(PurgatoryBot())
+        logger.info(
+            "factory: purgatory bot enabled (interval=%ds, run_window=%ds)",
+            settings.purgatory_interval_seconds,
+            settings.purgatory_run_window_seconds,
+        )
+    app.state.bot_registry = bot_registry
+
     async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver:
         app.state.graph = build_graph(saver)
-        logger.info("factory: graph initialised with SQLite checkpointer at %s", settings.checkpoint_db)
+        app.state.saver = saver
+        app.state.settings = settings
+        # Maps page_name → LangGraph thread_id (UUID); allows /status to look up
+        # the correct checkpoint key even though asyncio task names use page_name.
+        app.state.page_thread_map: dict[str, str] = {}
+        # Strong references to in-flight graph tasks (asyncio only keeps weak
+        # refs, so a bare local can be GC'd mid-run) plus the set of thread_ids
+        # currently running, for webhook idempotency.
+        app.state.background_tasks: set[asyncio.Task] = set()
+        app.state.inflight_threads: set[str] = set()
+        # Approval/rework resumes that arrived while their thread was in
+        # flight; replayed when the running task finishes.
+        app.state.pending_resumes: dict[str, tuple] = {}
+        logger.info(
+            "factory: graph initialised with SQLite checkpointer at %s",
+            settings.checkpoint_db,
+        )
         await _resume_interrupted_tasks(app.state.graph, saver, settings)
+        await bot_registry.start_all()
         yield
+        # Shutdown order:
+        # 1. Stop bots first so they don't dispatch *new* work mid-drain.
+        # 2. Drain in-flight graph tasks (wait for checkpoint-boundary completion).
+        # 3. Close the SQLite saver via the async-with exit.
+        await bot_registry.stop_all()
+        await _drain_graph_tasks(settings.graph_shutdown_timeout_seconds)
     logger.info("factory: SQLite checkpointer closed")
 
 
@@ -122,20 +434,46 @@ def _verify_signature(body: bytes, signature_header: str | None) -> None:
         raise HTTPException(status_code=403, detail="Invalid signature")
 
 
-def _build_initial_state(page_name: str, data: dict[str, Any]) -> FactoryState:
+async def _resolve_thread_id(page_name: str, data: dict[str, Any]) -> str:
+    """Return the stable graph thread_id for *page_name*.
+
+    Prefers the ``uuid`` field from the webhook data payload (MeshWiki embeds
+    page metadata there).  Falls back to fetching the page via the API, then
+    ultimately to the page name itself for legacy pages that have no UUID yet.
+    """
+    if task_uuid := data.get("uuid"):
+        return task_uuid
+    try:
+        settings = get_settings()
+        async with MeshWikiClient(
+            settings.meshwiki_url, settings.meshwiki_api_key
+        ) as mc:
+            page = await mc.get_page(page_name)
+        if page:
+            return page.get("metadata", {}).get("uuid") or page_name
+    except Exception as exc:
+        logger.debug("factory: could not fetch UUID for %s: %s", page_name, exc)
+    return page_name
+
+
+def _build_initial_state(
+    page_name: str, thread_id: str, data: dict[str, Any]
+) -> FactoryState:
     """Build the initial FactoryState for a new graph thread.
 
     ``skip_decomposition`` is handled by ``task_intake_node`` which reads the
     full page from MeshWiki — no need to inspect the webhook payload here.
     """
+    task_uuid = thread_id if thread_id != page_name else None
     return FactoryState(
-        thread_id=page_name,
+        thread_id=thread_id,
         task_wiki_page=page_name,
+        task_uuid=task_uuid,
         title=data.get("title", page_name),
         requirements=data.get("requirements", ""),
         subtasks=[],
         decomposition_approved=False,
-        active_grinders={},
+        active_grinders=[],
         completed_subtask_ids=[],
         failed_subtask_ids=[],
         pm_messages=[],
@@ -157,6 +495,184 @@ def _build_initial_state(page_name: str, data: dict[str, Any]) -> FactoryState:
 async def health() -> dict[str, str]:
     """Liveness probe."""
     return {"status": "ok"}
+
+
+@app.get("/status")
+async def status(request: Request) -> dict:
+    """Dashboard status: bots, active graph threads, resource usage."""
+    bot_registry: BotRegistry = request.app.state.bot_registry
+    graph = request.app.state.graph
+    settings = request.app.state.settings
+
+    # ── Active asyncio graph tasks ────────────────────────────────────────────
+    running_tasks = {
+        t.get_name(): t
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("graph:") and not t.done()
+    }
+    # Collect unique thread IDs — "graph:<page>" and "graph:<page>:resume" etc.
+    active_thread_ids: set[str] = set()
+    for task_name in running_tasks:
+        parts = task_name.split(":", 2)
+        if len(parts) >= 2:
+            active_thread_ids.add(parts[1])
+
+    # ── Read LangGraph state for each active thread ───────────────────────────
+    active_graphs: list[dict] = []
+    total_cost_usd: float = 0.0
+    total_grinders: int = 0
+
+    page_thread_map: dict[str, str] = getattr(request.app.state, "page_thread_map", {})
+    for page_id in sorted(active_thread_ids):
+        # active_thread_ids contains page names (from asyncio task names).
+        # Resolve to the actual LangGraph thread_id (UUID) when available.
+        thread_id = page_thread_map.get(page_id, page_id)
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = await graph.aget_state(config)
+            if snapshot is None:
+                continue
+            v = snapshot.values
+            subtasks: list[dict] = list(v.get("subtasks") or [])
+            completed = list(v.get("completed_subtask_ids") or [])
+            failed = list(v.get("failed_subtask_ids") or [])
+            active_grinders: list[str] = list(v.get("active_grinders") or [])
+            cost: float = float(v.get("cost_usd") or 0.0)
+            total_cost_usd += cost
+            total_grinders += len(active_grinders)
+            active_graphs.append(
+                {
+                    "thread_id": page_id,  # page name for display
+                    "title": v.get("title", page_id),
+                    "graph_status": v.get("graph_status", "unknown"),
+                    "subtasks_total": len(subtasks),
+                    "subtasks_completed": len(completed),
+                    "subtasks_failed": len(failed),
+                    "active_grinders": len(active_grinders),
+                    "cost_usd": cost,
+                }
+            )
+        except Exception as exc:
+            logger.debug("status: could not read state for %s: %s", page_id, exc)
+
+    # ── Resources ─────────────────────────────────────────────────────────────
+    resources = {
+        "max_concurrent_parent_tasks": settings.max_concurrent_parent_tasks,
+        "active_parent_tasks": len(active_thread_ids),
+        "active_grinders": total_grinders,
+        "max_concurrent_sandboxes": FACTORY_MAX_CONCURRENT_SANDBOXES,
+        "total_cost_usd": round(total_cost_usd, 4),
+    }
+
+    return {
+        "bots": bot_registry.get_status(),
+        "active_graphs": active_graphs,
+        "resources": resources,
+        "generated_at": time.time(),
+    }
+
+
+@app.get("/hbr/status")
+async def hbr_status(request: Request) -> dict:
+    """HBR resource manager: daily cost vs budget, per-model usage, active sandboxes."""
+    hbr = get_hbr()
+    result = hbr.status()
+
+    # Count active sandboxes from LangGraph state across all running threads.
+    graph = request.app.state.graph
+    page_thread_map: dict[str, str] = getattr(request.app.state, "page_thread_map", {})
+    running_tasks = {
+        t.get_name(): t
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("graph:") and not t.done()
+    }
+    active_thread_ids: set[str] = set()
+    for task_name in running_tasks:
+        parts = task_name.split(":", 2)
+        if len(parts) >= 2:
+            active_thread_ids.add(parts[1])
+
+    active_sandboxes = 0
+    for page_id in active_thread_ids:
+        thread_id = page_thread_map.get(page_id, page_id)
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = await graph.aget_state(config)
+            if snapshot:
+                active_sandboxes += len(snapshot.values.get("active_grinders") or [])
+        except Exception as exc:
+            logger.debug("hbr_status: could not read state for %s: %s", page_id, exc)
+
+    result["active_sandboxes"] = active_sandboxes
+    result["max_sandboxes"] = FACTORY_MAX_CONCURRENT_SANDBOXES
+    return result
+
+
+@app.get("/tasks")
+async def tasks(
+    request: Request,
+    status: str | None = None,
+    assignee: str | None = None,
+    repo: str | None = None,
+    parent_task: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Factory task inventory: counts by status + most recently modified.
+
+    Query params:
+      - status / assignee / repo / parent_task: filter the underlying
+        MeshWiki task query (forwarded to ``MeshWikiClient.list_tasks``).
+      - limit: how many recently-modified tasks to include in the
+        ``recent`` list (default 20). The full ``items`` list is always
+        returned so callers can paginate client-side.
+
+    Response shape::
+
+        {
+          "total": 73,
+          "by_status": {"planned": 8, "in_progress": 2, ...},
+          "recent": [
+            {"name": "...", "status": "...", "title": "...", "modified": "..."},
+            ...
+          ],
+          "items": [<full task dicts as returned by MeshWiki>]
+        }
+    """
+    settings = get_settings()
+    async with MeshWikiClient(
+        settings.meshwiki_url, settings.meshwiki_api_key
+    ) as client:
+        items = await client.list_tasks(
+            status=status, assignee=assignee, repo=repo, parent_task=parent_task,
+        )
+
+    by_status: dict[str, int] = {}
+    for t in items:
+        s = (t.get("metadata") or {}).get("status") or "unknown"
+        by_status[s] = by_status.get(s, 0) + 1
+
+    def _modified(t: dict) -> str:
+        return (t.get("metadata") or {}).get("modified") or ""
+
+    recent = sorted(items, key=_modified, reverse=True)[: max(0, limit)]
+    recent_view = [
+        {
+            "name": t.get("name"),
+            "status": (t.get("metadata") or {}).get("status"),
+            "title": (t.get("metadata") or {}).get("title"),
+            "repo": (t.get("metadata") or {}).get("repository")
+            or (t.get("metadata") or {}).get("repo"),
+            "modified": _modified(t),
+        }
+        for t in recent
+    ]
+
+    return {
+        "total": len(items),
+        "by_status": by_status,
+        "recent": recent_view,
+        "items": items,
+    }
 
 
 @app.post("/webhook")
@@ -192,41 +708,119 @@ async def receive_webhook(
     page_name: str = payload.get("page", "")
     data: dict[str, Any] = payload.get("data", {})
 
-    logger.info("webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name)
+    logger.info(
+        "webhook: received event=%s (raw=%s) page=%s", event, raw_event, page_name
+    )
 
     if event == "task.assigned":
+        # Skip subtask pages — they are driven by their parent graph thread.
+        # MeshWiki includes full page metadata in `data`, so parent_task is
+        # available here without an extra HTTP round-trip.
+        if data.get("parent_task"):
+            logger.debug(
+                "webhook: ignoring task.assigned for subtask %s (parent_task=%s)",
+                page_name,
+                data["parent_task"],
+            )
+            return {"status": "ignored", "reason": "subtask managed by parent graph"}
+
         graph = request.app.state.graph
-        initial_state = _build_initial_state(page_name, data)
-        config = {"configurable": {"thread_id": page_name}}
+        thread_id = await _resolve_thread_id(page_name, data)
 
-        def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
-            if not t.cancelled() and (exc := t.exception()):
-                logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
+        # Idempotency: a re-delivered webhook must not start a second run for
+        # the same thread. inflight_threads is checked and added atomically here
+        # (no await between the check and _spawn_graph_task), so concurrent
+        # duplicate deliveries can't both slip through.
+        if thread_id in getattr(request.app.state, "inflight_threads", set()):
+            logger.info(
+                "webhook: ignoring duplicate task.assigned for %s "
+                "(thread_id=%s already running)",
+                page_name,
+                thread_id,
+            )
+            return {"status": "ignored", "reason": "graph already running"}
 
-        task = asyncio.create_task(
+        initial_state = _build_initial_state(page_name, thread_id, data)
+        config = {"configurable": {"thread_id": thread_id}}
+
+        request.app.state.page_thread_map[page_name] = thread_id
+        _spawn_graph_task(
+            request.app,
             graph.ainvoke(initial_state, config=config),
             name=f"graph:{page_name}",
+            thread_id=thread_id,
         )
-        task.add_done_callback(_log_exc)
-        logger.info("webhook: started graph task for %s", page_name)
+        logger.info(
+            "webhook: started graph task for %s (thread_id=%s)", page_name, thread_id
+        )
         return {"status": "started"}
 
     if event == "task.approved":
         graph = request.app.state.graph
-        config = {"configurable": {"thread_id": page_name}}
+        thread_id = await _resolve_thread_id(page_name, data)
+        config = {"configurable": {"thread_id": thread_id}}
         approval = data.get("approval", "approve")
         feedback = data.get("feedback")
-        asyncio.create_task(
-            graph.ainvoke(
+        started = _queue_or_spawn_resume(
+            request.app,
+            lambda: graph.ainvoke(
                 {"human_approval_response": approval, "human_feedback": feedback},
                 config=config,
             ),
             name=f"graph:{page_name}:resume",
+            thread_id=thread_id,
         )
+        if not started:
+            logger.info(
+                "webhook: queued task.approved for %s until thread_id=%s finishes",
+                page_name,
+                thread_id,
+            )
+            return {"status": "queued"}
         logger.info(
             "webhook: resumed graph task for %s (approval=%s)", page_name, approval
         )
         return {"status": "resumed"}
+
+    if event == "task.rework":
+        # CI fixer bot detected a failure and transitioned the task back to
+        # in_progress. Resume the graph so the PM re-dispatches the grinder
+        # with the CI failure context from the wiki page.
+        if data.get("parent_task"):
+            logger.debug(
+                "webhook: ignoring task.rework for subtask %s (parent_task=%s)",
+                page_name,
+                data["parent_task"],
+            )
+            return {"status": "ignored", "reason": "subtask managed by parent graph"}
+        graph = request.app.state.graph
+        thread_id = await _resolve_thread_id(page_name, data)
+        config = {"configurable": {"thread_id": thread_id}}
+        started = _queue_or_spawn_resume(
+            request.app,
+            lambda: graph.ainvoke(
+                {
+                    "human_approval_response": "changes_requested",
+                    "human_feedback": (
+                        "CI failure detected on the PR. "
+                        "See the ## CI Failure section on the wiki task page for "
+                        "root cause and suggested fix, then push a corrected commit."
+                    ),
+                },
+                config=config,
+            ),
+            name=f"graph:{page_name}:rework",
+            thread_id=thread_id,
+        )
+        if not started:
+            logger.info(
+                "webhook: queued task.rework for %s until thread_id=%s finishes",
+                page_name,
+                thread_id,
+            )
+            return {"status": "queued"}
+        logger.info("webhook: resuming graph for CI rework on %s", page_name)
+        return {"status": "rework"}
 
     if event == "task.pr_merged":
         # The GitHub→MeshWiki→orchestrator loop completes here.

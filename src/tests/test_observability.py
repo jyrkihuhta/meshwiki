@@ -135,10 +135,32 @@ async def auth_client(auth_settings):
 
 
 @pytest.mark.asyncio
-async def test_metrics_exempt_from_auth(auth_client):
-    """/metrics must be accessible even when auth is enabled."""
+async def test_metrics_requires_auth(auth_client):
+    """/metrics returns 401 for unauthenticated requests when auth is enabled."""
     resp = await auth_client.get("/metrics")
-    # Should NOT redirect to /login
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_metrics_accessible_with_bearer_token(
+    auth_client, auth_settings, monkeypatch
+):
+    """/metrics is accessible with a valid Bearer token (for Prometheus scrapers)."""
+    import meshwiki.config as cfg
+    import meshwiki.main
+
+    patched = cfg.Settings(
+        data_dir=auth_settings.data_dir,
+        auth_enabled=True,
+        auth_password="hunter2",
+        session_secret="test-secret-key-32-chars-minimum!",
+        graph_watch=False,
+        factory_api_key="test-scrape-key",
+    )
+    monkeypatch.setattr(meshwiki.main, "settings", patched)
+    resp = await auth_client.get(
+        "/metrics", headers={"Authorization": "Bearer test-scrape-key"}
+    )
     assert resp.status_code == 200
 
 
@@ -180,6 +202,35 @@ async def test_logging_produces_structured_events():
     assert record.get("event") == "test_event"
     assert record.get("key") == "value"
     assert record.get("log_level") == "info"
+
+
+@pytest.mark.asyncio
+async def test_request_id_bound_to_context(client):
+    """LoggingMiddleware must bind request_id to structlog context vars."""
+    import structlog
+    import structlog.contextvars
+
+    import meshwiki.main
+
+    captured: list[dict] = []
+
+    original_dispatch = meshwiki.main.LoggingMiddleware.dispatch
+
+    async def capturing_dispatch(self, request, call_next):
+        response = await original_dispatch(self, request, call_next)
+        captured.append(dict(structlog.contextvars.get_contextvars()))
+        return response
+
+    meshwiki.main.LoggingMiddleware.dispatch = capturing_dispatch
+    try:
+        await client.get("/health/live")
+    finally:
+        meshwiki.main.LoggingMiddleware.dispatch = original_dispatch
+
+    assert captured, "dispatch was never called"
+    ctx = captured[0]
+    assert "request_id" in ctx
+    assert len(ctx["request_id"]) == 36  # UUID4
 
 
 # ── M0.2: /health/ready endpoint ─────────────────────────────────────────────
@@ -267,3 +318,38 @@ async def test_csp_header_present(client):
     assert "unpkg.com" in csp
     assert "cdnjs.cloudflare.com" in csp
     assert "wss:" in csp
+
+
+# ── M13: stdlib logging regression guard ──────────────────────────────────────
+
+
+def test_no_stdlib_logging_in_app_code():
+    """Assert no .py file under src/meshwiki/ contains stdlib 'import logging'."""
+    import re
+    from pathlib import Path
+
+    src_root = Path("/tmp/repo/src/meshwiki")
+    offenders = []
+
+    for py_file in src_root.rglob("*.py"):
+        if "__pycache__" in py_file.parts:
+            continue
+        content = py_file.read_text()
+        for lineno, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if (
+                stripped.startswith("#")
+                or stripped.startswith('"""')
+                or stripped.startswith("'''")
+            ):
+                continue
+            if '"import logging"' in line or "'import logging'" in line:
+                offenders.append(f"{py_file}:{lineno}")
+                continue
+            if re.match(r"^\s*from\s+logging\s+import", stripped):
+                offenders.append(f"{py_file}:{lineno}")
+
+    assert offenders == [], (
+        "The following files contain stdlib 'import logging' or 'from logging import'. "
+        "Use structlog instead:\n" + "\n".join(offenders)
+    )

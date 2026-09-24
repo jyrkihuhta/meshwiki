@@ -26,6 +26,7 @@
             </div>
             <div class="page-actions">
                 <a href="/page/{{ page.name.replace(' ', '_') }}/edit" class="btn">Edit</a>
+                <a href="/page/{{ page.name.replace(' ', '_') }}/history" class="btn">History</a>
                 <form method="post" action="/page/{{ page.name.replace(' ', '_') }}/delete"
                       onsubmit="return confirm('Delete &quot;{{ page.title }}&quot;? This cannot be undone.');"
                       style="display:inline">
@@ -36,12 +37,16 @@
     </div>
 
     <div class="page-body">
-        <div class="page-content" id="page-content">
+        <div class="page-content" id="page-content"
+             hx-get="/api/pages/{{ page.name.replace(' ', '_') }}/fragment"
+             hx-trigger="metatable-refresh"
+             hx-swap="innerHTML">
             {% if frontmatter %}
             <aside class="frontmatter-card">
-                <h4 class="frontmatter-card-header">Properties</h4>
+                <h4 class="frontmatter-card-header">Properties<button class="frontmatter-card-toggle" aria-label="Toggle properties"></button></h4>
                 <dl class="frontmatter-dl">
                     {% for key, values in frontmatter.items() %}
+                    {% if key not in ('children', 'uuid', 'created', 'modified', 'name') %}
                     <div class="frontmatter-row">
                         <dt>{{ key }}</dt>
                         <dd>
@@ -56,6 +61,7 @@
                             {% endif %}
                         </dd>
                     </div>
+                    {% endif %}
                     {% endfor %}
                 </dl>
             </aside>
@@ -64,16 +70,50 @@
             {{ html_content | safe }}
         </div>
 
-        {% if backlinks %}
-        <aside class="backlinks-panel">
-            <h3>Pages linking here</h3>
-            <ul class="backlinks-list">
-                {% for link in backlinks %}
-                <li>
-                    <a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a>
-                </li>
-                {% endfor %}
-            </ul>
+        {% if outlinks or backlinks %}
+        <aside class="connections-panel">
+            <div class="connections-columns">
+                {% if outlinks %}
+                <div class="connections-col">
+                    <h3>Links</h3>
+                    <ul class="connections-list">
+                        {% for link in outlinks[:10] %}
+                        <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% if outlinks | length > 10 %}
+                    <details class="connections-overflow">
+                        <summary>{{ outlinks | length - 10 }} more</summary>
+                        <ul class="connections-list">
+                            {% for link in outlinks[10:] %}
+                            <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endif %}
+                {% if backlinks %}
+                <div class="connections-col">
+                    <h3>Backlinks</h3>
+                    <ul class="connections-list">
+                        {% for link in backlinks[:10] %}
+                        <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% if backlinks | length > 10 %}
+                    <details class="connections-overflow">
+                        <summary>{{ backlinks | length - 10 }} more</summary>
+                        <ul class="connections-list">
+                            {% for link in backlinks[10:] %}
+                            <li><a href="/page/{{ link.replace(' ', '_') }}" class="wiki-link">{{ link }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
         </aside>
         {% endif %}
 
@@ -91,4 +131,38 @@
 </article>
 {% endblock %}
 
+{% block extra_scripts %}
+<script>
+(function () {
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  // Store on window so base.html's htmx:beforeSwap handler can close it on navigation.
+  window._meshwikiWS = new WebSocket(proto + "//" + location.host + "/ws/graph");
+  var ws = window._meshwikiWS;
+  var debounce;
 
+  var currentPage = {{ page.name | tojson }};
+  ws.addEventListener("message", function (ev) {
+    try {
+      var msg = JSON.parse(ev.data);
+      if (msg.type === "page_updated" && msg.page === currentPage) {
+        // Debounce: wait 800ms after the last event before refreshing.
+        clearTimeout(debounce);
+        debounce = setTimeout(function () {
+          htmx.trigger(document.getElementById("page-content"), "metatable-refresh");
+        }, 800);
+      }
+    } catch (e) {}
+  });
+
+  // After HTMX swaps in new content, re-initialise Mermaid diagrams.
+  document.addEventListener("htmx:afterSwap", function (e) {
+    if (e.target && e.target.id === "page-content") {
+      if (typeof mermaid !== "undefined") {
+        var nodes = e.target.querySelectorAll(".mermaid:not([data-processed])");
+        if (nodes.length) mermaid.run({ nodes: nodes });
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

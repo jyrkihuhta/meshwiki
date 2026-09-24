@@ -41,6 +41,25 @@ def get_session(task_name: str) -> TerminalSession | None:
     return _sessions.get(task_name)
 
 
+def resolve_session_name(url_name: str) -> str:
+    """Resolve a URL path segment to the canonical session key.
+
+    Wiki URLs encode spaces as underscores, but page names may also contain
+    real underscores (e.g. ``get_engine()``).  A naive ``replace("_", " ")``
+    would corrupt those.  Instead, search existing sessions for one whose key,
+    when spaces are replaced by underscores, matches the incoming URL segment.
+
+    Falls back to ``url_name.replace("_", " ")`` if no session matches
+    (preserves the old behaviour for pages with no real underscores).
+    """
+    if url_name in _sessions:
+        return url_name
+    for key in _sessions:
+        if key.replace(" ", "_") == url_name:
+            return key
+    return url_name.replace("_", " ")
+
+
 def subscribe(task_name: str) -> asyncio.Queue[str | None] | None:
     """Register a new WebSocket subscriber.
 

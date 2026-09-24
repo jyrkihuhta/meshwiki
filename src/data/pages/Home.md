@@ -12,10 +12,10 @@ A modern wiki platform with graph-powered metadata queries, backlinks, and live 
 
 ## Quick Links
 
-- [[Docs/Getting Started]] - New here? Start with the basics
-- [[Docs/Markdown Guide]] - Learn the wiki's formatting syntax
-- [[Project Roadmap]] - Where we're headed
-- [[Docs/Architecture Overview]] - How the system works
+- [[Getting_Started]] - New here? Start with the basics
+- [[Markdown_Guide]] - Learn the wiki's formatting syntax
+- [[Project_Roadmap]] - Where we're headed
+- [[Architecture_Overview]] - How the system works
 
 ## Recent Projects
 
@@ -34,4 +34,4 @@ A modern wiki platform with graph-powered metadata queries, backlinks, and live 
 - **Tags** - Organize with frontmatter tags
 - **Live Preview** - Toggle preview while editing
 
-See the [[Docs/Markdown Guide]] for the full syntax reference.
+See the [[Markdown_Guide]] for the full syntax reference.

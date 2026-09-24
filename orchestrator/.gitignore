@@ -1,0 +1,20 @@
+# Orchestrator Python bytecode and build artifacts
+# (Root .gitignore already covers these, but listing them here makes
+#  intent explicit and keeps the orchestrator self-contained.)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/

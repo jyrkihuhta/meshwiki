@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,6 +14,8 @@ from factory.agents.grinder_agent import (
     GRINDER_SYSTEM_PROMPT,
     GRINDER_TOOLS,
     GrinderToolExecutor,
+    _artifact_intro,
+    build_grinder_task_prompt,
     grind_subtask,
     grind_subtask_e2b,
 )
@@ -38,7 +42,7 @@ def _make_state(**kwargs) -> FactoryState:
         "requirements": "Implement a test feature.",
         "subtasks": [],
         "decomposition_approved": False,
-        "active_grinders": {},
+        "active_grinders": [],
         "completed_subtask_ids": [],
         "failed_subtask_ids": [],
         "pm_messages": [],
@@ -68,6 +72,7 @@ def _make_subtask(**kwargs) -> SubTask:
         "max_attempts": 3,
         "error_log": [],
         "files_touched": ["src/meshwiki/main.py"],
+        "acceptance_criteria": [],
         "token_budget": 10000,
         "tokens_used": 0,
         "review_feedback": None,
@@ -178,6 +183,51 @@ async def test_grinder_tool_list_directory_missing(tmp_path: Path) -> None:
     result = await executor.execute("list_directory", {"path": "nonexistent"})
 
     assert "not found" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# GrinderToolExecutor: path traversal confinement (B1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_read_file_rejects_traversal(tmp_path: Path) -> None:
+    """read_file must not read files outside repo_root via ``..``."""
+    secret = tmp_path.parent / "outside_secret.txt"
+    secret.write_text("TOP SECRET")
+    executor = _make_executor(tmp_path)
+
+    result = await executor.execute("read_file", {"path": "../outside_secret.txt"})
+    assert "TOP SECRET" not in result
+    assert "Error" in result
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_read_file_rejects_absolute(tmp_path: Path) -> None:
+    """read_file must reject absolute paths."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute("read_file", {"path": "/etc/passwd"})
+    assert "Error" in result
+    assert "root:" not in result
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_write_file_rejects_traversal(tmp_path: Path) -> None:
+    """write_file must not write outside repo_root via ``..``."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute(
+        "write_file", {"path": "../escaped.py", "content": "pwned"}
+    )
+    assert "Error" in result
+    assert not (tmp_path.parent / "escaped.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_grinder_tool_list_directory_rejects_traversal(tmp_path: Path) -> None:
+    """list_directory must reject traversal outside repo_root."""
+    executor = _make_executor(tmp_path)
+    result = await executor.execute("list_directory", {"path": "../.."})
+    assert "Error" in result
 
 
 @pytest.mark.asyncio
@@ -368,8 +418,8 @@ async def test_grind_subtask_creates_pr() -> None:
             ):
                 result = await grind_subtask(state, subtask, meshwiki_client)
 
-    assert result["status"] == "review"
-    assert result["pr_url"] == pr_url
+    assert result["subtask"]["status"] == "review"
+    assert result["subtask"]["pr_url"] == pr_url
 
 
 @pytest.mark.asyncio
@@ -434,13 +484,75 @@ async def test_grind_subtask_fails_on_budget() -> None:
         ):
             result = await grind_subtask(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None
 
 
 # ---------------------------------------------------------------------------
 # Module-level sanity checks
 # ---------------------------------------------------------------------------
+
+
+def test_scrub_secrets_redacts_token() -> None:
+    """_scrub_secrets removes the GitHub token from relayed terminal text (B4)."""
+    from factory.agents.grinder_agent import _scrub_secrets
+
+    token = "ghp_supersecrettoken123"
+    text = (
+        f"remote: https://x-access-token:{token}@github.com/owner/repo.git failed"
+    )
+    scrubbed = _scrub_secrets(text, token)
+    assert token not in scrubbed
+    assert "***" in scrubbed
+
+
+def test_scrub_secrets_ignores_empty_token() -> None:
+    """_scrub_secrets is a no-op when the secret is empty."""
+    from factory.agents.grinder_agent import _scrub_secrets
+
+    assert _scrub_secrets("plain text", "") == "plain text"
+
+
+def test_stream_scrubber_redacts_token_split_across_chunks() -> None:
+    """A token split across PTY chunks never reaches the output unredacted."""
+    from factory.agents.grinder_agent import _StreamScrubber
+
+    token = "ghp_ABCDEFGHIJKLMNOP1234"
+    scrubber = _StreamScrubber(token)
+    out = scrubber.feed("clone https://x-access-token:ghp_ABCDEF")
+    out += scrubber.feed("GHIJKLMNOP1234@github.com/o/r failed")
+    out += scrubber.flush()
+
+    assert token not in out
+    assert "ghp_ABCDEF" not in out
+    assert out == "clone https://x-access-token:***@github.com/o/r failed"
+
+
+def test_stream_scrubber_does_not_delay_ordinary_output() -> None:
+    """Text that cannot start a secret is emitted immediately."""
+    from factory.agents.grinder_agent import _StreamScrubber
+
+    scrubber = _StreamScrubber("ghp_secret")
+    assert scrubber.feed("Building wheel... done\r\n") == "Building wheel... done\r\n"
+    assert scrubber.flush() == ""
+
+
+def test_stream_scrubber_flush_releases_harmless_tail() -> None:
+    """A held-back tail that turns out not to be a secret is released on flush."""
+    from factory.agents.grinder_agent import _StreamScrubber
+
+    scrubber = _StreamScrubber("ghp_secret")
+    assert scrubber.feed("see gh") == "see "
+    assert scrubber.flush() == "gh"
+
+
+def test_stream_scrubber_no_secrets_passthrough() -> None:
+    """With no (or empty) secrets configured the scrubber is a passthrough."""
+    from factory.agents.grinder_agent import _StreamScrubber
+
+    scrubber = _StreamScrubber("")
+    assert scrubber.feed("anything") == "anything"
+    assert scrubber.flush() == ""
 
 
 def test_grinder_system_prompt_not_empty() -> None:
@@ -470,6 +582,544 @@ def test_grinder_tools_list() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_grinder_task_prompt — branch handling for fresh vs rework runs
+# ---------------------------------------------------------------------------
+
+
+def _make_prompt_subtask(
+    subtask_id: str = "abcd1234-sub-01", title: str = "Add X"
+) -> dict:
+    return {
+        "id": subtask_id,
+        "wiki_page": "Task_0001_X",
+        "parent_task": "Task_0001",
+        "title": title,
+        "description": "",
+        "status": "pending",
+        "attempt": 0,
+        "max_attempts": 3,
+        "error_log": [],
+        "files_touched": [],
+        "acceptance_criteria": [],
+        "token_budget": 50000,
+        "tokens_used": 0,
+        "assigned_grinder": None,
+        "branch_name": None,
+        "pr_url": None,
+        "pr_number": None,
+        "review_feedback": None,
+        "code_skeleton": None,
+    }
+
+
+def test_build_grinder_task_prompt_fresh_run_uses_canonical_branch() -> None:
+    """A fresh (non-rework) run must check out factory/<id> from base_branch
+    and push HEAD; no rework warnings should appear."""
+    sub = _make_prompt_subtask("eb21874d-sub-73fe18")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    assert "factory/eb21874d-sub-73fe18" in prompt
+    assert "git push -u origin HEAD" in prompt
+    assert "REWORK REQUIRED" not in prompt
+    assert "NEVER create a new branch" not in prompt
+    # Step 9 must instruct the agent to write the body to a file and pass
+    # --body-file. Using --body "..." with markdown content (backticks,
+    # newlines, dollar signs) breaks bash interpretation of the string.
+    assert "--body-file" in prompt
+    assert "gh pr create" in prompt
+    # The concrete command shown to the agent must use --body-file, not
+    # --body "...". (The note may reference --body "..." as a warning.)
+    assert "--body-file /tmp/pr-body.md" in prompt
+    assert (
+        'gh pr create --base staging --head factory/eb21874d-sub-73fe18 --title "[Factory] ..." --body "..."'
+        not in prompt
+    )
+
+
+def test_create_pr_uses_body_file() -> None:
+    """_create_pr writes the body to a temp file and invokes
+    `gh pr create --body-file <path>` so markdown content (backticks,
+    newlines, dollar signs) is never interpreted by a shell.
+
+    Regression test for the observed failure mode where agents used
+    `gh pr create --body "..."` and bash tried to execute
+    `playbooks/foo.md`, `checks:`, `mode:`, etc.
+    """
+    from factory.agents.grinder_agent import GrinderToolExecutor
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+        stdout = "https://github.com/owner/repo/pull/7"
+        stderr = ""
+
+    def _fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        captured["body_file_path"] = cmd[cmd.index("--body-file") + 1]
+        captured["body_on_disk"] = open(
+            captured["body_file_path"], encoding="utf-8"
+        ).read()
+        return _FakeProc()
+
+    agent = GrinderToolExecutor.__new__(GrinderToolExecutor)
+    agent.repo_root = "/tmp"
+
+    body = (
+        "## Summary\n"
+        "\n"
+        "- adds `playbooks/foo.md`\n"
+        "- checks: yes\n"
+        "- mode: strict\n"
+        "\n"
+        "References `$X` and `$(cmd)`.\n"
+    )
+
+    with patch(
+        "factory.agents.grinder_agent.get_settings",
+        return_value=MagicMock(pr_base_branch="staging"),
+    ):
+        with patch(
+            "factory.agents.grinder_agent.subprocess.run", side_effect=_fake_run
+        ):
+            url = agent._create_pr(
+                title="[Factory] add foo", body=body, branch_name="factory/task-x"
+            )
+
+    assert url == "https://github.com/owner/repo/pull/7"
+    cmd = captured["cmd"]
+    assert cmd[0:3] == ["gh", "pr", "create"]
+    assert "--body-file" in cmd
+    # Body was written verbatim to the file (including markdown special chars
+    # that would have broken bash if passed inline).
+    assert captured["body_on_disk"] == body
+    # The temp file is cleaned up by the helper after the subprocess returns.
+    assert not os.path.exists(captured["body_file_path"])
+    # The body must NOT have been passed inline via --body (which would
+    # defeat the purpose of the file-based approach for shell callers).
+    assert "--body" not in cmd
+
+
+def test_build_grinder_task_prompt_rework_forbids_new_branches() -> None:
+    """A rework must explicitly forbid creating new semantic branches and
+    push back to the canonical factory/<id> branch with --force-with-lease.
+    Failure mode this test guards against (observed in production
+    2026-05-06): grinder created factory/foo-v2, factory/foo-rework, etc.,
+    leaving the open PR pointing at the old broken file."""
+    sub = _make_prompt_subtask("35b3cb7c-sub-3feb68")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="Schema violation: mode must be deterministic.",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Canonical branch is mentioned and the rework warning is present.
+    assert "factory/35b3cb7c-sub-3feb68" in prompt
+    assert "REWORK REQUIRED" in prompt
+    assert "NEVER create a new branch" in prompt
+    # Forbidden semantic patterns must be called out by name so the LLM
+    # has an explicit rule to follow.
+    assert "factory/foo-v2" in prompt
+    assert "factory/foo-rework" in prompt
+    # Push must target the exact PR branch with --force-with-lease (since
+    # we may rebase). Pushing HEAD without an explicit branch is a footgun
+    # if the LLM has wandered onto a different branch.
+    assert "git push --force-with-lease origin factory/35b3cb7c-sub-3feb68" in prompt
+    assert "git push -u origin HEAD" not in prompt
+    # The previous review feedback is surfaced verbatim so the grinder
+    # knows what to fix.
+    assert "Schema violation: mode must be deterministic." in prompt
+    # Step 9 must NOT instruct the grinder to open a new PR.
+    assert "gh pr create" not in prompt
+    assert "Update the existing PR" in prompt
+
+
+def test_artifact_intro_playbook_forbids_python_linters() -> None:
+    """The playbook artifact intro must NOT instruct the agent to run
+    `ruff check` / `black --check` on `.md` playbook files — those linters
+    always produce spurious noise on Markdown+YAML files."""
+    intro = _artifact_intro("playbook", "playbooks")
+    # Hard rule: do NOT run python linters on playbook files.
+    assert "DO NOT run `ruff check` or `black --check`" in intro
+    # And we must point at a real alternative validator.
+    assert "validate_playbooks.py" in intro or "frontmatter-only YAML parser" in intro
+    # We previously had the line "Lint with `ruff check . && black --check .`"
+    # in this paragraph — it must be gone now.
+    assert "ruff check . && black --check ." not in intro
+
+
+def test_build_grinder_task_prompt_playbook_skips_python_linters() -> None:
+    """A non-MeshWiki playbook task must skip the ruff/black autofix step
+    (which always fails on `.md` files) and instead instruct the agent to
+    validate with a YAML/frontmatter-only parser."""
+    sub = _make_prompt_subtask("0001-skip-python-linters")
+    sub["files_touched"] = ["playbooks/new-md-only-playbook.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Step 4 must NOT run ruff/black against .md playbook files.
+    assert "ruff check --fix playbooks" not in prompt
+    assert "black playbooks" not in prompt
+    # And it must explicitly forbid them.
+    assert "SKIP `ruff check` / `black --check`" in prompt
+    # And it must point at a concrete validator fallback.
+    assert "scripts/validate_playbooks.py" in prompt
+    assert "yaml.safe_load" in prompt
+    # Markdown-only playbook diffs must NOT run the full `pytest tests/` suite
+    # (the cryptography fixture would 120s-timeout); narrow to the loader
+    # test only.
+    assert "python -m pytest tests/ -x -q" not in prompt
+    assert "python -m pytest tests/test_playbook_loader.py" in prompt
+    assert "cryptography" in prompt
+
+
+def test_build_grinder_task_prompt_mentions_pycache_preflight() -> None:
+    """Both the fresh and rework prompts must instruct the agent to handle
+    __pycache__/*.pyc before any `git rebase` step — these artifacts are
+    produced by pytest and would otherwise block the rebase with
+    'cannot rebase: You have unstaged changes', forcing a
+    stash/rebase/stash-pop dance in every task.
+
+    Acceptance criteria for the Task-0002 (Pre-clean __pycache__ artifacts):
+      - Before `git rebase`, run `git clean -fdX` (or targeted rm) to remove
+        __pycache__ directories created by the test run.
+      - No `__pycache__/*.pyc` files appear in `git status` before push.
+      - No `git stash` step is needed to clear cache pollution before rebase.
+    """
+    sub = _make_prompt_subtask("ecfdbfa7-sub-clean")
+
+    # Fresh-run path
+    fresh_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "__pycache__" in fresh_prompt
+    # Acceptance #1: must use `-fdX` (ignored-only) so untracked source is safe.
+    assert "git clean -fdX" in fresh_prompt
+    # The instruction must appear BEFORE the rebase step so the agent sees
+    # it as part of the workflow, not as a post-mortem fix.
+    assert fresh_prompt.index("__pycache__") < fresh_prompt.index("Rebase onto")
+    # Fresh prompt should also mention the rebase pre-flight check.
+    assert "working tree is clean" in fresh_prompt
+    assert "git status --porcelain" in fresh_prompt
+    # Acceptance #3: the prompt must NOT require `git stash` to clear cache.
+    # We split the prompt into "before rebase" and "after rebase" sections by
+    # the first occurrence of the rebase step header, then assert the
+    # pre-rebase block never instructs the agent to RUN `git stash`.
+    # (The phrase "no `git stash` step is needed" is allowed — it's the
+    # negation that fulfils the acceptance criterion.)
+    rebase_marker = "Rebase onto"
+    pre_rebase_block = fresh_prompt[: fresh_prompt.index(rebase_marker)]
+    stash_command_patterns = [
+        r"`git stash`\s*&&",  # chained shell command
+        r"git\s+stash\s+(?:--|-u)",  # git stash with any flag
+        r"fall\s+back\s+to.*git\s+stash",
+        r"run\s+`git\s+stash`",
+    ]
+    for pat in stash_command_patterns:
+        assert not re.search(pat, pre_rebase_block, re.IGNORECASE), (
+            f"Acceptance #3 violated: pre-rebase block contains stash command "
+            f"matching /{pat}/. Pre-rebase block:\n{pre_rebase_block}"
+        )
+
+    # Rework path must carry the same pre-flight rule (otherwise reworks
+    # trip over the same bytecode issue).
+    rework_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="fix the schema",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "__pycache__" in rework_prompt
+    assert "git clean -fdX" in rework_prompt
+    assert rework_prompt.index("__pycache__") < rework_prompt.index("Rebase onto")
+    rework_pre_rebase = rework_prompt[: rework_prompt.index("Rebase onto")]
+    for pat in stash_command_patterns:
+        assert not re.search(pat, rework_pre_rebase, re.IGNORECASE), (
+            f"Acceptance #3 violated: rework pre-rebase block contains stash "
+            f"command matching /{pat}/. Block:\n{rework_pre_rebase}"
+        )
+
+
+def test_build_grinder_task_prompt_pycache_preflight_targets_known_paths() -> None:
+    """The pre-clean command must target the well-known __pycache__ paths used
+    by the MeshWiki, orchestrator, and tests trees (acceptance #1: targeted
+    removal, not a blanket `git clean -fd` which could nuke untracked work).
+    """
+    sub = _make_prompt_subtask("ecfdbfa7-targets")
+
+    fresh_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The fresh pre-flight command must list the canonical cache roots.
+    assert "__pycache__" in fresh_prompt
+    # Targeted removal: pathspecs reference __pycache__ directories (not a
+    # blanket `git clean -fd` which would also delete other ignored files).
+    assert re.search(
+        r"git clean -fdX[^\n]*__pycache__", fresh_prompt
+    ), "Expected `git clean -fdX ... __pycache__ ...` in the fresh prompt."
+
+    rework_prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="fix the schema",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert re.search(
+        r"git clean -fdX[^\n]*__pycache__", rework_prompt
+    ), "Expected `git clean -fdX ... __pycache__ ...` in the rework prompt."
+
+
+def test_build_grinder_task_prompt_non_playbook_armory_keeps_lint() -> None:
+    """Regression guard: a non-playbook armory task (e.g. `tool`) MUST still
+    have the ruff/black autofix command available for the case where the diff
+    touches `.py` files. The command is now gated on a `git diff --name-only`
+    check, but the lint command itself must still be present (only the
+    unconditional repo-wide lint was removed)."""
+    sub = _make_prompt_subtask("0001-tool-still-lints")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The lint command must still be present (inside the diff-conditional
+    # branch) so the agent has something to run when .py files are touched.
+    assert "ruff check --fix molly/tools" in prompt
+    assert "black molly/tools" in prompt
+    # And the prompt must gate the lint on the diff touching .py files
+    # (criterion #3: repo-wide lint only when .py files are touched).
+    assert "SKIP `ruff check`" in prompt
+    assert "git diff --name-only" in prompt
+
+
+def test_build_grinder_task_prompt_tool_branch_validates_md_frontmatter() -> None:
+    """The `tool` artifact prompt must point the agent at a YAML frontmatter
+    validator (yaml.safe_load on the extracted `---` block) for playbook
+    `.md` files, mirroring the rule in the dedicated `playbook` artifact
+    branch. Criterion #2: frontmatter validation never parses the full
+    markdown file."""
+    sub = _make_prompt_subtask("0001-tool-md-frontmatter")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The validator snippet must be present.
+    assert "yaml.safe_load" in prompt
+    # It must split on '---' to extract ONLY the frontmatter block, not
+    # parse the full markdown body (criterion #2).
+    assert ".split('---',2)[1]" in prompt
+    # And it must be reachable only via the no-.py-files-changed branch
+    # (so it's not wasted work when the change set is pure Python).
+    assert "^playbooks/.*\\.md$" in prompt
+
+
+def test_artifact_intro_tool_branch_mentions_diff_gated_lint() -> None:
+    """The `tool` artifact intro must tell the agent to inspect the diff and
+    skip repo-wide `ruff`/`black` when no `.py` files are touched, matching
+    criterion #3 (no spurious linter failures on .md playbook files)."""
+    intro = _artifact_intro("tool", "molly/tools")
+    assert "git diff --name-only" in intro
+    assert "ruff check" in intro
+    assert "black --check" in intro
+    # The conditional skip rule must be stated explicitly so the LLM doesn't
+    # simplify it away.
+    assert "no `.py` files" in intro or "no Python files" in intro
+    assert "No Python files found" in intro or "Cannot parse" in intro
+
+
+def test_armory_prompts_playbook_schema_documents_linter_skip() -> None:
+    """PLAYBOOK_SCHEMA must include the same rule so the schema doc the
+    agent reads lines up with the task-prompt autofix step."""
+    from factory.armory_prompts import PLAYBOOK_SCHEMA
+
+    assert "DO NOT" in PLAYBOOK_SCHEMA
+    # The schema doc must mention all three Python-linter names explicitly
+    # so the rule survives prompt summarization by the LLM.
+    assert "`ruff check`" in PLAYBOOK_SCHEMA
+    assert "`black --check`" in PLAYBOOK_SCHEMA
+    assert "isort" in PLAYBOOK_SCHEMA
+    # And it must point at the validator script fallback.
+    assert "scripts/validate_playbooks.py" in PLAYBOOK_SCHEMA
+
+
+def test_build_grinder_task_prompt_playbook_runs_narrow_pytest() -> None:
+    """A non-MeshWiki markdown-only playbook task must instruct the agent to
+    run ONLY the playbook loader test (`tests/test_playbook_loader.py`), not
+    the full `pytest tests/` suite — the full suite pulls in
+    `cryptography`-dependent fixtures that aren't installed in this env and
+    120s-timeout. Skipping pytest entirely is wrong because the loader test
+    exists and exercises the schema rules we care about.
+
+    The narrowing only applies when the subtask is known to touch ONLY `.md`
+    files inside the playbook root — otherwise the full suite is required.
+    """
+    sub = _make_prompt_subtask("0001-playbook-narrow-pytest")
+    sub["files_touched"] = ["playbooks/narrow-pytest-target.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # Step 5 must narrow to the loader test file.
+    assert "python -m pytest tests/test_playbook_loader.py" in prompt
+    # And it must NOT run the full `tests/` suite (the cryptography failure).
+    assert "python -m pytest tests/ -x -q" not in prompt
+    assert "python -m pytest tests -x -q" not in prompt
+    # And it must NOT skip pytest entirely (the loader test exists and runs).
+    assert "No pytest run" not in prompt
+    # The acceptance criterion is to mention `cryptography` so the LLM
+    # understands WHY we're narrowing (avoids the LLM "helpfully" re-running
+    # the full suite).
+    assert "cryptography" in prompt
+    # And it must tell the agent to report-and-continue on a missing-dep
+    # failure rather than retrying the full suite.
+    assert "ModuleNotFoundError" in prompt
+    assert "REPORT" in prompt
+    assert "do NOT retry" in prompt or "do not retry" in prompt.lower()
+
+
+def test_build_grinder_task_prompt_playbook_with_python_file_runs_full_pytest() -> None:
+    """If the subtask touches a Python file (or any non-.md file) inside
+    ``playbooks/``, the narrow loader-only pytest is unsafe — Python module
+    imports may be broken and only the full suite would catch that. The
+    prompt must fall back to `pytest tests/ -x -q`."""
+    sub = _make_prompt_subtask("0001-playbook-with-python")
+    sub["files_touched"] = [
+        "playbooks/new-playbook.md",
+        "molly/playbook_loader.py",
+    ]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # Full suite is required when a non-.md file is in scope.
+    assert "python -m pytest tests/ -x -q" in prompt
+    # Narrow loader-only path must NOT appear (otherwise the Python change
+    # goes unvalidated).
+    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+    # The full-suite branch explains WHY so the agent doesn't "helpfully"
+    # narrow it again.
+    assert "Python files" in prompt or "outside `playbooks/`" in prompt
+
+
+def test_build_grinder_task_prompt_playbook_without_files_touched_runs_full_pytest() -> (
+    None
+):
+    """When ``files_touched`` is unknown / empty the prompt must take the
+    safe path and run the full ``pytest tests/`` suite. Better one slow run
+    than a silent skip on a subtask whose actual diff we can't predict."""
+    sub = _make_prompt_subtask("0001-playbook-unknown-files")
+    # No files_touched set — defaults to [] in _make_prompt_subtask.
+    assert sub["files_touched"] == []
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "python -m pytest tests/ -x -q" in prompt
+    assert "python -m pytest tests/test_playbook_loader.py -q" not in prompt
+
+
+def test_is_markdown_only_playbook_diff_helper() -> None:
+    """The shared helper decides whether to narrow pytest to the loader
+    test. Direct coverage avoids having to set up the full prompt path to
+    exercise the branching."""
+    from factory.agents.grinder_agent import _is_markdown_only_playbook_diff
+
+    # Pure md inside playbooks/ → narrow
+    assert _is_markdown_only_playbook_diff(
+        ["playbooks/foo.md", "playbooks/sub/bar.md"], "playbooks"
+    )
+    # Nested md only, any task_repo_root → narrow when root matches
+    assert _is_markdown_only_playbook_diff(["playbooks/x/y.md"], "playbooks/")
+    # Python file in the diff → full suite
+    assert not _is_markdown_only_playbook_diff(
+        ["playbooks/foo.md", "molly/loader.py"], "playbooks"
+    )
+    # md outside the playbook root → full suite (not a playbook change)
+    assert not _is_markdown_only_playbook_diff(
+        ["docs/foo.md", "playbooks/bar.md"], "playbooks"
+    )
+    # Empty / None → conservative full suite
+    assert not _is_markdown_only_playbook_diff([], "playbooks")
+    assert not _is_markdown_only_playbook_diff(None, "playbooks")
+    # Non-md extension that happens to live in playbooks/ → full suite
+    assert not _is_markdown_only_playbook_diff(["playbooks/foo.txt"], "playbooks")
+    # Bare .md with no playbook root known → still narrow (any markdown diff)
+    assert _is_markdown_only_playbook_diff(["README.md"], None)
+
+
+# ---------------------------------------------------------------------------
 # grind_subtask: E2B routing and integration tests
 # ---------------------------------------------------------------------------
 
@@ -493,6 +1143,7 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     expected_result = _make_subtask(
         status="review", pr_url="https://github.com/owner/repo/pull/1"
     )
+    wrapped_result = {"subtask": expected_result, "incremental_cost_usd": 0.0}
 
     with patch(
         "factory.agents.grinder_agent.get_settings",
@@ -500,12 +1151,12 @@ async def test_grind_subtask_routes_to_e2b() -> None:
     ):
         with patch(
             "factory.agents.grinder_agent.grind_subtask_e2b",
-            new=AsyncMock(return_value=expected_result),
+            new=AsyncMock(return_value=wrapped_result),
         ) as mock_e2b:
             result = await grind_subtask(state, subtask, meshwiki_client)
 
     mock_e2b.assert_called_once_with(state, subtask, meshwiki_client)
-    assert result["status"] == "review"
+    assert result["subtask"]["status"] == "review"
 
 
 def _make_sandbox_mock(commands_side_effect: list, pty_output: str = "") -> AsyncMock:
@@ -570,6 +1221,8 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
         github_repo="owner/repo",
         minimax_api_key="mm-test",
         grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
     )
 
     with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
@@ -577,8 +1230,8 @@ async def test_grind_subtask_e2b_extracts_pr_url() -> None:
             mock_cls.create = AsyncMock(return_value=mock_sandbox)
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "review"
-    assert result["pr_url"] == pr_url
+    assert result["subtask"]["status"] == "review"
+    assert result["subtask"]["pr_url"] == pr_url
 
 
 @pytest.mark.asyncio
@@ -601,6 +1254,8 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
         github_repo="owner/repo",
         minimax_api_key="mm-test",
         grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
     )
 
     with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
@@ -608,8 +1263,8 @@ async def test_grind_subtask_e2b_no_pr_url_fails() -> None:
             mock_cls.create = AsyncMock(return_value=mock_sandbox)
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None
 
 
 @pytest.mark.asyncio
@@ -627,6 +1282,8 @@ async def test_grind_subtask_e2b_sandbox_error() -> None:
         github_repo="owner/repo",
         minimax_api_key="mm-test",
         grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
     )
 
     with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
@@ -634,5 +1291,5 @@ async def test_grind_subtask_e2b_sandbox_error() -> None:
             mock_cls.create = AsyncMock(side_effect=RuntimeError("sandbox auth failed"))
             result = await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    assert result["status"] == "failed"
-    assert result["pr_url"] is None
+    assert result["subtask"]["status"] == "failed"
+    assert result["subtask"]["pr_url"] is None

@@ -12,6 +12,7 @@ from factory.nodes.collect import collect_results_node
 from factory.nodes.decompose import _build_subtask_page, decompose_node
 from factory.nodes.escalate import escalate_node
 from factory.nodes.finalize import finalize_node
+from factory.nodes.grind import grind_node
 from factory.nodes.merge_check import merge_check_node
 from factory.nodes.pm_review import pm_review_node
 from factory.nodes.task_intake import task_intake_node
@@ -31,15 +32,17 @@ def _make_state(**kwargs) -> FactoryState:
         "requirements": "",
         "subtasks": [],
         "decomposition_approved": False,
-        "active_grinders": {},
+        "active_grinders": [],
         "completed_subtask_ids": [],
         "failed_subtask_ids": [],
         "pm_messages": [],
         "human_approval_response": None,
         "human_feedback": None,
         "cost_usd": 0.0,
+        "incremental_costs_usd": [],
         "graph_status": "intake",
         "error": None,
+        "escalation_decision": None,
     }
     defaults.update(kwargs)
     return FactoryState(**defaults)
@@ -62,6 +65,20 @@ def _make_subtask(**kwargs) -> SubTask:
     return subtask
 
 
+def _mock_client_for_cm(mock_client: AsyncMock) -> AsyncMock:
+    """Configure an AsyncMock to work as a context manager returning itself.
+
+    When MeshWikiClient/GitHubClient is patched with return_value=mock_client,
+    the code calls `async with mock_client as cm`.  By default AsyncMock's
+    __aenter__ returns a new AsyncMock (not mock_client), so method calls go
+    to the wrong object.  This helper fixes __aenter__ / __aexit__ so that
+    `cm is mock_client`.
+    """
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    return mock_client
+
+
 # ---------------------------------------------------------------------------
 # task_intake_node
 # ---------------------------------------------------------------------------
@@ -75,10 +92,14 @@ async def test_task_intake_node() -> None:
     mock_page = {
         "name": "Task_0042_test",
         "content": "## Requirements\nBuild the feature.",
-        "metadata": {"title": "Test Task Title", "status": "planned"},
+        "metadata": {
+            "title": "Test Task Title",
+            "status": "planned",
+            "assignee": "factory",
+        },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -92,18 +113,16 @@ async def test_task_intake_node() -> None:
 
 @pytest.mark.asyncio
 async def test_task_intake_node_page_not_found() -> None:
-    """task_intake_node falls back gracefully when the page is not found."""
+    """task_intake_node sets graph_status='failed' when the page is not found."""
     state = _make_state()
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=None)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
         result = await task_intake_node(state)
 
-    assert result["graph_status"] == "decomposing"
-    assert result["title"] == "Task_0042_test"  # falls back to page name
-    assert result["requirements"] == ""
+    assert result["graph_status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +144,7 @@ async def test_decompose_node() -> None:
         title="Build something",
     )
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.create_page = AsyncMock(return_value={})
     mock_meshwiki.transition_task = AsyncMock(return_value={})
 
@@ -133,12 +152,14 @@ async def test_decompose_node() -> None:
         patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
         patch(
             "factory.nodes.decompose.decompose_with_pm",
-            new=AsyncMock(return_value=[mock_subtask]),
+            new=AsyncMock(
+                return_value={"subtasks": [mock_subtask], "incremental_cost_usd": 0.0}
+            ),
         ),
     ):
         result = await decompose_node(state)
 
-    assert result["graph_status"] == "awaiting_approval"
+    assert result["graph_status"] == "dispatching"
     assert len(result["subtasks"]) == 1
     assert result["subtasks"][0]["title"] == "Build something"
 
@@ -147,10 +168,9 @@ async def test_decompose_node() -> None:
     create_args = mock_meshwiki.create_page.call_args
     assert create_args[0][0] == "Task_0042_Sub_01_build"
 
-    # Should have transitioned subtask to planned and parent to decomposed
-    assert mock_meshwiki.transition_task.await_count == 2
+    # Should have transitioned the parent task to decomposed
+    assert mock_meshwiki.transition_task.await_count == 1
     calls = [c[0] for c in mock_meshwiki.transition_task.call_args_list]
-    assert ("Task_0042_Sub_01_build", "planned") in calls
     assert ("Task_0042_test", "decomposed") in calls
 
 
@@ -159,7 +179,7 @@ async def test_decompose_node_no_subtasks() -> None:
     """decompose_node handles empty subtask list from PM agent."""
     state = _make_state()
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.create_page = AsyncMock(return_value={})
     mock_meshwiki.transition_task = AsyncMock(return_value={})
 
@@ -167,18 +187,125 @@ async def test_decompose_node_no_subtasks() -> None:
         patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
         patch(
             "factory.nodes.decompose.decompose_with_pm",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value={"subtasks": [], "incremental_cost_usd": 0.0}),
         ),
     ):
         result = await decompose_node(state)
 
-    assert result["graph_status"] == "awaiting_approval"
+    assert result["graph_status"] == "dispatching"
     assert result["subtasks"] == []
     # Only the parent task transition should have been called
     mock_meshwiki.create_page.assert_not_awaited()
     mock_meshwiki.transition_task.assert_awaited_once_with(
         "Task_0042_test", "decomposed"
     )
+
+
+@pytest.mark.asyncio
+async def test_decompose_node_create_page_failure_skips_subtask() -> None:
+    """A subtask whose wiki page fails to create is excluded from dispatch."""
+    state = _make_state(
+        title="Test Task",
+        requirements="Build something.",
+        graph_status="decomposing",
+    )
+    good = _make_subtask(wiki_page="Task_0042_Sub_01_good", title="Good subtask")
+    bad = _make_subtask(wiki_page="Task_0042_Sub_02_bad", title="Bad subtask")
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    async def _create_page(name, content):
+        if "bad" in name:
+            raise RuntimeError("storage error")
+        return {}
+
+    mock_meshwiki.create_page = _create_page
+
+    with (
+        patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
+        patch(
+            "factory.nodes.decompose.decompose_with_pm",
+            new=AsyncMock(
+                return_value={
+                    "subtasks": [good, bad],
+                    "incremental_cost_usd": 0.0,
+                }
+            ),
+        ),
+    ):
+        result = await decompose_node(state)
+
+    dispatched_names = [s["wiki_page"] for s in result["subtasks"]]
+    assert "Task_0042_Sub_01_good" in dispatched_names
+    assert "Task_0042_Sub_02_bad" not in dispatched_names
+
+
+@pytest.mark.asyncio
+async def test_decompose_node_all_create_page_failures_raise() -> None:
+    """If every subtask page fails to create, decompose_node raises RuntimeError."""
+    state = _make_state(
+        title="Test Task",
+        requirements="Build something.",
+        graph_status="decomposing",
+    )
+    subtask = _make_subtask(wiki_page="Task_0042_Sub_01_fail", title="Failing subtask")
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.create_page = AsyncMock(side_effect=RuntimeError("network error"))
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    with (
+        patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
+        patch(
+            "factory.nodes.decompose.decompose_with_pm",
+            new=AsyncMock(
+                return_value={"subtasks": [subtask], "incremental_cost_usd": 0.0}
+            ),
+        ),
+        pytest.raises(RuntimeError, match="aborting dispatch"),
+    ):
+        await decompose_node(state)
+
+
+@pytest.mark.asyncio
+async def test_decompose_node_rejects_subtask_with_wrong_parent_task() -> None:
+    """Subtasks whose parent_task doesn't match the epic are dropped (no slash needed)."""
+    state = _make_state(
+        title="Test Task",
+        requirements="Build something.",
+        graph_status="decomposing",
+    )
+    # good has parent_task matching the epic; bad has a different parent_task
+    good = _make_subtask(
+        wiki_page="Epic_0042_test_TASK001_good",
+        title="Good subtask",
+        parent_task="Task_0042_test",
+    )
+    bad = _make_subtask(
+        wiki_page="Epic_0042_test_TASK001_good_TASK001_nested",
+        title="Nested subtask",
+        parent_task="Epic_0042_test_TASK001_good",  # points to a subtask, not the epic
+    )
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.create_page = AsyncMock(return_value={})
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    with (
+        patch("factory.nodes.decompose.MeshWikiClient", return_value=mock_meshwiki),
+        patch(
+            "factory.nodes.decompose.decompose_with_pm",
+            new=AsyncMock(
+                return_value={"subtasks": [good, bad], "incremental_cost_usd": 0.0}
+            ),
+        ),
+    ):
+        result = await decompose_node(state)
+
+    dispatched_names = [s["wiki_page"] for s in result["subtasks"]]
+    assert "Epic_0042_test_TASK001_good" in dispatched_names
+    assert "Epic_0042_test_TASK001_good_TASK001_nested" not in dispatched_names
 
 
 # ---------------------------------------------------------------------------
@@ -195,12 +322,15 @@ async def test_pm_review_node_approved() -> None:
         status="review",
         pr_number=10,
     )
-    state = _make_state(subtasks=[review_subtask])
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+    )
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr_diff = AsyncMock(return_value="diff content")
 
     with (
@@ -227,12 +357,15 @@ async def test_pm_review_node_changes_requested() -> None:
         status="review",
         pr_number=11,
     )
-    state = _make_state(subtasks=[review_subtask])
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+    )
 
-    mock_meshwiki = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
     mock_meshwiki.get_page = AsyncMock(return_value=None)
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
 
     with (
         patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
@@ -254,17 +387,166 @@ async def test_pm_review_node_changes_requested() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pm_review_node_skips_non_review_subtasks() -> None:
-    """pm_review_node leaves subtasks not in 'review' status unchanged."""
+async def test_pm_review_node_pre_merge_gate_rejects_broken_playbook() -> None:
+    """When the PM approves an artifact_type=playbook PR but the PR's files
+    fail the deterministic schema check (e.g. mode=intruder, string
+    mutations), pm_review must downgrade the decision to changes_requested
+    BEFORE auto-merge fires. This is the load-bearing pre-merge gate that
+    keeps structurally-broken playbooks out of the armory."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0099_Sub_01",
+        title="Add SSRF playbook",
+        status="review",
+        pr_number=42,
+        pr_url="https://github.com/owner/repo/pull/42",
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        artifact_type="playbook",
+        task_repo="jyrkihuhta/molly-armory",
+    )
+
+    # PR diff content that the deterministic playbook validator rejects:
+    # `mode: intruder` is not a valid Molly mode, and `mutations:` is a list
+    # of bare strings rather than mappings. Both are silent failures at
+    # runtime — exactly what the pre-merge gate must catch.
+    broken_patch = (
+        "+---\n"
+        "+playbook: bad-pb\n"
+        "+name: Bad PB\n"
+        "+leaf_type: rest_api\n"
+        "+checks:\n"
+        "+  - id: c1\n"
+        "+    name: c1\n"
+        "+    mode: intruder\n"
+        "+    category: ssrf\n"
+        "+    severity: high\n"
+        "+    mutations:\n"
+        "+      - <script>alert(1)</script>\n"
+        "+---\n"
+    )
+    pr_files = [{"filename": "playbooks/bad-pb.md", "patch": broken_patch}]
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+    mock_github.get_pr_diff = AsyncMock(return_value="diff content")
+    mock_github.get_pr_files = AsyncMock(return_value=pr_files)
+    mock_github.request_changes = AsyncMock(return_value={})
+    mock_github.merge_pr = AsyncMock(return_value={})
+
+    mock_settings = MagicMock()
+    mock_settings.dry_run = False
+    mock_settings.auto_merge = True
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch("factory.nodes.pm_review.get_settings", return_value=mock_settings),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        result = await pm_review_node(state)
+
+    # Decision must be downgraded to changes_requested.
+    assert result["subtasks"][0]["status"] == "changes_requested"
+    feedback = result["subtasks"][0]["review_feedback"]
+    assert "pre-merge validation failed" in feedback
+    assert "intruder" in feedback  # the validator's mode error is surfaced
+
+    # Crucially, merge_pr must NOT have been called — the broken PR stays open.
+    mock_github.merge_pr.assert_not_called()
+    # And we must have posted a review with the schema errors so the grinder
+    # knows what to fix on the next attempt.
+    mock_github.request_changes.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_pre_merge_gate_passes_clean_playbook() -> None:
+    """A schema-conformant playbook PR survives the pre-merge gate and
+    proceeds to auto-merge as before."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0099_Sub_02",
+        title="Add SSRF playbook",
+        status="review",
+        pr_number=43,
+        pr_url="https://github.com/owner/repo/pull/43",
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        artifact_type="playbook",
+        task_repo="jyrkihuhta/molly-armory",
+    )
+
+    clean_patch = (
+        "+---\n"
+        "+playbook: good-pb\n"
+        "+name: Good PB\n"
+        "+leaf_type: rest_api\n"
+        "+scope: generic\n"
+        "+checks:\n"
+        "+  - id: c1\n"
+        "+    name: C1\n"
+        "+    mode: deterministic\n"
+        "+    category: ssrf\n"
+        "+    severity: high\n"
+        "+    mutations:\n"
+        "+      - body: '{\"url\": \"http://internal\"}'\n"
+        "+        note: ssrf attempt\n"
+        "+---\n"
+    )
+    pr_files = [{"filename": "playbooks/good-pb.md", "patch": clean_patch}]
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "criteria"})
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+    mock_github.get_pr_diff = AsyncMock(return_value="diff content")
+    mock_github.get_pr_files = AsyncMock(return_value=pr_files)
+    mock_github.request_changes = AsyncMock(return_value={})
+    mock_github.merge_pr = AsyncMock(return_value={})
+
+    mock_settings = MagicMock()
+    mock_settings.dry_run = False
+    mock_settings.auto_merge = True
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch("factory.nodes.pm_review.get_settings", return_value=mock_settings),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        result = await pm_review_node(state)
+
+    # Clean playbook → status becomes merged and auto-merge fires.
+    assert result["subtasks"][0]["status"] == "merged"
+    mock_github.merge_pr.assert_called_once_with(43)
+    mock_github.request_changes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_missing_subtask_id_returns_empty() -> None:
+    """pm_review_node returns empty dict when _current_subtask_id is not found."""
     pending_subtask = _make_subtask(
         wiki_page="Task_0042_Sub_01",
         title="Pending",
         status="pending",
     )
-    state = _make_state(subtasks=[pending_subtask])
+    state = _make_state(
+        subtasks=[pending_subtask],
+        _current_subtask_id="nonexistent-id",
+    )
 
-    mock_meshwiki = AsyncMock()
-    mock_github = AsyncMock()
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_github = _mock_client_for_cm(AsyncMock())
 
     with (
         patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
@@ -276,9 +558,197 @@ async def test_pm_review_node_skips_non_review_subtasks() -> None:
     ):
         result = await pm_review_node(state)
 
-    # review_with_pm should never be called for non-review subtasks
+    # review_with_pm should never be called when subtask is not found
     mock_review.assert_not_awaited()
-    assert result["subtasks"][0]["status"] == "pending"
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_reviews_only_current_subtask() -> None:
+    """pm_review_node reviews only the subtask identified by _current_subtask_id.
+
+    With the fan-out design, each pm_review instance handles exactly one subtask
+    and returns a single-element delta list (not the full subtasks list).
+    """
+    sub_01 = _make_subtask(
+        wiki_page="Task_0042_Sub_01", title="Sub 01", status="review"
+    )
+    sub_02 = _make_subtask(
+        wiki_page="Task_0042_Sub_02", title="Sub 02", status="review"
+    )
+    state = _make_state(
+        subtasks=[sub_01, sub_02],
+        _current_subtask_id=sub_01["id"],
+    )
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_github = _mock_client_for_cm(AsyncMock())
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        result = await pm_review_node(state)
+
+    # Returns only the reviewed subtask as a delta — _merge_subtasks handles fan-in.
+    assert len(result["subtasks"]) == 1
+    assert result["subtasks"][0]["id"] == sub_01["id"]
+    assert result["subtasks"][0]["status"] == "merged"
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_approved_appends_to_parent_task_page() -> None:
+    """pm_review_node appends an approval log entry to the parent task wiki page."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=10,
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        task_wiki_page="Task_0042_test",
+    )
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "existing content"})
+    mock_meshwiki.append_to_page = AsyncMock()
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(
+                return_value={
+                    "decision": "approved",
+                    "feedback": "Code is clean, tests pass.",
+                }
+            ),
+        ),
+    ):
+        await pm_review_node(state)
+
+    # append_to_page should be called twice: once for the subtask page, once for
+    # the parent task page.
+    assert mock_meshwiki.append_to_page.await_count == 2
+
+    # The second call should target the parent task page.
+    parent_call = mock_meshwiki.append_to_page.call_args_list[1]
+    parent_page_arg = parent_call[0][0]
+    parent_content_arg = parent_call[0][1]
+
+    assert parent_page_arg == "Task_0042_test"
+    assert "### PM Review — Sub 01" in parent_content_arg
+    assert "✅ Approved" in parent_content_arg
+    assert "Code is clean, tests pass." in parent_content_arg
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_changes_requested_appends_to_parent_task_page() -> None:
+    """pm_review_node appends a rejection log entry to the parent task wiki page."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0042_Sub_02",
+        title="Sub 02",
+        status="review",
+        pr_number=11,
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        task_wiki_page="Task_0042_test",
+    )
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "existing content"})
+    mock_meshwiki.append_to_page = AsyncMock()
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(
+                return_value={
+                    "decision": "changes_requested",
+                    "feedback": "Missing error handling for the 404 case.",
+                }
+            ),
+        ),
+    ):
+        await pm_review_node(state)
+
+    # append_to_page should be called twice: once for the subtask page, once for
+    # the parent task page.
+    assert mock_meshwiki.append_to_page.await_count == 2
+
+    # The second call should target the parent task page.
+    parent_call = mock_meshwiki.append_to_page.call_args_list[1]
+    parent_page_arg = parent_call[0][0]
+    parent_content_arg = parent_call[0][1]
+
+    assert parent_page_arg == "Task_0042_test"
+    assert "### PM Review — Sub 02" in parent_content_arg
+    assert "❌ Changes requested" in parent_content_arg
+    assert "Missing error handling for the 404 case." in parent_content_arg
+    assert "**Attempt:**" in parent_content_arg
+
+
+@pytest.mark.asyncio
+async def test_pm_review_node_parent_append_failure_does_not_block() -> None:
+    """pm_review_node swallows errors from appending to the parent task page."""
+    review_subtask = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="review",
+        pr_number=10,
+    )
+    state = _make_state(
+        subtasks=[review_subtask],
+        _current_subtask_id=review_subtask["id"],
+        task_wiki_page="Task_0042_test",
+    )
+
+    call_count = 0
+
+    async def _append_side_effect(
+        page_name: str, content: str, **_kwargs: object
+    ) -> None:
+        nonlocal call_count
+        call_count += 1
+        if page_name == "Task_0042_test":
+            raise RuntimeError("wiki unavailable")
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.get_page = AsyncMock(return_value={"content": "existing content"})
+    mock_meshwiki.append_to_page = AsyncMock(side_effect=_append_side_effect)
+
+    mock_github = _mock_client_for_cm(AsyncMock())
+
+    with (
+        patch("factory.nodes.pm_review.MeshWikiClient", return_value=mock_meshwiki),
+        patch("factory.nodes.pm_review.GitHubClient", return_value=mock_github),
+        patch(
+            "factory.nodes.pm_review.review_with_pm",
+            new=AsyncMock(return_value={"decision": "approved", "feedback": "LGTM"}),
+        ),
+    ):
+        # Should not raise even though appending to the parent page fails.
+        result = await pm_review_node(state)
+
+    assert result["subtasks"][0]["status"] == "merged"
+    # Both append calls were attempted (subtask page succeeded, parent page failed).
+    assert call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -331,12 +801,13 @@ async def test_task_intake_direct_grind() -> None:
             "title": "Direct Grind Task",
             "status": "planned",
             "skip_decomposition": "true",
+            "assignee": "factory",
             "expected_files": ["src/meshwiki/main.py"],
             "token_budget": "30000",
         },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -377,10 +848,11 @@ async def test_task_intake_direct_grind_boolean_flag() -> None:
             "title": "Bool Flag Task",
             "status": "planned",
             "skip_decomposition": True,
+            "assignee": "factory",
         },
     }
 
-    mock_client = AsyncMock()
+    mock_client = _mock_client_for_cm(AsyncMock())
     mock_client.get_page = AsyncMock(return_value=mock_page)
 
     with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
@@ -391,6 +863,78 @@ async def test_task_intake_direct_grind_boolean_flag() -> None:
     assert len(result["subtasks"]) == 1
     assert result["subtasks"][0]["token_budget"] == 50000  # default
     assert result["subtasks"][0]["files_touched"] == []  # default
+
+
+@pytest.mark.asyncio
+async def test_task_intake_direct_grind_subtask_has_all_required_keys() -> None:
+    """skip_decomposition SubTask must populate all SubTask TypedDict fields."""
+    state = _make_state()
+    mock_page = {
+        "name": "Task_0042_test",
+        "content": "Do it.",
+        "metadata": {
+            "title": "T",
+            "status": "planned",
+            "skip_decomposition": True,
+            "assignee": "factory",
+        },
+    }
+    mock_client = _mock_client_for_cm(AsyncMock())
+    mock_client.get_page = AsyncMock(return_value=mock_page)
+
+    with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
+        result = await task_intake_node(state)
+
+    subtask = result["subtasks"][0]
+    missing = SubTask.__required_keys__ - set(subtask.keys())
+    assert not missing, f"SubTask missing required keys: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_task_intake_pre_seeded_subtask_has_all_required_keys() -> None:
+    """Pre-seeded SubTask must populate all SubTask TypedDict fields."""
+    state = _make_state()
+    parent_page = {
+        "name": "Task_0042_test",
+        "content": "Requirements.",
+        "metadata": {"title": "Parent", "status": "planned", "assignee": "factory"},
+    }
+    subtask_list = [
+        {
+            "name": "Task_0042_test_TASK001_foo",
+            "metadata": {
+                "title": "Sub one",
+                "status": "pending",
+                "assignee": "factory",
+                "acceptance_criteria": "It works",
+            },
+        }
+    ]
+    subtask_page = {"name": "Task_0042_test_TASK001_foo", "content": "Do the thing."}
+
+    call_count = 0
+
+    async def _get_page(name):
+        nonlocal call_count
+        call_count += 1
+        if name == "Task_0042_test_TASK001_foo":
+            return subtask_page
+        return parent_page
+
+    mock_client = _mock_client_for_cm(AsyncMock())
+    mock_client.get_page = AsyncMock(side_effect=_get_page)
+    mock_client.list_tasks = AsyncMock(return_value=subtask_list)
+
+    with patch("factory.nodes.task_intake.MeshWikiClient", return_value=mock_client):
+        result = await task_intake_node(state)
+
+    assert result["graph_status"] == "grinding"
+    subtask = result["subtasks"][0]
+    missing = SubTask.__required_keys__ - set(subtask.keys())
+    assert not missing, f"Pre-seeded SubTask missing required keys: {missing}"
+    assert subtask["parent_task"] == "Task_0042_test"
+    assert subtask["acceptance_criteria"] == ["It works"]
+    assert subtask["code_skeleton"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -444,10 +988,14 @@ async def test_collect_results_node_all_succeeded() -> None:
 
 @pytest.mark.asyncio
 async def test_finalize_node() -> None:
-    """finalize_node calls transition_task with 'done' and returns completed status."""
-    state = _make_state(cost_usd=0.0042)
+    """finalize_node walks in_progress→review→merged→done and records cost."""
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(cost_usd=0.0042, subtasks=[merged_sub])
 
-    mock_client_instance = AsyncMock()
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
     mock_client_instance.transition_task = AsyncMock(return_value={})
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
@@ -455,19 +1003,69 @@ async def test_finalize_node() -> None:
         result = await finalize_node(state)
 
     assert result["graph_status"] == "completed"
-    mock_client_instance.transition_task.assert_awaited_once()
-    call_args = mock_client_instance.transition_task.call_args
-    assert call_args[0][0] == "Task_0042_test"
-    assert call_args[0][1] == "done"
-    assert "cost_usd" in call_args[1]["extra_fields"]
+    # Should step through review → merged → done (3 calls)
+    assert mock_client_instance.transition_task.await_count == 3
+    calls = mock_client_instance.transition_task.call_args_list
+    assert calls[0][0] == ("Task_0042_test", "review")
+    assert calls[1][0] == ("Task_0042_test", "merged")
+    assert calls[2][0] == ("Task_0042_test", "done")
+    assert "cost_usd" in (calls[2][1].get("extra_fields") or {})
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_resumes_from_review() -> None:
+    """finalize_node skips already-completed steps when parent is already in review."""
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(subtasks=[merged_sub])
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "review"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert result["graph_status"] == "completed"
+    # Already in review → only merged + done
+    assert mock_client_instance.transition_task.await_count == 2
+    calls = mock_client_instance.transition_task.call_args_list
+    assert calls[0][0] == ("Task_0042_test", "merged")
+    assert calls[1][0] == ("Task_0042_test", "done")
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_skips_when_subtasks_pending() -> None:
+    """finalize_node does not transition parent when subtasks are still in_progress."""
+    pending_sub = _make_subtask(status="in_progress")
+    state = _make_state(subtasks=[pending_sub])
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert result["graph_status"] == "completed"
+    mock_client_instance.transition_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_finalize_node_handles_client_error() -> None:
     """finalize_node logs and swallows MeshWiki client errors, still returns completed."""
-    state = _make_state()
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(subtasks=[merged_sub])
 
-    mock_client_instance = AsyncMock()
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
     mock_client_instance.transition_task = AsyncMock(
         side_effect=RuntimeError("network error")
     )
@@ -477,6 +1075,61 @@ async def test_finalize_node_handles_client_error() -> None:
         result = await finalize_node(state)
 
     assert result["graph_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_accumulates_incremental_costs() -> None:
+    """finalize_node sums incremental_costs_usd into cost_usd and returns total."""
+    merged_sub = _make_subtask(status="merged")
+    # Simulate state where decompose + two grind branches each added cost deltas
+    state = _make_state(
+        subtasks=[merged_sub],
+        cost_usd=0.0,
+        incremental_costs_usd=[0.001, 0.002, 0.003],  # $0.006 total
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert result["graph_status"] == "completed"
+    assert abs(result["cost_usd"] - 0.006) < 1e-9
+
+    # cost_usd must be written to the wiki page frontmatter on the "done" transition
+    calls = mock_client_instance.transition_task.call_args_list
+    done_call = next(c for c in calls if c[0][1] == "done")
+    extra = done_call[1].get("extra_fields") or {}
+    assert "cost_usd" in extra
+    assert float(extra["cost_usd"]) == round(0.006, 4)
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_carries_forward_existing_cost_usd() -> None:
+    """finalize_node adds incremental deltas on top of any pre-existing cost_usd."""
+    merged_sub = _make_subtask(status="merged")
+    state = _make_state(
+        subtasks=[merged_sub],
+        cost_usd=0.010,  # cost recorded in a previous graph run (e.g. resume)
+        incremental_costs_usd=[0.005],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_instance.get_page = AsyncMock(
+        return_value={"metadata": {"status": "in_progress"}}
+    )
+    mock_client_instance.transition_task = AsyncMock(return_value={})
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.finalize.MeshWikiClient", mock_client_cls):
+        result = await finalize_node(state)
+
+    assert abs(result["cost_usd"] - 0.015) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +1152,7 @@ async def test_escalate_retriable() -> None:
         failed_subtask_ids=[failed_sub["id"]],
     )
 
-    mock_client_instance = AsyncMock()
-    mock_client_instance.get_page = AsyncMock(return_value={"content": "# Task"})
-    mock_client_instance.create_page = AsyncMock(return_value={})
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
@@ -512,11 +1163,13 @@ async def test_escalate_retriable() -> None:
     assert len(result["subtasks"]) == 1
     assert result["subtasks"][0]["attempt"] == 1
     assert result["subtasks"][0]["status"] == "pending"
+    mock_client_instance.append_to_page.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_escalate_exhausted() -> None:
-    """escalate_node sets decision='abandon' when subtask has used all attempts."""
+    """escalate_node sets decision='abandon' when retries are exhausted but
+    the failure is a minority — indicating an isolated implementation problem."""
     failed_sub = _make_subtask(
         wiki_page="Task_0042_Sub_01",
         title="Sub 01",
@@ -524,14 +1177,16 @@ async def test_escalate_exhausted() -> None:
         attempt=2,
         max_attempts=3,
     )
+    # Three additional merged subtasks so the one failure is a minority (1/4).
+    ok_1 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="merged")
+    ok_2 = _make_subtask(wiki_page="Task_0042_Sub_03", title="Sub 03", status="merged")
+    ok_3 = _make_subtask(wiki_page="Task_0042_Sub_04", title="Sub 04", status="merged")
     state = _make_state(
-        subtasks=[failed_sub],
+        subtasks=[failed_sub, ok_1, ok_2, ok_3],
         failed_subtask_ids=[failed_sub["id"]],
     )
 
-    mock_client_instance = AsyncMock()
-    mock_client_instance.get_page = AsyncMock(return_value={"content": "# Task"})
-    mock_client_instance.create_page = AsyncMock(return_value={})
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
     mock_client_cls = MagicMock(return_value=mock_client_instance)
 
     with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
@@ -539,9 +1194,34 @@ async def test_escalate_exhausted() -> None:
 
     assert result["escalation_decision"] == "abandon"
     assert result["graph_status"] == "escalated"
-    # Status should remain "failed" when not retriable
-    assert result["subtasks"][0]["attempt"] == 2
-    assert result["subtasks"][0]["status"] == "failed"
+    failed_statuses = [s for s in result["subtasks"] if s["id"] == failed_sub["id"]]
+    assert failed_statuses[0]["attempt"] == 2
+    assert failed_statuses[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_escalate_uses_append_not_create() -> None:
+    """escalate_node calls append_to_page, never create_page, to avoid clobbering."""
+    failed_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=0,
+        max_attempts=2,
+    )
+    state = _make_state(
+        subtasks=[failed_sub],
+        failed_subtask_ids=[failed_sub["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        await escalate_node(state)
+
+    mock_client_instance.append_to_page.assert_awaited_once()
+    mock_client_instance.create_page.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +1240,7 @@ async def test_merge_check_node_merged_pr() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 10, "state": "closed", "merged": True}
     )
@@ -583,7 +1263,7 @@ async def test_merge_check_node_closed_not_merged() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 11, "state": "closed", "merged": False}
     )
@@ -605,7 +1285,7 @@ async def test_merge_check_node_still_open() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 12, "state": "open", "merged": False}
     )
@@ -628,7 +1308,7 @@ async def test_merge_check_node_pr_number_from_url() -> None:
     review_sub["pr_url"] = "https://github.com/owner/repo/pull/42"
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         return_value={"number": 42, "state": "closed", "merged": True}
     )
@@ -692,7 +1372,7 @@ async def test_merge_check_node_api_error_continues() -> None:
     )
     state = _make_state(subtasks=[review_sub])
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(
         side_effect=httpx.HTTPStatusError(
             "404 Not Found",
@@ -735,7 +1415,7 @@ async def test_merge_check_node_multiple_subtasks() -> None:
             return {"number": 20, "state": "closed", "merged": True}
         return {"number": 21, "state": "open", "merged": False}
 
-    mock_github = AsyncMock()
+    mock_github = _mock_client_for_cm(AsyncMock())
     mock_github.get_pr = AsyncMock(side_effect=_fake_get_pr)
 
     with patch("factory.nodes.merge_check.GitHubClient", return_value=mock_github):
@@ -745,3 +1425,255 @@ async def test_merge_check_node_multiple_subtasks() -> None:
     assert statuses[merged_sub["id"]] == "merged"
     assert statuses[open_sub["id"]] == "review"
     assert statuses[pending_sub["id"]] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# grind_node — delta return (fan-in bug fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grind_node_returns_delta_not_full_list() -> None:
+    """grind_node returns only the updated subtask, not the full subtask list.
+
+    This is the fix for the fan-in merge bug: each parallel branch returns
+    only its single updated subtask so _merge_subtasks never clobbers a
+    concurrent branch's status with a stale snapshot.
+    """
+    sub_01 = _make_subtask(
+        wiki_page="Task_0042_Sub_01", title="Sub 01", status="pending"
+    )
+    sub_02 = _make_subtask(
+        wiki_page="Task_0042_Sub_02", title="Sub 02", status="pending"
+    )
+    state = _make_state(subtasks=[sub_01, sub_02])
+    state["_current_subtask_id"] = sub_01["id"]
+
+    updated_sub = {
+        **sub_01,
+        "status": "review",
+        "pr_url": "https://github.com/o/r/pull/1",
+    }
+
+    mock_meshwiki = _mock_client_for_cm(AsyncMock())
+    mock_meshwiki.transition_task = AsyncMock(return_value={})
+
+    with (
+        patch("factory.nodes.grind.MeshWikiClient", return_value=mock_meshwiki),
+        patch(
+            "factory.nodes.grind.grind_subtask",
+            new=AsyncMock(
+                return_value={"subtask": updated_sub, "incremental_cost_usd": 0.01}
+            ),
+        ),
+    ):
+        result = await grind_node(state)
+
+    assert len(result["subtasks"]) == 1
+    assert result["subtasks"][0]["id"] == sub_01["id"]
+    assert result["subtasks"][0]["status"] == "review"
+    # grind_node adds the current subtask ID to active_grinders for crash recovery.
+    # The _merge_active_grinders reducer unions these additions across parallel branches.
+    # collect_results_node resets the field to [] after all branches join.
+    assert "active_grinders" in result
+    assert sub_01["id"] in result["active_grinders"]
+
+
+# ---------------------------------------------------------------------------
+# escalate_node — redecompose path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_escalate_redecompose_when_majority_failed() -> None:
+    """escalate_node chooses 'redecompose' when majority of subtasks fail
+    with all retries exhausted — indicates a bad decomposition, not bad code."""
+    failed_1 = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    failed_2 = _make_subtask(
+        wiki_page="Task_0042_Sub_02",
+        title="Sub 02",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    ok_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_03",
+        title="Sub 03",
+        status="merged",
+    )
+    state = _make_state(
+        subtasks=[failed_1, failed_2, ok_sub],
+        failed_subtask_ids=[failed_1["id"], failed_2["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "redecompose"
+    assert result["graph_status"] == "escalated"
+    assert "error" in result
+    assert "failed" in result["error"].lower()
+    # All old subtasks become skipped so the next decompose starts fresh.
+    assert all(s["status"] == "skipped" for s in result["subtasks"])
+    # PM gets failure context.
+    assert "redecompose_context" in result
+    assert result["redecompose_context"]
+    # Attempt counter incremented.
+    assert result["redecompose_attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_escalate_redecompose_cap_becomes_abandon() -> None:
+    """escalate_node switches to 'abandon' once MAX_REDECOMPOSE_ATTEMPTS is reached."""
+    failed_1 = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    failed_2 = _make_subtask(
+        wiki_page="Task_0042_Sub_02",
+        title="Sub 02",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    state = _make_state(
+        subtasks=[failed_1, failed_2],
+        failed_subtask_ids=[failed_1["id"], failed_2["id"]],
+    )
+    state["redecompose_attempt"] = 2  # already at cap
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "abandon"
+    assert "redecompose cap" in result.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_escalate_ignores_skipped_subtasks_in_majority_count() -> None:
+    """Subtasks skipped by a prior redecompose round are not counted as failures."""
+    old_skipped = _make_subtask(
+        wiki_page="Task_0042_OldSub_01",
+        title="Old Sub 01",
+        status="skipped",
+        attempt=2,
+        max_attempts=3,
+    )
+    new_failed = _make_subtask(
+        wiki_page="Task_0042_NewSub_01",
+        title="New Sub 01",
+        status="failed",
+        attempt=0,
+        max_attempts=3,
+    )
+    new_merged = _make_subtask(
+        wiki_page="Task_0042_NewSub_02",
+        title="New Sub 02",
+        status="merged",
+    )
+    # failed_subtask_ids accumulates both old and new — the node must filter by status.
+    state = _make_state(
+        subtasks=[old_skipped, new_failed, new_merged],
+        failed_subtask_ids=[old_skipped["id"], new_failed["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    # new_failed has retries left → retry, not redecompose.
+    assert result["escalation_decision"] == "retry"
+    # The retried subtask's attempt is incremented; old skipped subtask is unchanged.
+    updated = {s["id"]: s for s in result["subtasks"]}
+    assert updated[old_skipped["id"]]["status"] == "skipped"
+    assert updated[new_failed["id"]]["status"] == "pending"
+    assert updated[new_failed["id"]]["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_escalate_redecompose_excludes_skipped_from_majority() -> None:
+    """Skipped subtasks don't inflate the majority denominator.
+
+    2 old-skipped + 1 failed + 2 merged = 3 active (non-skipped).
+    1 failed out of 3 active is a minority → abandon, not redecompose.
+    Without the filter, 1 failed out of 5 total would still be minority, but
+    if we had computed against 3 active the threshold would be ceil(3/2)=2
+    and 1 < 2 → correct abandon.
+    """
+    old_skipped_1 = _make_subtask(
+        wiki_page="Task_0042_OldSub_01", title="Old 01", status="skipped", attempt=2
+    )
+    old_skipped_2 = _make_subtask(
+        wiki_page="Task_0042_OldSub_02", title="Old 02", status="skipped", attempt=2
+    )
+    new_failed = _make_subtask(
+        wiki_page="Task_0042_NewSub_01",
+        title="New Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    new_merged_1 = _make_subtask(
+        wiki_page="Task_0042_NewSub_02", title="New Sub 02", status="merged"
+    )
+    new_merged_2 = _make_subtask(
+        wiki_page="Task_0042_NewSub_03", title="New Sub 03", status="merged"
+    )
+    # 1 currently-failed vs 3 active (non-skipped) → minority → abandon, not redecompose.
+    state = _make_state(
+        subtasks=[old_skipped_1, old_skipped_2, new_failed, new_merged_1, new_merged_2],
+        failed_subtask_ids=[old_skipped_1["id"], old_skipped_2["id"], new_failed["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "abandon"
+
+
+@pytest.mark.asyncio
+async def test_escalate_abandon_when_minority_failed_no_retries() -> None:
+    """escalate_node still abandons when only a minority of subtasks fail
+    and all retries are exhausted (not a decomposition problem)."""
+    failed_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01",
+        title="Sub 01",
+        status="failed",
+        attempt=2,
+        max_attempts=3,
+    )
+    ok_1 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="merged")
+    ok_2 = _make_subtask(wiki_page="Task_0042_Sub_03", title="Sub 03", status="merged")
+    ok_3 = _make_subtask(wiki_page="Task_0042_Sub_04", title="Sub 04", status="merged")
+    state = _make_state(
+        subtasks=[failed_sub, ok_1, ok_2, ok_3],
+        failed_subtask_ids=[failed_sub["id"]],
+    )
+
+    mock_client_instance = _mock_client_for_cm(AsyncMock())
+    mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+    with patch("factory.nodes.escalate.MeshWikiClient", mock_client_cls):
+        result = await escalate_node(state)
+
+    assert result["escalation_decision"] == "abandon"

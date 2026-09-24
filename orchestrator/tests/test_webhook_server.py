@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from factory.webhook_server import app
+from types import SimpleNamespace
+
+from factory.webhook_server import (
+    _clear_stuck_grinders,
+    _drain_graph_tasks,
+    _queue_or_spawn_resume,
+    _resume_interrupted_tasks,
+    _spawn_graph_task,
+    app,
+)
 
 
 @pytest.fixture
@@ -130,3 +141,533 @@ def test_webhook_valid_hmac(client: TestClient, monkeypatch) -> None:
     assert resp.status_code == 200
 
     cfg.get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# /tasks
+# ---------------------------------------------------------------------------
+
+
+_FAKE_TASKS = [
+    {"name": "Task_0001", "metadata": {
+        "status": "planned", "title": "A", "modified": "2026-05-10T00:00:00",
+    }},
+    {"name": "Task_0002", "metadata": {
+        "status": "in_progress", "title": "B", "modified": "2026-05-15T07:42:00",
+        "repository": "jyrkihuhta/molly-armory",
+    }},
+    {"name": "Task_0003", "metadata": {
+        "status": "planned", "title": "C", "modified": "2026-05-14T12:00:00",
+    }},
+    {"name": "Task_0004", "metadata": {
+        "status": "merged", "title": "D", "modified": "2026-05-13T00:00:00",
+    }},
+]
+
+
+def test_tasks_summary_and_recent_order(client: TestClient, monkeypatch) -> None:
+    """GET /tasks returns counts by status + recent items in modified-desc order."""
+    from factory import webhook_server as ws
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **_kw): return list(_FAKE_TASKS)
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _FakeClient)
+
+    resp = client.get("/tasks?limit=2")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 4
+    assert body["by_status"] == {"planned": 2, "in_progress": 1, "merged": 1}
+    # limit=2, sorted by modified desc → Task_0002 (May 15) then Task_0003 (May 14)
+    assert [r["name"] for r in body["recent"]] == ["Task_0002", "Task_0003"]
+    assert body["recent"][0]["repo"] == "jyrkihuhta/molly-armory"
+
+
+def test_tasks_filter_forwarded_to_list_tasks(client: TestClient, monkeypatch) -> None:
+    """Query params propagate to MeshWikiClient.list_tasks."""
+    from factory import webhook_server as ws
+
+    captured: dict = {}
+
+    class _CapturingClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **kw):
+            captured.update(kw)
+            return [_FAKE_TASKS[1]]  # only the in_progress one
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _CapturingClient)
+
+    resp = client.get("/tasks?status=in_progress&repo=jyrkihuhta/molly-armory")
+    assert resp.status_code == 200
+    assert captured == {
+        "status": "in_progress",
+        "assignee": None,
+        "repo": "jyrkihuhta/molly-armory",
+        "parent_task": None,
+    }
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["by_status"] == {"in_progress": 1}
+
+
+def test_tasks_handles_missing_metadata(client: TestClient, monkeypatch) -> None:
+    """Tasks with no metadata bucket under 'unknown' and don't crash sorting."""
+    from factory import webhook_server as ws
+
+    class _SparseClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return None
+        async def list_tasks(self, **_kw):
+            return [
+                {"name": "Sparse_1"},
+                {"name": "Sparse_2", "metadata": {}},
+            ]
+
+    monkeypatch.setattr(ws, "MeshWikiClient", _SparseClient)
+    resp = client.get("/tasks")
+    assert resp.status_code == 200
+    assert resp.json()["by_status"] == {"unknown": 2}
+
+
+# ---------------------------------------------------------------------------
+# _clear_stuck_grinders
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_no_stuck_entries() -> None:
+    """When no active grinders have pending subtasks, aupdate_state is not called."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "active_grinders": ["g1"],
+                "subtasks": [{"id": "g1", "status": "done"}],
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_removes_stuck() -> None:
+    """Grinders whose subtasks are still pending are removed from active_grinders."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "active_grinders": ["g1", "g2", "g3"],
+                "subtasks": [
+                    {"id": "g1", "status": "done"},
+                    {"id": "g2", "status": "pending"},
+                    {"id": "g3", "status": "changes_requested"},
+                ],
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    config = {"configurable": {"thread_id": "T"}}
+
+    await _clear_stuck_grinders(graph, config, "T")
+
+    graph.aupdate_state.assert_awaited_once()
+    call_args = graph.aupdate_state.call_args[0]
+    remaining = call_args[1]["active_grinders"]
+    assert remaining == ["g1"]
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_no_snapshot() -> None:
+    """When aget_state returns None, the function returns without error."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_aget_state_raises() -> None:
+    """Exceptions from aget_state are caught and logged; no re-raise."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(side_effect=RuntimeError("db error"))
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_empty_state() -> None:
+    """When active_grinders and subtasks are absent, no update is called."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _drain_graph_tasks — Layer 3 graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _spawn_graph_task: strong references + idempotency bookkeeping (B8)
+# ---------------------------------------------------------------------------
+
+
+def _fake_app() -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_spawn_graph_task_tracks_and_clears() -> None:
+    """A dispatched task holds a strong ref and records its thread as in-flight,
+    then both are cleared when it completes."""
+    fake_app = _fake_app()
+
+    async def node():
+        await asyncio.sleep(0.02)
+        return "done"
+
+    task = _spawn_graph_task(
+        fake_app, node(), name="graph:page-x", thread_id="tid-x"
+    )
+    # While running: strong reference held, thread marked in-flight.
+    assert task in fake_app.state.background_tasks
+    assert "tid-x" in fake_app.state.inflight_threads
+
+    await task
+    # Done-callbacks run on the next loop tick.
+    await asyncio.sleep(0)
+    assert task not in fake_app.state.background_tasks
+    assert "tid-x" not in fake_app.state.inflight_threads
+
+
+@pytest.mark.asyncio
+async def test_spawn_graph_task_logs_exception_and_clears() -> None:
+    """A failing task is cleaned up and does not raise into the caller."""
+    fake_app = _fake_app()
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    task = _spawn_graph_task(
+        fake_app, boom(), name="graph:page-y", thread_id="tid-y"
+    )
+    with pytest.raises(RuntimeError):
+        await task
+    await asyncio.sleep(0)
+    assert "tid-y" not in fake_app.state.inflight_threads
+    assert task not in fake_app.state.background_tasks
+
+
+@pytest.mark.asyncio
+async def test_resume_starts_immediately_when_thread_idle() -> None:
+    """With nothing in flight, a resume is dispatched straight away."""
+    fake_app = _fake_app()
+    ran: list[str] = []
+
+    async def resume():
+        ran.append("resume")
+
+    started = _queue_or_spawn_resume(
+        fake_app, resume, name="graph:p:resume", thread_id="tid-r"
+    )
+    assert started is True
+    assert "tid-r" in fake_app.state.inflight_threads
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert ran == ["resume"]
+
+
+@pytest.mark.asyncio
+async def test_resume_queued_while_in_flight_then_replayed() -> None:
+    """A resume arriving mid-run is not dropped: it is queued and replayed
+    once the in-flight run for the same thread finishes, never concurrently."""
+    fake_app = _fake_app()
+    events: list[str] = []
+    release = asyncio.Event()
+
+    async def first_run():
+        events.append("run-start")
+        await release.wait()
+        events.append("run-end")
+
+    async def resume():
+        events.append("resume")
+
+    first = _spawn_graph_task(
+        fake_app, first_run(), name="graph:p", thread_id="tid-q"
+    )
+    await asyncio.sleep(0)
+
+    started = _queue_or_spawn_resume(
+        fake_app, resume, name="graph:p:resume", thread_id="tid-q"
+    )
+    assert started is False
+    assert "tid-q" in fake_app.state.pending_resumes
+    # Nothing ran concurrently with the in-flight task.
+    assert events == ["run-start"]
+
+    release.set()
+    await first
+    await asyncio.sleep(0)  # done-callback replays the queued resume
+    assert "tid-q" not in fake_app.state.pending_resumes
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert events == ["run-start", "run-end", "resume"]
+    await asyncio.sleep(0)
+    assert "tid-q" not in fake_app.state.inflight_threads
+
+
+@pytest.mark.asyncio
+async def test_resume_queue_keeps_latest_only() -> None:
+    """Two resumes queued behind one run: only the latest is replayed."""
+    fake_app = _fake_app()
+    events: list[str] = []
+    release = asyncio.Event()
+
+    async def first_run():
+        await release.wait()
+
+    def make(label: str):
+        async def resume():
+            events.append(label)
+
+        return resume
+
+    first = _spawn_graph_task(
+        fake_app, first_run(), name="graph:p", thread_id="tid-l"
+    )
+    _queue_or_spawn_resume(
+        fake_app, make("old"), name="graph:p:resume", thread_id="tid-l"
+    )
+    _queue_or_spawn_resume(
+        fake_app, make("new"), name="graph:p:rework", thread_id="tid-l"
+    )
+
+    release.set()
+    await first
+    await asyncio.sleep(0)
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert events == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_no_tasks() -> None:
+    """Drain returns immediately when no graph tasks are active."""
+    # No tasks named `graph:*` running — should be a no-op.
+    await _drain_graph_tasks(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_waits_for_completion() -> None:
+    """A fast-completing graph task finishes gracefully within the timeout."""
+    async def fast_node():
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    task = asyncio.create_task(fast_node(), name="graph:fast-task")
+    await _drain_graph_tasks(timeout_seconds=1.0)
+    assert task.done()
+    assert not task.cancelled()
+    assert task.result() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_cancels_on_timeout() -> None:
+    """A graph task that exceeds the timeout is cancelled, not left dangling."""
+    async def slow_node():
+        await asyncio.sleep(5)
+        return "should-not-reach"
+
+    task = asyncio.create_task(slow_node(), name="graph:slow-task")
+    await _drain_graph_tasks(timeout_seconds=0.1)
+    assert task.done() or task.cancelled()
+    # Should be cancelled, not have produced a result
+    assert task.cancelled() or isinstance(task.exception(), asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_ignores_non_graph_tasks() -> None:
+    """Tasks without a `graph:` prefix are not drained."""
+    async def bot_loop():
+        await asyncio.sleep(10)
+
+    bot = asyncio.create_task(bot_loop(), name="bot:bookkeeper")
+    try:
+        # Drain should ignore the bot task and return quickly
+        await asyncio.wait_for(_drain_graph_tasks(timeout_seconds=2.0), timeout=0.5)
+        assert not bot.done()
+    finally:
+        bot.cancel()
+        try:
+            await bot
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_drain_graph_tasks_mixed_fast_and_slow() -> None:
+    """Some tasks finish in time, others are cancelled — drain handles both."""
+    async def fast(): await asyncio.sleep(0.05)
+    async def slow(): await asyncio.sleep(5)
+
+    fast_task = asyncio.create_task(fast(), name="graph:a")
+    slow_task = asyncio.create_task(slow(), name="graph:b")
+
+    await _drain_graph_tasks(timeout_seconds=0.5)
+
+    assert fast_task.done() and not fast_task.cancelled()
+    assert slow_task.done()  # cancelled or finished
+    assert slow_task.cancelled() or isinstance(
+        slow_task.exception(), asyncio.CancelledError
+    )
+
+
+# ---------------------------------------------------------------------------
+# _resume_interrupted_tasks — Layer 1 no-checkpoint fallback
+# ---------------------------------------------------------------------------
+
+
+class _FakeMeshWikiClient:
+    """Test double for MeshWikiClient: returns canned tasks, records transitions."""
+
+    def __init__(self, tasks: list[dict]) -> None:
+        self.tasks = tasks
+        self.transitions: list[tuple[str, str, dict | None]] = []
+
+    def __call__(self, *_a, **_kw):  # MeshWikiClient(url, key) instantiation
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def list_tasks(self, status: str | None = None, **_kw) -> list[dict]:
+        return [t for t in self.tasks if t["metadata"].get("status") == status]
+
+    async def transition_task(
+        self, name: str, status: str, extra_fields: dict | None = None
+    ) -> dict:
+        self.transitions.append((name, status, extra_fields))
+        return {"name": name, "metadata": {"status": status}}
+
+
+def _factory_task(name: str, status: str, uuid: str | None = None) -> dict:
+    md = {"status": status, "assignee": "factory"}
+    if uuid:
+        md["uuid"] = uuid
+    return {"name": name, "metadata": md}
+
+
+@pytest.mark.asyncio
+async def test_resume_no_checkpoint_in_progress_marked_failed(monkeypatch) -> None:
+    """An in_progress task with no checkpoint is auto-transitioned to failed."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_A", "in_progress")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)  # no checkpoint
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert len(fake.transitions) == 1
+    name, status, fields = fake.transitions[0]
+    assert name == "Task_A"
+    assert status == "failed"
+    assert "factory_note" in (fields or {})
+
+
+@pytest.mark.asyncio
+async def test_resume_no_checkpoint_review_left_alone(monkeypatch) -> None:
+    """A review-status task with no checkpoint is NOT auto-failed (stale-pr owns it)."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_B", "review")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert fake.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_resume_with_checkpoint_does_not_auto_fail(monkeypatch) -> None:
+    """When a checkpoint IS found, the task is resumed (no transition)."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([_factory_task("Task_C", "in_progress")])
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    graph.ainvoke = AsyncMock(return_value=None)
+    saver = MagicMock()
+    # Return a non-None checkpoint tuple so the resume path is taken
+    saver.aget_tuple = AsyncMock(return_value=MagicMock())
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    await _resume_interrupted_tasks(graph, saver, settings)
+
+    assert fake.transitions == []  # no auto-fail
+
+
+@pytest.mark.asyncio
+async def test_resume_transition_failure_is_logged_not_fatal(monkeypatch) -> None:
+    """If transition_task raises, the resume loop continues to the next task."""
+    from factory import webhook_server as ws
+
+    fake = _FakeMeshWikiClient([
+        _factory_task("Task_D", "in_progress"),
+        _factory_task("Task_E", "in_progress"),
+    ])
+
+    async def _boom(name, status, extra_fields=None):
+        fake.transitions.append((name, status, extra_fields))
+        if name == "Task_D":
+            raise RuntimeError("422 not allowed")
+        return {"name": name, "metadata": {"status": status}}
+
+    fake.transition_task = _boom
+    monkeypatch.setattr(ws, "MeshWikiClient", fake)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
+    saver = MagicMock()
+    saver.aget_tuple = AsyncMock(return_value=None)
+    settings = MagicMock(meshwiki_url="x", meshwiki_api_key="x")
+
+    # Should not raise even though Task_D's transition blows up
+    await _resume_interrupted_tasks(graph, saver, settings)
+    # Both tasks were attempted
+    assert {t[0] for t in fake.transitions} == {"Task_D", "Task_E"}

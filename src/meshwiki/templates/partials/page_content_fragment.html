@@ -1,0 +1,26 @@
+{% if frontmatter %}
+<aside class="frontmatter-card">
+    <h4 class="frontmatter-card-header">Properties<button class="frontmatter-card-toggle" aria-label="Toggle properties"></button></h4>
+    <dl class="frontmatter-dl">
+        {% for key, values in frontmatter.items() %}
+        {% if key not in ('children', 'uuid', 'created', 'modified', 'name') %}
+        <div class="frontmatter-row">
+            <dt>{{ key }}</dt>
+            <dd>
+                {% if key == 'tags' %}
+                    <div class="frontmatter-tags">
+                        {% for v in values %}
+                        <a href="/search?tag={{ v }}" class="tag tag-link">{{ v }}</a>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    {{ values | join(", ") }}
+                {% endif %}
+            </dd>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </dl>
+</aside>
+{% endif %}
+{{ html_content | safe }}

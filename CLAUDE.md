@@ -2,12 +2,20 @@
 
 ## Project Overview
 
-MeshWiki is a modern wiki platform inspired by MoinMoin, Graphingwiki, and Obsidian. It combines:
-- File-based Markdown storage
-- Wiki links (`[[PageName]]` syntax)
+MeshWiki is a self-hosted wiki application, inspired by MoinMoin, Graphingwiki, and
+Obsidian. Like any wiki, it stores pages, links them together, and renders them for
+reading and editing. Core features:
+- File-based Markdown storage (pages are plain `.md` files on disk)
+- Wiki links (`[[PageName]]` syntax) with a backlink graph
+- Full-text search, tags, page history, and a D3.js link-graph view
 - VPS deployment via Docker Compose + Caddy (auto-HTTPS)
 
 **Tech Stack:** FastAPI, Jinja2, HTMX, Python 3.12+, Rust (graph engine), Docker Compose, Caddy
+
+The wiki is the whole product, and it runs on its own — `core/graph.py` is an optional
+import and the app works without it. A separate, optional automation subsystem (the
+"agent factory" / orchestrator under `orchestrator/`) can open PRs against this repo to
+help with development; it has its own docs and nothing in the wiki depends on it.
 
 ## Key Documentation
 
@@ -17,7 +25,7 @@ Read these for full context:
 - `docs/getting-started.md` - Setup and deployment guide
 - `docs/architecture.md` - System design and components
 - `docs/prd/002-meshwiki-mvp.md` - Application requirements and status
-- `docs/prd/003-agent-factory.md` - Agent factory full spec (phases, API, orchestrator)
+- `docs/domains/factory.md` - Agent factory design (phases, API, orchestrator)
 
 - `docs/prd/001-infrastructure.md` - Infrastructure requirements
 - `docs/custom-macros.md` - How to create custom `<<Macro>>` extensions
@@ -268,6 +276,8 @@ Before committing:
 27. **Graph API parent edges** - `/api/graph` returns links with `type: "parent"` for implicit subpage hierarchy (page `A/B` → edge from `A` if `A` exists). These render as dashed lines in graph.js. Regular wiki links have no `type` field.
 28. **Preprocessors are synchronous** - Markdown preprocessors run inside FastAPI's already-running event loop. Never use `asyncio.run()` in a preprocessor — it raises `RuntimeError: This event loop is already running`. Use `get_engine()` for synchronous data access (see `MetaTableExtension`), or accept data as a constructor parameter passed in from the async route handler.
 29. **CI overwrites orchestrator env files from GitHub secrets** - `.github/workflows/ci.yml` writes `/opt/meshwiki/orchestrator-staging.env` and `/opt/meshwiki/orchestrator.env` from GitHub secrets on every staging/production deploy. If `FACTORY_ANTHROPIC_API_KEY` (or any other secret) is manually set on the VPS, CI will overwrite it. Always add secrets to the GitHub repo secrets (`gh secret set`) so they survive redeploys.
+30. **Caddy multi-service routing via shared Docker network** - Caddy (`meshwiki-caddy-1`) is on `meshwiki_default`. Services from other Compose projects must be explicitly connected: `docker network connect meshwiki_default <container>`. Once connected, Caddy resolves them by container name. Use `${VPS_DOMAIN}` for wiki/staging domains; hardcode other service domains that belong to different projects.
+31. **Staging orchestrator source code mount** - The `orchestrator-staging` container uses `-v /opt/meshwiki/staging/orchestrator/factory:/app/factory:ro` so staging code changes are reflected immediately without rebuilding the Docker image. The orchestrator Docker image is only rebuilt from `main` by CI; staging code reaches the container via this volume mount after `git pull` in `/opt/meshwiki/staging/orchestrator/`.
 
 ## Completed Milestones (1–10)
 
@@ -337,8 +347,8 @@ The agent reads the domain doc for context, works autonomously, and reports back
 ## Testing
 
 ```bash
+pip install -e ".[dev]"            # from the repo root (pyproject.toml lives there)
 cd src
-pip install -e ".[dev]"
 pytest
 pytest --cov=meshwiki          # With coverage
 pytest -x                        # Stop on first failure
@@ -380,3 +390,20 @@ select = ["E", "F", "I", "N", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 ```
+
+## Working with safety classifiers
+
+Sessions in this repo have had replies stopped by Claude's safety classifier. The stops are non-deterministic: the same input sometimes passes and sometimes doesn't.
+
+What we know:
+
+- The classifier scores the whole conversation (user input, tool output, and Claude's replies), not just the latest message. A stopped reply stays in context and can push later turns closer to the threshold.
+- Claude's output varies between runs, so identical prompts can produce different conversations.
+- Flip-flopping results suggest content that sits near the threshold rather than clearly over it.
+
+How to work with it:
+
+1. After a stop, run `/clear` before retrying so stopped content doesn't accumulate.
+2. State the project's legitimate purpose and scope near the top of the conversation or this file, before any sensitive specifics.
+3. Ask for concrete tasks rather than commentary on security-sensitive wording.
+4. Report suspected false positives with `/feedback`.

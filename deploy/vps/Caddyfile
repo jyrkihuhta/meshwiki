@@ -5,9 +5,15 @@
 }
 
 ${VPS_DOMAIN} {
+    header /static/* Cache-Control "public, max-age=86400"
     reverse_proxy meshwiki:8000
 }
 
 staging.${VPS_DOMAIN} {
+    header /static/* Cache-Control "public, max-age=86400"
     reverse_proxy meshwiki-staging:8000
+}
+
+molly.penni.fi {
+    reverse_proxy molly:8780
 }

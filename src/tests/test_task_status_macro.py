@@ -2,7 +2,7 @@
 
 import pytest
 
-from meshwiki.core.parser import parse_wiki_content
+from meshwiki.core.parser import _mermaid_diagram, parse_wiki_content
 
 
 def render(
@@ -151,6 +151,31 @@ class TestMermaidDiagram:
         # green fill used for current
         assert "#22c55e" in html
 
+    def test_rework_back_edge_shown_when_rework_count_gt_0(self):
+        diagram = _mermaid_diagram("in_progress", rework_count=2)
+        assert 'review -->|"×2"| in_progress' in diagram
+
+    def test_rework_back_edge_absent_when_rework_count_zero(self):
+        diagram = _mermaid_diagram("in_progress", rework_count=0)
+        assert "×" not in diagram
+
+    def test_rework_back_edge_absent_when_rework_count_missing(self):
+        diagram = _mermaid_diagram("review")
+        assert "×" not in diagram
+
+    def test_rework_back_edge_label_uses_count(self):
+        diagram = _mermaid_diagram("review", rework_count=1)
+        assert 'review -->|"×1"| in_progress' in diagram
+
+    def test_rework_count_in_metadata_renders_in_html(self):
+        """rework_count from frontmatter flows through to diagram in rendered HTML."""
+        html = render(
+            "<<TaskStatus>>",
+            metadata={"type": "task", "status": "in_progress", "rework_count": 3},
+        )
+        # × is not HTML-escaped; it appears as-is inside the mermaid div
+        assert "×3" in html
+
 
 # ============================================================
 # Metadata row
@@ -248,13 +273,15 @@ class TestTerminalSection:
         html = render("<<TaskStatus>>", metadata={"type": "task", "status": "done"})
         assert "task-status-terminal" not in html
 
-    def test_terminal_absent_for_failed(self):
+    def test_terminal_present_for_failed(self):
+        # Terminal is shown for failed so grinder error output is visible.
         html = render("<<TaskStatus>>", metadata={"type": "task", "status": "failed"})
-        assert "task-status-terminal" not in html
+        assert "task-status-terminal" in html
+        assert "data-terminal-done" in html
 
     def test_terminal_absent_for_review(self):
         html = render("<<TaskStatus>>", metadata={"type": "task", "status": "review"})
-        assert "task-status-terminal" not in html
+        assert "task-status-terminal" in html
 
     def test_page_name_xss_safe(self):
         """page_name is embedded via json.dumps — angle brackets must be escaped."""
@@ -264,6 +291,76 @@ class TestTerminalSection:
             metadata={"type": "task", "status": "in_progress"},
         )
         assert "<script>alert(1)</script>" not in html
+
+
+# ============================================================
+# Phase indicator
+# ============================================================
+
+
+class TestPhaseIndicator:
+    def test_phase_absent_for_draft(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "draft"})
+        assert "task-status-phase" not in html
+
+    def test_phase_absent_for_done(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "done"})
+        assert "task-status-phase" not in html
+
+    def test_phase_absent_for_failed(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "failed"})
+        assert "task-status-phase" not in html
+
+    def test_phase_absent_for_merged(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "merged"})
+        assert "task-status-phase" not in html
+
+    def test_phase_absent_for_rejected(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "rejected"})
+        assert "task-status-phase" not in html
+
+    def test_phase_grinding_no_pr(self):
+        html = render(
+            "<<TaskStatus>>", metadata={"type": "task", "status": "in_progress"}
+        )
+        assert "task-status-phase" in html
+        assert "🔨 Grinding" in html
+        assert "grinder is implementing" in html
+
+    def test_phase_grinding_with_pr(self):
+        html = render(
+            "<<TaskStatus>>",
+            metadata={
+                "type": "task",
+                "status": "in_progress",
+                "pr_url": "https://github.com/org/repo/pull/123",
+            },
+        )
+        assert "task-status-phase" in html
+        assert "🔨 Grinding" in html
+        assert "rework in progress" in html
+        assert 'href="https://github.com/org/repo/pull/123"' in html
+        assert "PR #123" in html
+
+    def test_phase_reviewing_no_pr(self):
+        html = render("<<TaskStatus>>", metadata={"type": "task", "status": "review"})
+        assert "task-status-phase" in html
+        assert "🔍 PM reviewing" in html
+        assert "task is complete" not in html
+
+    def test_phase_reviewing_with_pr(self):
+        html = render(
+            "<<TaskStatus>>",
+            metadata={
+                "type": "task",
+                "status": "review",
+                "pr_url": "https://github.com/org/repo/pull/456",
+            },
+        )
+        assert "task-status-phase" in html
+        assert "🔍 PM reviewing" in html
+        assert 'href="https://github.com/org/repo/pull/456"' in html
+        assert "PR #456" in html
 
 
 # ============================================================

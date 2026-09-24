@@ -25,3 +25,12 @@ RUN pip install --no-cache-dir \
     pytest \
     pytest-asyncio \
     pytest-cov
+
+# Pre-bake meshwiki + orchestrator Python dependencies so runtime pip installs are fast.
+# Clone, install deps (non-editable), delete clone. The runtime `pip install -e .` will
+# skip downloading packages that are already installed.
+ARG GITHUB_TOKEN
+RUN git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/jyrkihuhta/meshwiki.git /tmp/meshwiki-prebake \
+    && pip install --no-cache-dir /tmp/meshwiki-prebake \
+    && pip install --no-cache-dir /tmp/meshwiki-prebake/orchestrator \
+    && rm -rf /tmp/meshwiki-prebake

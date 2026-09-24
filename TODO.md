@@ -15,18 +15,19 @@
 | 8 | **Navigation & Discovery** — search, TOC sidebar, tags, recent changes | ✅ Complete |
 | 9 | **Visual Polish** — dark mode, mobile responsive, notifications, code highlighting | ✅ Complete |
 | 10 | **Graph Enhancements** — node search, focus mode, tooltips, sizing | ✅ Complete |
-| 11 | **Macro System** — PageList, RecentChanges, BackLinks, PageCount macros | Planned |
+| 11 | **Macro System** — PageList, RecentChanges, BackLinks, PageCount, Include, NewPage macros | 🔄 In Progress |
 | 12 | **Authentication** — user accounts, login/logout, access control | Planned |
 | 13 | **Observability** — structured logging, metrics endpoint | Planned |
+| 14 | **Version History** — SQLite revisions, diff view, restore | ✅ Complete |
 | S1 | **Staging Integration** — `staging` branch, grinders → staging, auto-merge, E2B template | ✅ Complete |
-| F8 | **Factory v2: Gap Fixes** — cost tracking, concurrency control, bookkeeper bot | 🔲 Planned |
+| F8 | **Factory v2: Gap Fixes** — cost tracking, concurrency control, bookkeeper bot | ✅ Complete |
 | F9 | **Factory v2: HBR Manager** — resource tracking, daily budget, 24/7 scheduler | 🔲 Planned |
 | F10 | **Factory v2: Live Visualization** — D3.js factory graph, `/factory/live`, WebSocket | 🔲 Planned |
 | F11 | **Factory v2: Stale PR Bot** — autonomous CI failure fixer | 🔲 Planned |
 
-**Priority:** S1 → F8 → F9 → F10 → F11 → 11 → 12 → 13
+**Priority:** F9 → F10 → F11 → 11 → 12 → 13
 
-**~390 tests passing** (70 graph-core + ~320 Python), CI pipeline active.
+**~390 tests passing** (70 graph-core + ~321 Python), CI pipeline active.
 
 ---
 
@@ -90,7 +91,7 @@ Make the graph view more useful for navigation and exploration.
 
 ### Milestone S1: Staging Integration ✅ COMPLETE
 
-Staging factory is fully operational. Two successful grinder tasks merged.
+Staging factory is fully operational. Multiple successful grinder tasks merged.
 
 **Completed:**
 - [x] Staging container + Caddy routing at `staging.wiki.penni.fi`
@@ -103,21 +104,57 @@ Staging factory is fully operational. Two successful grinder tasks merged.
 - [x] CLAUDE.md gotcha #28: asyncio.run() in preprocessors is fatal
 - [x] TASK001 (PageCount macro) — grinder implemented, merged ✅
 - [x] TASK002 (BackLinks macro) — grinder implemented, merged ✅
+- [x] PageList macro fix — asyncio.run() replaced with Pattern B (constructor injection) ✅
+- [x] PM retry logic — 30s exponential backoff on Anthropic 529, MiniMax M2.7 fallback ✅
+- [x] PM review resilience — fail-fast on empty feedback, exception marks subtask failed ✅
+- [x] `merged → done` transition fix — pm_review_node transitions wiki page after auto-merge ✅
+- [x] Staging orchestrator source mount — `orchestrator-staging` mounts live source code (no Docker rebuild needed)
+- [x] Include macro (<<Include(PageName)>>) — full circular detection, E2E verified ✅
+- [x] NewPage macro (<<NewPage(Template, Label, Parent)>>) — E2E verified with full pipeline ✅
 
-**Key files:** `orchestrator/factory/agents/grinder_agent.py`, `orchestrator/e2b.Dockerfile`, `.github/workflows/ci.yml`, `orchestrator/factory/config.py`
+**Key files:** `orchestrator/factory/agents/grinder_agent.py`, `orchestrator/e2b.Dockerfile`, `.github/workflows/ci.yml`, `orchestrator/factory/config.py`, `deploy/vps/docker-compose.prod.yml`
 
 ### Milestone F8: Factory v2 — Gap Fixes 🔲
 Fix correctness and reliability issues in the v1 orchestrator.
 
-- [ ] Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
-- [ ] Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node`
-- [ ] httpx clients — share a single `httpx.AsyncClient` per session in `MeshWikiClient` and `GitHubClient`
-- [ ] Configurable PM model — `FACTORY_PM_MODEL` env var instead of hardcoded `"claude-sonnet-4-6"`
-- [ ] Review feedback in rework — append `subtask["review_feedback"]` to Kilo prompt on rework iterations
-- [ ] Bookkeeper bot — periodic job reconciling stale task states (stuck in_progress → failed, merged PRs → merged)
-- [ ] Signed grinder commits — GitHub App token or GPG key in E2B sandbox
-- [ ] Redecompose escalation — implement `"redecompose"` decision in `escalate_node`
-- [ ] Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
+**Cost & resource control (highest impact)**
+- [x] **F8.1** Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node`
+- [x] **F8.2** Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
+
+**Correctness**
+- [x] **F8.3** Fan-in state merge bug — when parallel grinders finish at different times, `collect_results` sees a merged subtasks list that drops the failed status of earlier-finishing subtasks; investigate LangGraph reducer annotation on `subtasks` / `failed_subtask_ids` fields in `FactoryState` and add an `Annotated` reducer so all branch updates are correctly combined
+- [x] **F8.4** Per-subtask PM review — currently PM review waits for ALL grinders to finish before reviewing any; restructure so each grind instance fans out to its own `pm_review` via `Send()`, unblocking fast subtasks from slow rework cycles
+- [x] **F8.5** PM review feedback visible on wiki — `append_to_page` in `pm_review_node` isn't writing feedback to the task page; PM review decisions should be visible in the Agent Log section
+
+**Reliability**
+- [x] **F8.6** Bookkeeper bot — periodic job reconciling stale task states (stuck in_progress → failed, merged PRs → merged)
+- [x] **F8.7** Unit tests for routing functions — `route_after_grinding`, `route_grinders` file-overlap, `route_after_pm_review`
+
+**Performance**
+- [x] **F8.8** Pre-bake Python deps into E2B template — `pip install -e '.[dev]'` runs from scratch every grind session; baking deps into the `meshwiki-grinder` E2B template snapshot would make this near-instant and eliminate a large chunk of per-run disk/time overhead (requires rebuilding the template via `e2b template build`)
+
+**Security**
+- [x] **F8.9** GitHub webhook secret on staging — `MESHWIKI_GITHUB_WEBHOOK_SECRET` is empty in staging env, so HMAC verification is skipped; anyone can POST fake "PR merged" events to trigger task page transitions
+- [x] **F8.10** Auth-gate `/ws/terminal/{name}` WebSocket — currently unauthenticated; anyone who knows (or guesses) a task page name can read live grinder terminal output, which may include API keys, tokens, or repo contents streamed via Kilo
+
+**Efficiency**
+- [x] **F8.11** httpx clients — share a single `httpx.AsyncClient` per session in `MeshWikiClient` and `GitHubClient`
+
+**Larger refactors / lower priority**
+- [x] **F8.12** Stable page identity via UUID — terminal session keys, WebSocket lookups, and graph thread IDs all use the fragile human-readable page name (spaces/underscores/special chars cause mismatch bugs). Root cause: wiki URLs encode spaces as underscores, but page names can also contain real underscores (e.g. `get_engine()`), making the two indistinguishable in a URL. Add a `uuid` frontmatter field generated on page creation; use it as the canonical key everywhere internally, keeping the page name only for display/URL routing
+- [x] **F8.13** Redecompose escalation — implement `"redecompose"` decision in `escalate_node`
+- [~] **F8.14** Signed grinder commits — deferred (GitHub App token or GPG key in E2B sandbox)
+- [x] **F8.15** Persist grinder terminal output and run a review bot — terminal chunks are currently streamed to the browser and discarded; storing them (e.g. appended to the task wiki page or a sidecar log file) would enable a post-run bot to analyze patterns across sessions: recurring lint failures, commands that always fail first try, slow steps, Kilo confusion about tool use. Bot output could feed back into improved task prompts, better bootstrap steps, or a "known issues" section in CLAUDE.md
+- [x] **F8.16** `/api/graph`, `/ws/graph`, `/metrics` are unauthenticated — exposes all page names, links, and per-page view counts to anonymous users; acceptable for now but worth locking down before any public exposure
+
+**Completed**
+- [x] Configurable PM model — `FACTORY_PM_DECOMPOSE_MODEL`, `FACTORY_PM_REVIEW_MODEL`, `FACTORY_PM_TRIAGE_MODEL` env vars
+- [x] Review feedback in rework — `subtask["review_feedback"]` appended to Kilo task prompt on rework iterations
+- [x] PM review token cost — diff capped at `FACTORY_PM_REVIEW_MAX_DIFF_LINES` (default 500), two-pass triage via `FACTORY_PM_TRIAGE_MODEL` (Haiku fast-path; escalates to Sonnet only when triage requests changes)
+- [x] Deferred subtask routing bug — `route_after_grinding` now loops back to `assign_grinders` when pending subtasks remain
+- [x] Spurious `task.assigned` restart from subtask transitions — webhook_server checks `data["parent_task"]` and ignores `task.assigned` for subtask pages
+- [x] E2B sandbox disk optimisation — `git clone --depth 1` + `pip install --no-cache-dir` in grinder_agent.py
+- [x] Orchestrator dep install in grinder — `pip install -e '.[dev]'` added to bootstrap (GrinderBootstrap PR #126)
 
 **Key files:** `orchestrator/factory/cost.py` (new), `orchestrator/factory/nodes/assign.py`, `orchestrator/factory/agents/pm_agent.py`, `orchestrator/factory/agents/grinder_agent.py`, `orchestrator/factory/integrations/`
 
@@ -140,6 +177,7 @@ Real-time factory activity view using D3.js, same visual language as the wiki gr
 - [ ] `GET /api/factory/graph` and `GET /api/factory/activity` REST endpoints
 - [ ] `/factory/live` page: D3 force graph (task circles colored by status, agent diamonds, dashed parent edges), detail panel (slide-in right, terminal embed for in_progress), activity feed strip at bottom
 - [ ] `base.html` — add conditional "Factory" nav link when `factory_enabled`
+- [ ] **Command-center flow view** — XSIAM-style horizontal pipeline visualization: sources (wiki backlog) → processing vortex (PM + grinder nodes) → outcomes (merged/failed/open PRs), with animated flowing paths between stages, live counters per stage, and branching arcs for auto vs manual routes. Inspired by Palo Alto XSIAM Command Center dashboard aesthetic.
 
 **Key files:** `core/factory_ws_manager.py` (new), `static/js/factory.js` (new), `static/css/factory.css` (new), `templates/factory_live.html` (new), `core/task_machine.py`, `main.py`, `api/tasks.py`
 
@@ -157,11 +195,17 @@ Document the extension system and add useful built-in macros.
 
 - [x] Write developer guide: `docs/custom-macros.md`
 - [x] Add macro examples to sample wiki content (11 example pages with MetaTable usage)
-- [ ] `<<PageList(tag=value)>>` macro — embed a filtered list of pages
-- [ ] `<<RecentChanges(n=10)>>` macro — show recently modified pages
-- [ ] `<<BackLinks>>` macro — inline backlinks (alternative to sidebar panel)
-- [ ] `<<PageCount>>` macro — total page count for dashboards
+- [x] `<<PageList(tag=value)>>` macro — embed a filtered list of pages (Pattern B)
+- [x] `<<RecentChanges(n=10)>>` macro — show recently modified pages
+- [x] `<<BackLinks>>` macro — inline backlinks (alternative to sidebar panel)
+- [x] `<<PageCount>>` macro — total page count for dashboards
+- [x] `<<Include(PageName)>>` macro — transcludes another page, circular detection
+- [x] `<<NewPage(Template, "Label", Parent)>>` macro — inline form to create page from template
+- [x] `<<LastModified>>` macro — inline relative time of page's last modification, falls back to `—`
+- [x] `<<TagList>>` macro — inline tag list with counts, links to `/search?tag=X`, sorted by count descending
 - [ ] Live MetaTable refresh — wire WebSocket `page_updated` events to trigger HTMX re-fetch of MetaTable sections without full page reload
+- [ ] Macro escape syntax — preprocessors skip inline backtick spans and honor `\<<MacroName>>` as a literal `<<MacroName>>` (currently any bare `<<Macro>>` in prose triggers the preprocessor)
+- [ ] `<<TaskStatus>>` rework edge — if a task has been returned from `review` back to `in_progress` at least once, show the back-edge in the Mermaid state diagram with the retry count as an edge label (e.g. `review -->|×2| in_progress`); read attempt count from `subtask["attempt"]` or a dedicated `rework_count` field in frontmatter
 **Key files:** `core/parser.py` (new extensions), `docs/custom-macros.md`
 
 ### Milestone 12: Authentication
@@ -186,14 +230,33 @@ Add structured logging and metrics for production readiness.
 
 ---
 
+### Milestone 14: Version History ✅
+
+SQLite-backed revision tracking for every page save. Zero new dependencies (stdlib `sqlite3` + `difflib`).
+
+- [x] `RevisionStore` SQLite store — per-page sequential revision numbering, WAL mode
+- [x] `Revision` Pydantic model added to `models.py`
+- [x] `FileStorage` wired up — all 4 write paths (save, delete, rename, frontmatter) record/clean revisions
+- [x] `GET /page/{name}/history` — paginated revision list
+- [x] `GET /page/{name}/history/{rev}` — read-only rendered past revision with restore button
+- [x] `POST /page/{name}/restore/{rev}` — restores content, records new revision
+- [x] `GET /page/{name}/diff/{a..b}` — unified diff view (also `diff/{n}` shorthand)
+- [x] JSON API: `GET /api/v1/pages/{name}/history[/{rev}]`
+- [x] Config: `MESHWIKI_HISTORY_ENABLED` (default `true`)
+- [x] 60 new tests (28 unit + 13 storage + 19 integration)
+
+**Key files:** `core/revision_store.py` (new), `core/storage.py`, `core/models.py`, `core/dependencies.py`, `main.py`, `api/pages.py`, `templates/page/history.html`, `templates/page/revision.html`, `templates/page/diff.html`, `static/css/style.css`
+
+---
+
 ## Success Criteria
 
 - [x] Editor has live preview and toolbar
 - [x] Users can search pages by name and content
 - [x] Dark mode works with one click
 - [x] Mobile layout is usable
-- [ ] Developer docs explain how to create custom macros
-- [ ] At least 3 new built-in macros available
+- [x] Developer docs explain how to create custom macros
+- [x] At least 3 new built-in macros available (PageList, BackLinks, PageCount, Include, NewPage)
 - [ ] Users can log in and edits are attributed
 - [ ] Structured logs with request context
 
@@ -314,3 +377,65 @@ Moved to v2 milestones (see F8–F11 above):
 - Focus on correctness over performance initially
 - Keep Python as the primary interface; Rust is an implementation detail
 - Python 3.14 requires ABI3 forward compatibility flag for PyO3
+- Signed grinder commits (F8.14) deferred — GitHub App token or GPG key in E2B sandbox so factory PRs carry verified authorship
+
+---
+
+## Review follow-ups (2026-09-24)
+
+Follow-ups from a security/correctness review. The HIGH/MEDIUM findings that
+still applied to `staging` were fixed in a separate pass; the items below are
+the deferred LOW findings and improvement ideas, grouped by theme.
+
+### Correctness (LOW findings B10–B13)
+- **Decompose `planned→planned` + acceptance-criteria bug** — the PM decompose
+  path can emit a no-op `planned→planned` transition; and acceptance criteria
+  are derived from `files_touched` (an *estimate* filled in during
+  decomposition), so criteria can be wrong/empty when the estimate is off.
+  Derive acceptance criteria from the task spec, not the file estimate.
+- **Branch name from page name → invalid git refs** — branch names built from
+  wiki page names can produce refs git rejects (spaces, `..`, leading/trailing
+  slashes, control chars, reserved sequences). Sanitize to a valid ref.
+- **Rate limiter keys on proxy IP** — `auth.py`'s login rate limiter keys on the
+  socket peer, which behind a reverse proxy (Caddy) is the proxy IP, so all
+  users share one bucket. Honor a trusted `X-Forwarded-For` (only from known
+  proxies) when deriving the client IP.
+- **Rust/Python frontmatter parse divergence + code-block links** — the Rust
+  parser and the Python parser can disagree on frontmatter edge cases, and the
+  Rust link extractor creates graph edges for `[[wiki links]]` that appear
+  inside fenced code blocks (the Python side already skips code blocks). Align
+  the two parsers and skip code blocks in the Rust link extraction.
+
+### Async correctness
+- **Blocking I/O in async paths** — `storage.py` calls synchronous
+  `path.read_text()` inside `async def` methods (e.g. tag/search scans), blocking
+  the event loop; route heavy scans through `run_in_executor` (as
+  `page_cache` already does for `list_pages_with_metadata_sync`).
+- **PyO3 GIL** — the `GraphEngine` PyO3 methods hold the GIL for the whole call;
+  wrap heavy graph operations (rebuild, query, metatable) in `py.allow_threads`
+  so concurrent Python work isn't blocked.
+
+### Factory F8 robustness
+- Enforce concurrency caps (parent tasks + sandboxes) at dispatch, not just in
+  status reporting.
+- Add real cost tracking (accumulate per-grinder token/sandbox cost into
+  `cost_usd` / `incremental_costs_usd`).
+- Use one shared `httpx.AsyncClient` per `MeshWikiClient` instead of a new client
+  per request.
+- URL-encode page names when building MeshWiki API URLs (hierarchical names with
+  slashes/spaces).
+
+### Build / dependency hygiene
+- No lockfiles and all deps pinned as `>=` — add lockfiles (pip-tools/uv,
+  `Cargo.lock` committed) for reproducible builds.
+- `config.py` hardcodes a `repo_root` default — make it explicit/required.
+- Remove dead `POSTGRES_DSN` config (no DB backend yet).
+- Reconcile the `FACTORY_PORT` mismatch between compose/env and the app default.
+
+### CI / deploy
+- Gate deploy on `test-orchestrator` (orchestrator tests currently don't block
+  deploy).
+- Orchestrator image is shipped as unversioned `:latest` with no rollback path —
+  tag images and keep a rollback.
+- Most E2E tests never run in CI — wire the Playwright E2E suite into CI.
+- Add secret scanning and `cargo clippy` to the lint/CI pipeline.

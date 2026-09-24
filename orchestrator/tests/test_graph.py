@@ -9,10 +9,8 @@ from factory.graph import build_graph, route_after_intake
 EXPECTED_NODES = {
     "task_intake",
     "decompose",
-    "human_review_plan",
     "assign_grinders",
     "grind",
-    "collect_results",
     "pm_review",
     "human_review_code",
     "merge_check",
@@ -44,12 +42,10 @@ def test_graph_default_checkpointer() -> None:
 
 
 def test_graph_interrupt_nodes() -> None:
-    """The graph should declare interrupt_before for human review nodes."""
+    """The graph interrupts before human_review_code only."""
     graph = build_graph(MemorySaver())
-    # LangGraph exposes interrupt_before_nodes on the compiled graph
     interrupt_nodes = set(graph.interrupt_before_nodes)
-    assert "human_review_plan" in interrupt_nodes
-    assert "human_review_code" in interrupt_nodes
+    assert interrupt_nodes == {"human_review_code"}
 
 
 # ---------------------------------------------------------------------------

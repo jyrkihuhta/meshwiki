@@ -4,6 +4,7 @@ import importlib
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
 
 import meshwiki.config as cfg
 import meshwiki.main
@@ -126,3 +127,58 @@ async def test_logout_clears_session(client):
     # Now protected routes should redirect again
     resp = await client.get("/")
     assert resp.status_code == 302
+
+
+# ── WebSocket terminal auth tests ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def sync_auth_client(auth_settings):
+    """Synchronous TestClient for WebSocket tests.
+
+    TestClient manages its own event loop, so we must not call
+    manager.start_polling() before entering the ``with`` block.
+    The TestClient's lifespan handling starts the app (and polling)
+    internally when ``raise_server_exceptions=False`` and ``app``
+    has no lifespan registered for this fixture path.  We skip
+    explicit polling here to avoid the "no running event loop" error.
+    """
+    from meshwiki.core.graph import init_engine, shutdown_engine
+
+    init_engine(auth_settings.data_dir, watch=False)
+    with TestClient(meshwiki.main.app, raise_server_exceptions=False) as c:
+        yield c
+    shutdown_engine()
+
+
+def test_ws_terminal_unauthenticated_rejected(sync_auth_client):
+    """Unauthenticated WebSocket connection to /ws/terminal/ is closed with 1008."""
+    with pytest.raises(Exception):
+        # TestClient raises when the server closes the connection immediately
+        with sync_auth_client.websocket_connect("/ws/terminal/SomeTask"):
+            pass  # should not reach here
+
+
+def test_ws_terminal_authenticated_accepted(sync_auth_client):
+    """An authenticated WebSocket reaches the handler (no policy-violation close)."""
+    from meshwiki.core.terminal_sessions import create_session
+
+    # Create a closed session so the handler sends the "no output" message and exits
+    create_session("AuthedTask")
+    from meshwiki.core.terminal_sessions import _sessions
+
+    _sessions["AuthedTask"].closed = True
+
+    # Log in first to establish a session cookie
+    resp = sync_auth_client.post("/login", data={"password": "correct-horse"})
+    assert resp.status_code in (200, 302)
+
+    # The WebSocket connection should be accepted and then cleanly closed by the server
+    with sync_auth_client.websocket_connect("/ws/terminal/AuthedTask") as ws:
+        # Drain any buffered messages; the server closes after replaying a closed
+        # session
+        try:
+            while True:
+                ws.receive_text()
+        except Exception:
+            pass  # server-side close or disconnect is expected

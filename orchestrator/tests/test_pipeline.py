@@ -9,12 +9,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from langgraph.checkpoint.memory import MemorySaver
 
 from factory.graph import build_graph
 from factory.state import FactoryState, SubTask
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,6 +24,7 @@ def _make_subtask(**kwargs) -> SubTask:
     defaults: dict = {
         "id": "task-0042-sub-abc123",
         "wiki_page": "Task_0042_Sub_01_add_search",
+        "parent_task": "Task_0042_test",
         "title": "Add search endpoint",
         "description": "Implement GET /search route.",
         "status": "pending",
@@ -37,6 +36,7 @@ def _make_subtask(**kwargs) -> SubTask:
         "max_attempts": 3,
         "error_log": [],
         "files_touched": ["src/meshwiki/main.py"],
+        "acceptance_criteria": [],
         "token_budget": 50000,
         "tokens_used": 0,
         "review_feedback": None,
@@ -58,16 +58,18 @@ def _make_initial_state(subtask: SubTask) -> FactoryState:
         requirements="Implement a test feature.",
         subtasks=[subtask],
         decomposition_approved=True,
-        active_grinders={},
+        active_grinders=[],
         completed_subtask_ids=[],
         failed_subtask_ids=[],
         pm_messages=[],
         human_approval_response=None,
         human_feedback=None,
         cost_usd=0.0,
+        incremental_costs_usd=[],
         graph_status="intake",
         error=None,
         escalation_decision=None,
+        _current_subtask_id=None,
     )
 
 
@@ -77,12 +79,15 @@ def _make_initial_state(subtask: SubTask) -> FactoryState:
 
 
 def _mock_meshwiki_client(*, task_page_metadata: dict | None = None):
-    """Return an AsyncMock MeshWikiClient that returns sensible defaults."""
+    """Return an AsyncMock MeshWikiClient configured as a context manager."""
     client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
     page_data = {
         "name": "Task_0042_test",
         "content": "# Test Task\n\nRequirements here.",
-        "metadata": task_page_metadata or {"title": "Test Task", "status": "planned"},
+        "metadata": task_page_metadata
+        or {"title": "Test Task", "status": "planned", "assignee": "factory"},
     }
     client.get_page = AsyncMock(return_value=page_data)
     client.create_page = AsyncMock(return_value=page_data)
@@ -92,8 +97,10 @@ def _mock_meshwiki_client(*, task_page_metadata: dict | None = None):
 
 
 def _mock_github_client(*, pr_merged: bool = True):
-    """Return an AsyncMock GitHubClient that reports a merged PR."""
+    """Return an AsyncMock GitHubClient configured as a context manager."""
     client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
     pr_state = "closed" if pr_merged else "open"
     client.get_pr = AsyncMock(
         return_value={"merged": pr_merged, "state": pr_state, "number": 99}
@@ -154,7 +161,9 @@ async def test_pipeline_happy_path_reaches_done() -> None:
         ),
         patch(
             "factory.nodes.grind.grind_subtask",
-            new=AsyncMock(return_value=grinder_result),
+            new=AsyncMock(
+                return_value={"subtask": grinder_result, "incremental_cost_usd": 0.0}
+            ),
         ),
         patch(
             "factory.nodes.pm_review.MeshWikiClient",
@@ -180,9 +189,12 @@ async def test_pipeline_happy_path_reaches_done() -> None:
         # First invoke: runs until human_review_code interrupt
         await graph.ainvoke(initial_state, config=config)
 
-        # Inject human approval into the checkpoint, then resume
+        # Inject human approval into the checkpoint as if human_review_code produced it,
+        # then resume.  as_node is required so LangGraph routes forward from the node.
         await graph.aupdate_state(
-            config, {"human_approval_response": "approve", "human_feedback": None}
+            config,
+            {"human_approval_response": "approve", "human_feedback": None},
+            as_node="human_review_code",
         )
         final_state = await graph.ainvoke(None, config=config)
 
@@ -191,10 +203,27 @@ async def test_pipeline_happy_path_reaches_done() -> None:
 
 @pytest.mark.asyncio
 async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
-    """When grinder fails and retries are exhausted, graph ends via escalate→abandon."""
+    """When retries are exhausted and only a minority of subtasks failed,
+    escalate decides 'abandon' (isolated implementation problem, not decomposition)."""
     # Subtask already at max attempts so it won't retry
     subtask = _make_subtask(status="pending", attempt=2, max_attempts=3)
-    initial_state = _make_initial_state(subtask)
+    # Two already-merged subtasks so the failure is a minority (1/3) → abandon.
+    already_done_1 = _make_subtask(
+        id="task-0042-sub-done1",
+        wiki_page="Task_0042_Sub_02_done",
+        status="merged",
+    )
+    already_done_2 = _make_subtask(
+        id="task-0042-sub-done2",
+        wiki_page="Task_0042_Sub_03_done",
+        status="merged",
+    )
+    initial_state = FactoryState(
+        **{
+            **_make_initial_state(subtask),
+            "subtasks": [subtask, already_done_1, already_done_2],
+        }
+    )
 
     meshwiki = _mock_meshwiki_client()
 
@@ -220,7 +249,9 @@ async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
         ),
         patch(
             "factory.nodes.grind.grind_subtask",
-            new=AsyncMock(return_value=failed_result),
+            new=AsyncMock(
+                return_value={"subtask": failed_result, "incremental_cost_usd": 0.0}
+            ),
         ),
         patch(
             "factory.nodes.escalate.MeshWikiClient",
@@ -229,7 +260,7 @@ async def test_pipeline_grind_failure_triggers_escalate_then_abandon() -> None:
     ):
         final_state = await graph.ainvoke(initial_state, config=config)
 
-    # With all retries exhausted, escalate decides "abandon" → END
+    # Minority failure with exhausted retries → abandon
     assert final_state["graph_status"] == "escalated"
     assert final_state["escalation_decision"] == "abandon"
 
@@ -277,7 +308,12 @@ async def test_pipeline_pm_review_requests_changes_reruns_grinder() -> None:
         ),
         patch(
             "factory.nodes.grind.grind_subtask",
-            new=AsyncMock(side_effect=[review_result, regrind_result]),
+            new=AsyncMock(
+                side_effect=[
+                    {"subtask": review_result, "incremental_cost_usd": 0.0},
+                    {"subtask": regrind_result, "incremental_cost_usd": 0.0},
+                ]
+            ),
         ),
         patch(
             "factory.nodes.pm_review.MeshWikiClient",
@@ -303,9 +339,12 @@ async def test_pipeline_pm_review_requests_changes_reruns_grinder() -> None:
         # First run: pauses at human_review_code after second PM review approves
         await graph.ainvoke(initial_state, config=config)
 
-        # Inject approval into checkpoint, then resume
+        # Inject approval into checkpoint, then resume.
+        # as_node is required so LangGraph routes forward from the interrupt node.
         await graph.aupdate_state(
-            config, {"human_approval_response": "approve", "human_feedback": None}
+            config,
+            {"human_approval_response": "approve", "human_feedback": None},
+            as_node="human_review_code",
         )
         final_state = await graph.ainvoke(None, config=config)
 
@@ -335,7 +374,9 @@ async def test_finalize_calls_transition_to_done() -> None:
         patch("factory.nodes.grind.MeshWikiClient", return_value=meshwiki),
         patch(
             "factory.nodes.grind.grind_subtask",
-            new=AsyncMock(return_value=grinder_result),
+            new=AsyncMock(
+                return_value={"subtask": grinder_result, "incremental_cost_usd": 0.0}
+            ),
         ),
         patch("factory.nodes.pm_review.MeshWikiClient", return_value=meshwiki),
         patch("factory.nodes.pm_review.GitHubClient", return_value=github),
@@ -348,7 +389,9 @@ async def test_finalize_calls_transition_to_done() -> None:
     ):
         await graph.ainvoke(initial_state, config=config)
         await graph.aupdate_state(
-            config, {"human_approval_response": "approve", "human_feedback": None}
+            config,
+            {"human_approval_response": "approve", "human_feedback": None},
+            as_node="human_review_code",
         )
         await graph.ainvoke(None, config=config)
 

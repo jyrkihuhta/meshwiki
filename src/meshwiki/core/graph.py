@@ -5,10 +5,11 @@ If graph_core is not installed, the application falls back to
 filesystem-based operations gracefully.
 """
 
-import logging
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from meshwiki.core.logging import get_logger
+
+log = get_logger(__name__)
 
 try:
     from graph_core import (
@@ -46,22 +47,22 @@ def init_engine(data_dir: Path, watch: bool = True) -> "GraphEngine | None":
     """
     global _engine
     if not GRAPH_ENGINE_AVAILABLE:
-        logger.info("graph_core not available, running without graph engine")
+        log.info("graph_engine_unavailable")
         return None
 
     try:
         _engine = GraphEngine(str(data_dir))
         _engine.rebuild()
-        logger.info(
-            "Graph engine initialized: %d pages, %d links",
-            _engine.page_count(),
-            _engine.link_count(),
+        log.info(
+            "graph_engine_initialized",
+            pages=_engine.page_count(),
+            links=_engine.link_count(),
         )
         if watch:
             _engine.start_watching()
-            logger.info("File watching started")
+            log.info("graph_watch_started")
     except Exception:
-        logger.exception("Failed to initialize graph engine")
+        log.exception("graph_engine_init_failed")
         _engine = None
 
     return _engine
@@ -74,7 +75,7 @@ def shutdown_engine() -> None:
         try:
             if _engine.is_watching():
                 _engine.stop_watching()
-                logger.info("File watching stopped")
+                log.info("graph_watch_stopped")
         except Exception:
-            logger.exception("Error stopping graph engine")
+            log.exception("graph_engine_shutdown_failed")
         _engine = None

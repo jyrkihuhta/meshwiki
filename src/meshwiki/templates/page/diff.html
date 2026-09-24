@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Diff: {{ page_name }} r{{ rev_a }}→r{{ rev_b }} - {{ app_title }}{% endblock %}
+
+{% block content %}
+<div class="page-diff">
+    <div class="page-header-wrapper">
+        <header class="page-header">
+            <div class="page-header-left">
+                <nav class="breadcrumb" aria-label="breadcrumb">
+                    <a href="/">Home</a>
+                    /
+                    <a href="/page/{{ page_name.replace(' ', '_') }}">{{ page_name }}</a>
+                    /
+                    <a href="/page/{{ page_name.replace(' ', '_') }}/history">History</a>
+                    /
+                    <span>Diff r{{ rev_a }}→r{{ rev_b }}</span>
+                </nav>
+                <h1>{{ page_name }} <span class="revision-label">— r{{ rev_a }} → r{{ rev_b }}</span></h1>
+            </div>
+            <div class="page-actions">
+                <a href="/page/{{ page_name.replace(' ', '_') }}/history" class="btn">History</a>
+                <a href="/page/{{ page_name.replace(' ', '_') }}/history/{{ rev_a }}" class="btn btn-small">View r{{ rev_a }}</a>
+                <a href="/page/{{ page_name.replace(' ', '_') }}/history/{{ rev_b }}" class="btn btn-small">View r{{ rev_b }}</a>
+            </div>
+        </header>
+    </div>
+
+    <div class="diff-meta">
+        <span>
+            <strong>r{{ rev_a }}:</strong>
+            <time datetime="{{ revision_a.timestamp.isoformat() }}"
+                  title="{{ revision_a.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}">{{ revision_a.timestamp | timeago }}</time>
+        </span>
+        <span class="diff-arrow">→</span>
+        <span>
+            <strong>r{{ rev_b }}:</strong>
+            <time datetime="{{ revision_b.timestamp.isoformat() }}"
+                  title="{{ revision_b.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}">{{ revision_b.timestamp | timeago }}</time>
+        </span>
+    </div>
+
+    {% if diff %}
+    <div class="diff-view">
+        <table class="diff-table">
+            <colgroup>
+                <col class="diff-col-lineno">
+                <col class="diff-col-lineno">
+                <col class="diff-col-content">
+            </colgroup>
+            <tbody>
+                {% for line in diff %}
+                <tr class="diff-line diff-line--{{ line.tag }}">
+                    <td class="diff-lineno">{{ line.old_line if line.old_line is not none else '' }}</td>
+                    <td class="diff-lineno">{{ line.new_line if line.new_line is not none else '' }}</td>
+                    <td class="diff-content"><span class="diff-sigil">{% if line.tag == 'insert' %}+{% elif line.tag == 'delete' %}-{% else %} {% endif %}</span><span class="diff-text">{{ line.content }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-state">No differences between these revisions.</p>
+    {% endif %}
+</div>
+{% endblock %}
