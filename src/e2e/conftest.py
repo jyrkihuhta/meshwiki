@@ -64,10 +64,12 @@ def e2e_server(tmp_path_factory):
         **os.environ,
         "MESHWIKI_DATA_DIR": str(data_dir),
         "MESHWIKI_DEBUG": "true",
-        "MESHWIKI_GRAPH_WATCH": "false",
-        # create_page writes .md files straight to disk, bypassing the save
-        # route's cache refresh, and with the watcher off nothing else would
-        # invalidate page_cache, so pages would stay missing from the sidebar.
+        # create_page writes .md files straight to disk. The watcher is what
+        # feeds those files into the graph engine (autocomplete, backlinks),
+        # as in production; without it the engine only knows startup pages.
+        "MESHWIKI_GRAPH_WATCH": "true",
+        # page_cache rebuilds are throttled to one per 5s, longer than the
+        # tests wait for a freshly written page to appear in the sidebar.
         "MESHWIKI_PAGE_CACHE": "0",
     }
 
