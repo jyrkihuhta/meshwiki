@@ -11,10 +11,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from types import SimpleNamespace
+
 from factory.webhook_server import (
     _clear_stuck_grinders,
     _drain_graph_tasks,
     _resume_interrupted_tasks,
+    _spawn_graph_task,
     app,
 )
 
@@ -322,6 +325,57 @@ async def test_clear_stuck_grinders_empty_state() -> None:
 # ---------------------------------------------------------------------------
 # _drain_graph_tasks — Layer 3 graceful shutdown
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _spawn_graph_task: strong references + idempotency bookkeeping (B8)
+# ---------------------------------------------------------------------------
+
+
+def _fake_app() -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_spawn_graph_task_tracks_and_clears() -> None:
+    """A dispatched task holds a strong ref and records its thread as in-flight,
+    then both are cleared when it completes."""
+    fake_app = _fake_app()
+
+    async def node():
+        await asyncio.sleep(0.02)
+        return "done"
+
+    task = _spawn_graph_task(
+        fake_app, node(), name="graph:page-x", thread_id="tid-x"
+    )
+    # While running: strong reference held, thread marked in-flight.
+    assert task in fake_app.state.background_tasks
+    assert "tid-x" in fake_app.state.inflight_threads
+
+    await task
+    # Done-callbacks run on the next loop tick.
+    await asyncio.sleep(0)
+    assert task not in fake_app.state.background_tasks
+    assert "tid-x" not in fake_app.state.inflight_threads
+
+
+@pytest.mark.asyncio
+async def test_spawn_graph_task_logs_exception_and_clears() -> None:
+    """A failing task is cleaned up and does not raise into the caller."""
+    fake_app = _fake_app()
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    task = _spawn_graph_task(
+        fake_app, boom(), name="graph:page-y", thread_id="tid-y"
+    )
+    with pytest.raises(RuntimeError):
+        await task
+    await asyncio.sleep(0)
+    assert "tid-y" not in fake_app.state.inflight_threads
+    assert task not in fake_app.state.background_tasks
 
 
 @pytest.mark.asyncio
