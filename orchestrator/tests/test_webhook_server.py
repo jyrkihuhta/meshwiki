@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from factory.webhook_server import (
     _clear_stuck_grinders,
     _drain_graph_tasks,
+    _queue_or_spawn_resume,
     _resume_interrupted_tasks,
     _spawn_graph_task,
     app,
@@ -376,6 +377,96 @@ async def test_spawn_graph_task_logs_exception_and_clears() -> None:
     await asyncio.sleep(0)
     assert "tid-y" not in fake_app.state.inflight_threads
     assert task not in fake_app.state.background_tasks
+
+
+@pytest.mark.asyncio
+async def test_resume_starts_immediately_when_thread_idle() -> None:
+    """With nothing in flight, a resume is dispatched straight away."""
+    fake_app = _fake_app()
+    ran: list[str] = []
+
+    async def resume():
+        ran.append("resume")
+
+    started = _queue_or_spawn_resume(
+        fake_app, resume, name="graph:p:resume", thread_id="tid-r"
+    )
+    assert started is True
+    assert "tid-r" in fake_app.state.inflight_threads
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert ran == ["resume"]
+
+
+@pytest.mark.asyncio
+async def test_resume_queued_while_in_flight_then_replayed() -> None:
+    """A resume arriving mid-run is not dropped: it is queued and replayed
+    once the in-flight run for the same thread finishes, never concurrently."""
+    fake_app = _fake_app()
+    events: list[str] = []
+    release = asyncio.Event()
+
+    async def first_run():
+        events.append("run-start")
+        await release.wait()
+        events.append("run-end")
+
+    async def resume():
+        events.append("resume")
+
+    first = _spawn_graph_task(
+        fake_app, first_run(), name="graph:p", thread_id="tid-q"
+    )
+    await asyncio.sleep(0)
+
+    started = _queue_or_spawn_resume(
+        fake_app, resume, name="graph:p:resume", thread_id="tid-q"
+    )
+    assert started is False
+    assert "tid-q" in fake_app.state.pending_resumes
+    # Nothing ran concurrently with the in-flight task.
+    assert events == ["run-start"]
+
+    release.set()
+    await first
+    await asyncio.sleep(0)  # done-callback replays the queued resume
+    assert "tid-q" not in fake_app.state.pending_resumes
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert events == ["run-start", "run-end", "resume"]
+    await asyncio.sleep(0)
+    assert "tid-q" not in fake_app.state.inflight_threads
+
+
+@pytest.mark.asyncio
+async def test_resume_queue_keeps_latest_only() -> None:
+    """Two resumes queued behind one run: only the latest is replayed."""
+    fake_app = _fake_app()
+    events: list[str] = []
+    release = asyncio.Event()
+
+    async def first_run():
+        await release.wait()
+
+    def make(label: str):
+        async def resume():
+            events.append(label)
+
+        return resume
+
+    first = _spawn_graph_task(
+        fake_app, first_run(), name="graph:p", thread_id="tid-l"
+    )
+    _queue_or_spawn_resume(
+        fake_app, make("old"), name="graph:p:resume", thread_id="tid-l"
+    )
+    _queue_or_spawn_resume(
+        fake_app, make("new"), name="graph:p:rework", thread_id="tid-l"
+    )
+
+    release.set()
+    await first
+    await asyncio.sleep(0)
+    await asyncio.gather(*fake_app.state.background_tasks)
+    assert events == ["new"]
 
 
 @pytest.mark.asyncio

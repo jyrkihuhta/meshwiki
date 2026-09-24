@@ -38,6 +38,38 @@ def _scrub_secrets(text: str, *secrets: str) -> str:
     return text
 
 
+class _StreamScrubber:
+    """Redact secrets from a stream that arrives in arbitrary chunks.
+
+    Scrubbing each PTY chunk on its own misses a secret split across two
+    chunks. This keeps back the shortest tail of the buffered text that could
+    still be the start of a secret and releases it with the next chunk, so
+    ordinary output is not delayed. Call ``flush()`` when the stream ends.
+    """
+
+    def __init__(self, *secrets: str) -> None:
+        self._secrets = [s for s in secrets if s]
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        """Add *text* and return the portion that is now safe to emit."""
+        buf = _scrub_secrets(self._pending + text, *self._secrets)
+        hold = 0
+        max_len = max((len(s) for s in self._secrets), default=0)
+        for k in range(min(len(buf), max_len - 1), 0, -1):
+            tail = buf[-k:]
+            if any(s.startswith(tail) for s in self._secrets):
+                hold = k
+                break
+        self._pending = buf[len(buf) - hold :] if hold else ""
+        return buf[: len(buf) - hold]
+
+    def flush(self) -> str:
+        """Return any held-back text; the stream has ended so it is complete."""
+        rest, self._pending = self._pending, ""
+        return rest
+
+
 GRINDER_SYSTEM_PROMPT = """
 You are a software engineer working on MeshWiki. You implement tasks autonomously.
 
@@ -1053,6 +1085,7 @@ async def grind_subtask_e2b(
     status = "failed"
     sandbox_cost: float = 0.0
     _pty_chunks: list[str] = []
+    _pty_scrubber = _StreamScrubber(settings.github_token)
     wiki_page: str = subtask["wiki_page"]
 
     # ── Dry-run short-circuit ─────────────────────────────────────────────
@@ -1119,11 +1152,10 @@ async def grind_subtask_e2b(
 
         # _pty_chunks is initialised before the try block so it is always available.
         async def _on_pty_data(data: bytes) -> None:
-            text = _scrub_secrets(
-                data.decode("utf-8", errors="replace"), settings.github_token
-            )
-            _pty_chunks.append(text)
-            await meshwiki_client.relay_terminal(wiki_page, text)
+            text = _pty_scrubber.feed(data.decode("utf-8", errors="replace"))
+            if text:
+                _pty_chunks.append(text)
+                await meshwiki_client.relay_terminal(wiki_page, text)
 
         # ── Bootstrap ─────────────────────────────────────────────────────────
         # Node.js 20, Kilo CLI, gh CLI, and common Python tools are pre-baked
@@ -1217,6 +1249,11 @@ async def grind_subtask_e2b(
             # can still check whether a PR was opened.
             logger.warning("e2b grinder: PTY exited with error: %s", pty_exc)
 
+        # The PTY has closed, so release any tail the scrubber was holding back.
+        if tail := _pty_scrubber.flush():
+            _pty_chunks.append(tail)
+            await meshwiki_client.relay_terminal(wiki_page, tail)
+
         # ── PR URL extraction ─────────────────────────────────────────────────
         # Search the accumulated PTY output for a GitHub PR URL.
         pty_output = "".join(_pty_chunks)
@@ -1250,6 +1287,9 @@ async def grind_subtask_e2b(
                 pass
 
     # Persist terminal log to the subtask wiki page (fire-and-forget).
+    # Flush again in case the PTY stage raised before the flush above.
+    if tail := _pty_scrubber.flush():
+        _pty_chunks.append(tail)
     raw_pty = "".join(_pty_chunks)
     terminal_log_text = _truncate_log(
         _strip_ansi(raw_pty), settings.terminal_log_max_chars

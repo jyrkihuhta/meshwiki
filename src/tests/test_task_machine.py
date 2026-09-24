@@ -1,5 +1,6 @@
 """Unit tests for the task state machine."""
 
+import asyncio
 import importlib
 
 import pytest
@@ -132,6 +133,36 @@ async def test_done_has_no_transitions(storage):
 async def test_missing_page_raises(storage):
     with pytest.raises(ValueError, match="not found"):
         await transition_task(storage, "NonExistent", "planned")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transitions_are_serialised(storage, monkeypatch):
+    """Two concurrent draft→planned transitions: only one may win.
+
+    get_page is made to yield so the two calls genuinely interleave. Without
+    the per-page lock both would validate against the stale "draft" status and
+    both succeed; with it, the second sees "planned" and is rejected.
+    """
+    await _make_task(storage, "Task_Race", "draft")
+    original_get_page = storage.get_page
+
+    async def yielding_get_page(name):
+        page = await original_get_page(name)
+        await asyncio.sleep(0)
+        return page
+
+    monkeypatch.setattr(storage, "get_page", yielding_get_page)
+
+    results = await asyncio.gather(
+        transition_task(storage, "Task_Race", "planned"),
+        transition_task(storage, "Task_Race", "planned"),
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, InvalidTransitionError)]
+    successes = [r for r in results if isinstance(r, dict)]
+    assert len(successes) == 1
+    assert len(errors) == 1
 
 
 # ---------------------------------------------------------------------------
