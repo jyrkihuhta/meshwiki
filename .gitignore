@@ -52,5 +52,8 @@ tmp/
 # Wiki data (keep structure, ignore content)
 data/pages/*.md
 
+# Page-history SQLite database (created at runtime) and its WAL/SHM files
+.revisions.db*
+
 # Local plans (not for version control)
 docs/prd/003-agent-factory.md
