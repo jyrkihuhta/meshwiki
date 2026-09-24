@@ -1236,6 +1236,7 @@ async def api_graph(request: Request):
 
     pages = engine.list_pages()
     nodes = []
+    node_ids: set[str] = set()
     for p in pages:
         backlinks = engine.get_backlinks(p.name)
         tags = p.metadata.get("tags", [])
@@ -1246,11 +1247,28 @@ async def api_graph(request: Request):
                 "backlinks_count": len(backlinks),
             }
         )
+        node_ids.add(p.name)
 
     links = []
+    missing_targets: set[str] = set()
     for page in pages:
         for target in engine.get_outlinks(page.name):
             links.append({"source": page.name, "target": target})
+            # list_pages excludes link-only stubs, so a link target that is
+            # not a real page must still be emitted as a node (flagged missing)
+            # or D3's forceLink would fail on the dangling reference.
+            if target not in node_ids:
+                missing_targets.add(target)
+
+    for target in sorted(missing_targets):
+        nodes.append(
+            {
+                "id": target,
+                "tags": [],
+                "backlinks_count": len(engine.get_backlinks(target)),
+                "missing": True,
+            }
+        )
 
     # Add parent→child edges from declared children: frontmatter.
     # Normalise underscore→space so children: [Foo_Bar] matches stored page 'Foo Bar'.

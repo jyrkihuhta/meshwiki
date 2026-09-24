@@ -163,6 +163,29 @@ class TestGraphEngine:
         assert "GraphEngine" in repr_str
         assert temp_wiki_dir in repr_str
 
+    def test_missing_link_target_not_reported_as_existing(self):
+        """A [[MissingPage]] link must not make page_exists return True.
+
+        Link-only stub nodes are created so the edge can attach, but they are
+        not real pages: page_exists, list_pages and page_count must exclude
+        them so missing-link styling and counts stay correct.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "Real.md"), "w") as f:
+                f.write("# Real\n\nLinks to [[DoesNotExist]].\n")
+
+            engine = GraphEngine(tmpdir)
+            engine.rebuild()
+
+            # The real page exists; the missing link target does not.
+            assert engine.page_exists("Real") is True
+            assert engine.page_exists("DoesNotExist") is False
+            # Only the real page is counted / listed.
+            assert engine.page_count() == 1
+            assert [p.name for p in engine.list_pages()] == ["Real"]
+            # The outgoing link is still tracked.
+            assert "DoesNotExist" in engine.get_outlinks("Real")
+
 
 class TestPageInfo:
     """Tests for PageInfo class."""
