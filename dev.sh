@@ -72,7 +72,7 @@ fi
 # ── Install Python dependencies ──────────────────────────────
 
 echo "==> Installing Python dependencies..."
-pip install -e "$SRC_DIR[dev]" --quiet
+pip install -e "$ROOT_DIR[dev]" --quiet  # pyproject.toml is at the repo root
 
 # Ensure cryptography is available for test fixtures (see CONTRIBUTING.md).
 # The `cryptography` package is also declared in pyproject.toml under [dev]

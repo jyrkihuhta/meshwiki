@@ -47,8 +47,8 @@ Access at http://localhost:8000
 If you just want to work on the wiki without graph features (backlinks, MetaTable queries, graph visualization), you can skip the Rust build entirely:
 
 ```bash
+pip install -e .          # from the repo root (pyproject.toml lives there)
 cd src
-pip install -e .
 uvicorn meshwiki.main:app --reload
 ```
 
@@ -72,8 +72,8 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop
 
 ```bash
 # Python integration tests (59 tests)
+pip install -e ".[dev]"   # from the repo root (pyproject.toml lives there)
 cd src
-pip install -e ".[dev]"
 pytest tests/ -v
 
 # Rust graph engine tests (70 tests)

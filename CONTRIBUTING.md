@@ -27,8 +27,8 @@ Thank you for your interest in contributing to MeshWiki! This guide will help yo
 
 3. **Or run without the Rust engine** (graph features degrade gracefully):
    ```bash
+   pip install -e ".[dev]"   # from the repo root (pyproject.toml lives there)
    cd src
-   pip install -e ".[dev]"
    uvicorn meshwiki.main:app --reload
    ```
 
