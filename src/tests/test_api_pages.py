@@ -313,3 +313,52 @@ async def test_patch_nonexistent_page_returns_404(client):
         headers=_AUTH,
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Page-name validation (path traversal defense)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_traversal_name(client):
+    resp = await client.post(
+        "/api/v1/pages",
+        json={"name": "../../etc/passwd", "content": "pwned"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_traversal_name(client):
+    resp = await client.put(
+        "/api/v1/pages/..%2F..%2Fetc%2Fpasswd",
+        json={"name": "x", "content": "pwned"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_rename_rejects_traversal_target(client):
+    await client.post(
+        "/api/v1/pages", json={"name": "Legit", "content": "ok"}, headers=_AUTH
+    )
+    resp = await client.post(
+        "/api/v1/pages/Legit/rename",
+        json={"new_name": "../../escape"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_slash_name_still_allowed(client):
+    # Forward slashes are legitimate for factory hierarchical page names.
+    resp = await client.post(
+        "/api/v1/pages",
+        json={"name": "Factory/Tasks/T1", "content": "ok"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 201

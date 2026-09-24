@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from meshwiki.api.auth import require_api_key
+from meshwiki.api.validation import validate_api_page_name
 from meshwiki.core.dependencies import get_storage
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import InvalidTransitionError, transition_task
@@ -69,6 +70,7 @@ async def transition(
     storage: FileStorage = Depends(get_storage),
 ) -> dict:
     """Apply a state machine transition to a task page."""
+    validate_api_page_name(name)
     try:
         metadata = await transition_task(
             storage,
@@ -110,6 +112,7 @@ async def append_terminal_chunk(name: str, body: TerminalChunkRequest) -> dict:
     """
     from meshwiki.core.terminal_sessions import create_session, get_session
 
+    validate_api_page_name(name)
     if get_session(name) is None:
         create_session(name)
     await put_chunk(name, body.data)

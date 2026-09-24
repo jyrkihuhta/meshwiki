@@ -23,6 +23,53 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _scrub_secrets(text: str, *secrets: str) -> str:
+    """Redact secret values from text before it is relayed anywhere shared.
+
+    The grinder's terminal output is streamed to any client watching the
+    ``/ws/terminal`` WebSocket, so the GitHub token (which appears in the
+    ``git config`` insteadOf rule and the clone URL, and can be echoed back by
+    git in error messages) must never reach that stream verbatim.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+class _StreamScrubber:
+    """Redact secrets from a stream that arrives in arbitrary chunks.
+
+    Scrubbing each PTY chunk on its own misses a secret split across two
+    chunks. This keeps back the shortest tail of the buffered text that could
+    still be the start of a secret and releases it with the next chunk, so
+    ordinary output is not delayed. Call ``flush()`` when the stream ends.
+    """
+
+    def __init__(self, *secrets: str) -> None:
+        self._secrets = [s for s in secrets if s]
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        """Add *text* and return the portion that is now safe to emit."""
+        buf = _scrub_secrets(self._pending + text, *self._secrets)
+        hold = 0
+        max_len = max((len(s) for s in self._secrets), default=0)
+        for k in range(min(len(buf), max_len - 1), 0, -1):
+            tail = buf[-k:]
+            if any(s.startswith(tail) for s in self._secrets):
+                hold = k
+                break
+        self._pending = buf[len(buf) - hold :] if hold else ""
+        return buf[: len(buf) - hold]
+
+    def flush(self) -> str:
+        """Return any held-back text; the stream has ended so it is complete."""
+        rest, self._pending = self._pending, ""
+        return rest
+
+
 GRINDER_SYSTEM_PROMPT = """
 You are a software engineer working on MeshWiki. You implement tasks autonomously.
 
@@ -309,23 +356,53 @@ class GrinderToolExecutor:
             logger.exception("GrinderToolExecutor: error in tool %s", tool_name)
             return f"Error executing {tool_name}: {exc}"
 
+    def _resolve_in_repo(self, path: str) -> Path:
+        """Resolve *path* against repo_root and confine it to the repo tree.
+
+        The LLM's tool inputs are influenced by (untrusted) wiki task-page
+        content, so an absolute path or ``..`` traversal must not be able to
+        escape ``repo_root``.  Mirrors the guard in
+        ``meshwiki.core.storage.FileStorage._get_path``.
+
+        Raises:
+            ValueError: if *path* is absolute or resolves outside repo_root.
+        """
+        if os.path.isabs(path):
+            raise ValueError(f"Absolute paths are not allowed: {path!r}")
+        repo_root = self.repo_root.resolve()
+        full_path = (repo_root / path).resolve()
+        try:
+            full_path.relative_to(repo_root)
+        except ValueError as exc:
+            raise ValueError(f"Path escapes repository root: {path!r}") from exc
+        return full_path
+
     def _read_file(self, path: str) -> str:
         """Read a file relative to repo root."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "File not found"
         return full_path.read_text(encoding="utf-8")
 
     def _write_file(self, path: str, content: str) -> str:
         """Write content to a file, creating parent directories as needed."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
         return f"Written: {path}"
 
     def _list_directory(self, path: str) -> str:
         """List directory contents."""
-        full_path = self.repo_root / path
+        try:
+            full_path = self._resolve_in_repo(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
         if not full_path.exists():
             return "Directory not found"
         entries = os.listdir(full_path)
@@ -338,7 +415,13 @@ class GrinderToolExecutor:
         file_glob: str | None = None,
     ) -> str:
         """Search code using ripgrep."""
-        search_path = str(self.repo_root / path) if path else str(self.repo_root)
+        if path:
+            try:
+                search_path = str(self._resolve_in_repo(path))
+            except ValueError as exc:
+                return f"Error: {exc}"
+        else:
+            search_path = str(self.repo_root)
         cmd = ["rg", pattern, search_path]
         if file_glob:
             cmd += ["--glob", file_glob]
@@ -1002,6 +1085,7 @@ async def grind_subtask_e2b(
     status = "failed"
     sandbox_cost: float = 0.0
     _pty_chunks: list[str] = []
+    _pty_scrubber = _StreamScrubber(settings.github_token)
     wiki_page: str = subtask["wiki_page"]
 
     # ── Dry-run short-circuit ─────────────────────────────────────────────
@@ -1056,19 +1140,22 @@ async def grind_subtask_e2b(
         # Kilo runs inside a PTY; on_data delivers raw terminal bytes (ANSI etc.).
 
         async def _on_stdout(line: str) -> None:
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(wiki_page, line + "\r\n")
 
         async def _on_stderr(line: str) -> None:
             # Render stderr in yellow so it stands out in the terminal.
+            line = _scrub_secrets(line, settings.github_token)
             await meshwiki_client.relay_terminal(
                 wiki_page, f"\x1b[33m{line}\x1b[0m\r\n"
             )
 
         # _pty_chunks is initialised before the try block so it is always available.
         async def _on_pty_data(data: bytes) -> None:
-            text = data.decode("utf-8", errors="replace")
-            _pty_chunks.append(text)
-            await meshwiki_client.relay_terminal(wiki_page, text)
+            text = _pty_scrubber.feed(data.decode("utf-8", errors="replace"))
+            if text:
+                _pty_chunks.append(text)
+                await meshwiki_client.relay_terminal(wiki_page, text)
 
         # ── Bootstrap ─────────────────────────────────────────────────────────
         # Node.js 20, Kilo CLI, gh CLI, and common Python tools are pre-baked
@@ -1096,7 +1183,10 @@ async def grind_subtask_e2b(
             on_stderr=_on_stderr,
         )
         if result.exit_code != 0:
-            raise RuntimeError(f"git clone failed: {result.stderr}")
+            raise RuntimeError(
+                "git clone failed: "
+                + _scrub_secrets(result.stderr or "", settings.github_token)
+            )
 
         # Install Python deps — MeshWiki only; armory repos are not Python packages.
         if is_meshwiki:
@@ -1159,6 +1249,11 @@ async def grind_subtask_e2b(
             # can still check whether a PR was opened.
             logger.warning("e2b grinder: PTY exited with error: %s", pty_exc)
 
+        # The PTY has closed, so release any tail the scrubber was holding back.
+        if tail := _pty_scrubber.flush():
+            _pty_chunks.append(tail)
+            await meshwiki_client.relay_terminal(wiki_page, tail)
+
         # ── PR URL extraction ─────────────────────────────────────────────────
         # Search the accumulated PTY output for a GitHub PR URL.
         pty_output = "".join(_pty_chunks)
@@ -1192,6 +1287,9 @@ async def grind_subtask_e2b(
                 pass
 
     # Persist terminal log to the subtask wiki page (fire-and-forget).
+    # Flush again in case the PTY stage raised before the flush above.
+    if tail := _pty_scrubber.flush():
+        _pty_chunks.append(tail)
     raw_pty = "".join(_pty_chunks)
     terminal_log_text = _truncate_log(
         _strip_ansi(raw_pty), settings.terminal_log_max_chars

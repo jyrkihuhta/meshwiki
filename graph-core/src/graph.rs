@@ -50,7 +50,12 @@ impl WikiGraph {
     /// The NodeIndex of the added or updated page.
     pub fn add_page(&mut self, page: PageNode) -> NodeIndex {
         if let Some(&idx) = self.node_index.get(&page.name) {
-            // Update existing node
+            // Update existing node. Never demote a real page back to a stub:
+            // if the node already existed as a real page, keep exists = true.
+            let mut page = page;
+            if self.graph[idx].exists {
+                page.exists = true;
+            }
             self.graph[idx] = page;
             idx
         } else {
@@ -76,13 +81,18 @@ impl WikiGraph {
     }
 
     /// Check if a page exists in the graph.
+    ///
+    /// Returns `true` only for real pages — link-only stubs (targets of
+    /// `[[MissingPage]]` links that have no backing file) report `false`.
     pub fn page_exists(&self, name: &str) -> bool {
-        self.node_index.contains_key(name)
+        self.node_index
+            .get(name)
+            .is_some_and(|&idx| self.graph[idx].exists)
     }
 
-    /// Get the number of pages in the graph.
+    /// Get the number of real pages in the graph (excludes link-only stubs).
     pub fn page_count(&self) -> usize {
-        self.graph.node_count()
+        self.graph.node_weights().filter(|p| p.exists).count()
     }
 
     /// Get the number of links in the graph.
@@ -90,12 +100,12 @@ impl WikiGraph {
         self.graph.edge_count()
     }
 
-    /// List all pages in the graph.
+    /// List all real pages in the graph (excludes link-only stubs).
     ///
     /// # Returns
-    /// A vector of references to all PageNodes.
+    /// A vector of references to all real PageNodes.
     pub fn list_pages(&self) -> Vec<&PageNode> {
-        self.graph.node_weights().collect()
+        self.graph.node_weights().filter(|p| p.exists).collect()
     }
 
     /// Add a link between two pages.
@@ -264,9 +274,10 @@ impl WikiGraph {
         let mut new_outlinks: HashSet<String> = HashSet::new();
 
         for link in &links {
-            // Ensure target page exists (create stub if needed)
-            if !self.page_exists(&link.target) {
-                let stub = PageNode::new(
+            // Ensure a node exists for the target so the edge can attach.
+            // Missing targets get a link-only stub (exists = false).
+            if !self.node_index.contains_key(&link.target) {
+                let stub = PageNode::new_stub(
                     link.target.clone(),
                     PathBuf::from(format!("{}.md", link.target)),
                 );
@@ -315,6 +326,8 @@ impl WikiGraph {
     pub fn query(&self, filters: &[Filter]) -> Vec<&PageNode> {
         self.graph
             .node_weights()
+            // Exclude link-only stubs — only real pages are queryable.
+            .filter(|page| page.exists)
             .filter(|page| matches_all_filters(page, filters, self))
             .collect()
     }
@@ -403,10 +416,11 @@ impl WikiGraph {
         // We need to handle links to pages that might not exist (create stub nodes)
         for (name, _, data) in &parsed_pages {
             for link in &data.links {
-                // Ensure target page exists (create stub if needed)
-                if !self.page_exists(&link.target) {
-                    // Create a stub node for the missing page
-                    let stub = PageNode::new(
+                // Ensure a node exists for the target so the edge can attach.
+                // Missing targets get a link-only stub (exists = false) rather
+                // than a real page, so page_exists / counts stay correct.
+                if !self.node_index.contains_key(&link.target) {
+                    let stub = PageNode::new_stub(
                         link.target.clone(),
                         PathBuf::from(format!("{}.md", link.target)),
                     );
@@ -714,7 +728,10 @@ mod tests {
         );
 
         assert!(graph.page_exists("NewPage"));
-        assert!(graph.page_exists("Target")); // Stub created
+        // A link-only stub node is created so the edge can attach, but it is
+        // NOT a real page: page_exists must report false for it.
+        assert!(!graph.page_exists("Target"));
+        assert!(graph.get_outlinks("NewPage").contains(&"Target".to_string()));
         assert_eq!(graph.link_count(), 1);
 
         // Should have one LinkCreated event
@@ -767,6 +784,84 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GraphEvent::LinkCreated { to, .. } | GraphEvent::LinkRemoved { to, .. } if to == "B")));
+    }
+
+    #[test]
+    fn test_missing_link_target_is_stub_not_real() {
+        let mut graph = WikiGraph::new();
+
+        // A real page links to a page that does not exist.
+        graph.update_page(
+            "Real",
+            PathBuf::from("Real.md"),
+            HashMap::new(),
+            vec![ParsedLink::new("Missing".to_string(), None)],
+            SystemTime::now(),
+        );
+
+        // The stub target does not count as a real page.
+        assert!(graph.page_exists("Real"));
+        assert!(!graph.page_exists("Missing"));
+        // page_count and list_pages exclude the stub.
+        assert_eq!(graph.page_count(), 1);
+        assert_eq!(graph.list_pages().len(), 1);
+        assert_eq!(graph.list_pages()[0].name, "Real");
+        // query() also excludes the stub.
+        assert_eq!(graph.query(&[]).len(), 1);
+    }
+
+    #[test]
+    fn test_stub_promoted_when_real_page_added() {
+        let mut graph = WikiGraph::new();
+
+        // Link to Missing first (creates a stub), then Missing becomes real.
+        graph.update_page(
+            "Real",
+            PathBuf::from("Real.md"),
+            HashMap::new(),
+            vec![ParsedLink::new("Missing".to_string(), None)],
+            SystemTime::now(),
+        );
+        assert!(!graph.page_exists("Missing"));
+
+        graph.update_page(
+            "Missing",
+            PathBuf::from("Missing.md"),
+            HashMap::new(),
+            vec![],
+            SystemTime::now(),
+        );
+
+        // Now it is a real page.
+        assert!(graph.page_exists("Missing"));
+        assert_eq!(graph.page_count(), 2);
+        // The incoming link from Real is preserved.
+        assert!(graph.get_backlinks("Missing").contains(&"Real".to_string()));
+    }
+
+    #[test]
+    fn test_real_page_not_demoted_by_incoming_link() {
+        let mut graph = WikiGraph::new();
+
+        // Real page A exists first.
+        graph.update_page(
+            "A",
+            PathBuf::from("A.md"),
+            HashMap::new(),
+            vec![],
+            SystemTime::now(),
+        );
+        // B links to A — must not turn A into a stub.
+        graph.update_page(
+            "B",
+            PathBuf::from("B.md"),
+            HashMap::new(),
+            vec![ParsedLink::new("A".to_string(), None)],
+            SystemTime::now(),
+        );
+
+        assert!(graph.page_exists("A"));
+        assert_eq!(graph.page_count(), 2);
     }
 
     #[test]

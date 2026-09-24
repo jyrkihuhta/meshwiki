@@ -8,6 +8,7 @@ import hmac
 import logging
 import time
 import uuid
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -31,6 +32,81 @@ from .integrations.meshwiki_client import MeshWikiClient
 from .state import FactoryState
 
 logger = logging.getLogger(__name__)
+
+
+def _spawn_graph_task(
+    app: "FastAPI", coro, *, name: str, thread_id: str
+) -> "asyncio.Task":
+    """Dispatch a graph run as a tracked background task.
+
+    ``asyncio.create_task`` only keeps a *weak* reference to the task, so a task
+    stored in a bare local can be garbage-collected and cancelled mid-run. We
+    keep a strong reference in ``app.state.background_tasks`` for the task's
+    lifetime and attach a done-callback that logs any exception and records the
+    thread as no longer in flight (used for idempotency).
+    """
+    # Lazily initialise the tracking sets so callers that don't go through the
+    # lifespan (e.g. unit tests, or a resume triggered very early) still work.
+    if not hasattr(app.state, "background_tasks"):
+        app.state.background_tasks = set()
+    if not hasattr(app.state, "inflight_threads"):
+        app.state.inflight_threads = set()
+    if not hasattr(app.state, "pending_resumes"):
+        app.state.pending_resumes = {}
+
+    task = asyncio.create_task(coro, name=name)
+    app.state.background_tasks.add(task)
+    app.state.inflight_threads.add(thread_id)
+
+    def _done(t: "asyncio.Task") -> None:
+        app.state.background_tasks.discard(t)
+        app.state.inflight_threads.discard(thread_id)
+        if not t.cancelled() and (exc := t.exception()):
+            logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
+        # Replay a resume (approval / rework) that arrived while this run was
+        # still in flight, now that the thread has checkpointed and is free.
+        pending = app.state.pending_resumes.pop(thread_id, None)
+        if pending is not None:
+            make_coro, pending_name = pending
+            logger.info("graph: replaying queued %s", pending_name)
+            _spawn_graph_task(app, make_coro(), name=pending_name, thread_id=thread_id)
+
+    task.add_done_callback(_done)
+    return task
+
+
+def _queue_or_spawn_resume(
+    app: "FastAPI",
+    make_coro: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    name: str,
+    thread_id: str,
+) -> bool:
+    """Resume a graph thread now, or queue the resume if a run is in flight.
+
+    Approval and rework webhooks must not be dropped: the graph can post
+    "awaiting approval" to the wiki slightly before its run returns, so a fast
+    approval may arrive while the thread is still in flight. Starting a second
+    concurrent run on the same thread would corrupt its checkpoint, so the
+    resume is held and replayed by ``_spawn_graph_task``'s done-callback. Only
+    the latest queued resume per thread is kept.
+
+    Returns:
+        True if the resume started immediately, False if it was queued.
+    """
+    if thread_id not in getattr(app.state, "inflight_threads", set()):
+        _spawn_graph_task(app, make_coro(), name=name, thread_id=thread_id)
+        return True
+    if not hasattr(app.state, "pending_resumes"):
+        app.state.pending_resumes = {}
+    if thread_id in app.state.pending_resumes:
+        logger.warning(
+            "graph: replacing queued resume for thread_id=%s with %s",
+            thread_id,
+            name,
+        )
+    app.state.pending_resumes[thread_id] = (make_coro, name)
+    return False
 
 
 async def _clear_stuck_grinders(graph, config: dict, page_name: str) -> None:
@@ -182,15 +258,12 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
                 thread_id,
             )
 
-            def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
-                if not t.cancelled() and (exc := t.exception()):
-                    logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
-
-            resume_task = asyncio.create_task(
+            _spawn_graph_task(
+                app,
                 graph.ainvoke(None, config=config),
                 name=f"graph:{page_name}:resume",
+                thread_id=thread_id,
             )
-            resume_task.add_done_callback(_log_exc)
 
 
 async def _drain_graph_tasks(timeout_seconds: float) -> None:
@@ -301,6 +374,14 @@ async def lifespan(app: FastAPI):
         # Maps page_name → LangGraph thread_id (UUID); allows /status to look up
         # the correct checkpoint key even though asyncio task names use page_name.
         app.state.page_thread_map: dict[str, str] = {}
+        # Strong references to in-flight graph tasks (asyncio only keeps weak
+        # refs, so a bare local can be GC'd mid-run) plus the set of thread_ids
+        # currently running, for webhook idempotency.
+        app.state.background_tasks: set[asyncio.Task] = set()
+        app.state.inflight_threads: set[str] = set()
+        # Approval/rework resumes that arrived while their thread was in
+        # flight; replayed when the running task finishes.
+        app.state.pending_resumes: dict[str, tuple] = {}
         logger.info(
             "factory: graph initialised with SQLite checkpointer at %s",
             settings.checkpoint_db,
@@ -643,31 +724,32 @@ async def receive_webhook(
             )
             return {"status": "ignored", "reason": "subtask managed by parent graph"}
 
-        # Guardrail: don't start a duplicate graph thread if one is already running.
-        # Assignee/type checks are done in task_intake (which reads the actual page).
-        running = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
-        if f"graph:{page_name}" in running:
+        graph = request.app.state.graph
+        thread_id = await _resolve_thread_id(page_name, data)
+
+        # Idempotency: a re-delivered webhook must not start a second run for
+        # the same thread. inflight_threads is checked and added atomically here
+        # (no await between the check and _spawn_graph_task), so concurrent
+        # duplicate deliveries can't both slip through.
+        if thread_id in getattr(request.app.state, "inflight_threads", set()):
             logger.info(
-                "webhook: ignoring task.assigned for %s (graph already running)",
+                "webhook: ignoring duplicate task.assigned for %s "
+                "(thread_id=%s already running)",
                 page_name,
+                thread_id,
             )
             return {"status": "ignored", "reason": "graph already running"}
 
-        graph = request.app.state.graph
-        thread_id = await _resolve_thread_id(page_name, data)
         initial_state = _build_initial_state(page_name, thread_id, data)
         config = {"configurable": {"thread_id": thread_id}}
 
-        def _log_exc(t: asyncio.Task, name: str = page_name) -> None:
-            if not t.cancelled() and (exc := t.exception()):
-                logger.error("graph task %s failed: %s", name, exc, exc_info=exc)
-
         request.app.state.page_thread_map[page_name] = thread_id
-        task = asyncio.create_task(
+        _spawn_graph_task(
+            request.app,
             graph.ainvoke(initial_state, config=config),
             name=f"graph:{page_name}",
+            thread_id=thread_id,
         )
-        task.add_done_callback(_log_exc)
         logger.info(
             "webhook: started graph task for %s (thread_id=%s)", page_name, thread_id
         )
@@ -679,13 +761,22 @@ async def receive_webhook(
         config = {"configurable": {"thread_id": thread_id}}
         approval = data.get("approval", "approve")
         feedback = data.get("feedback")
-        asyncio.create_task(
-            graph.ainvoke(
+        started = _queue_or_spawn_resume(
+            request.app,
+            lambda: graph.ainvoke(
                 {"human_approval_response": approval, "human_feedback": feedback},
                 config=config,
             ),
             name=f"graph:{page_name}:resume",
+            thread_id=thread_id,
         )
+        if not started:
+            logger.info(
+                "webhook: queued task.approved for %s until thread_id=%s finishes",
+                page_name,
+                thread_id,
+            )
+            return {"status": "queued"}
         logger.info(
             "webhook: resumed graph task for %s (approval=%s)", page_name, approval
         )
@@ -705,8 +796,9 @@ async def receive_webhook(
         graph = request.app.state.graph
         thread_id = await _resolve_thread_id(page_name, data)
         config = {"configurable": {"thread_id": thread_id}}
-        asyncio.create_task(
-            graph.ainvoke(
+        started = _queue_or_spawn_resume(
+            request.app,
+            lambda: graph.ainvoke(
                 {
                     "human_approval_response": "changes_requested",
                     "human_feedback": (
@@ -718,7 +810,15 @@ async def receive_webhook(
                 config=config,
             ),
             name=f"graph:{page_name}:rework",
+            thread_id=thread_id,
         )
+        if not started:
+            logger.info(
+                "webhook: queued task.rework for %s until thread_id=%s finishes",
+                page_name,
+                thread_id,
+            )
+            return {"status": "queued"}
         logger.info("webhook: resuming graph for CI rework on %s", page_name)
         return {"status": "rework"}
 
