@@ -185,7 +185,10 @@ class TestCrudOperations:
     @pytest.mark.asyncio
     async def test_roundtrip_preserves_extra_frontmatter(self, storage):
         """Extra frontmatter fields survive save/load cycle."""
-        content = "---\ntitle: Test\nstatus: draft\nauthor: alice\ntags:\n  - wiki\n---\n\n# Hello"
+        content = (
+            "---\ntitle: Test\nstatus: draft\nauthor: alice\ntags:\n  - "
+            "wiki\n---\n\n# Hello"
+        )
         await storage.save_page("ExtraFM", content)
         raw = await storage.get_raw_content("ExtraFM")
         assert raw is not None

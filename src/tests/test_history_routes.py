@@ -22,7 +22,8 @@ def wiki_app(tmp_path):
     set_storage(storage)
     set_revision_store(store)
     yield meshwiki.main.app
-    # Clear global references before closing so other tests don't hit a closed connection
+    # Clear global references before closing so other tests don't hit a closed
+    # connection
     meshwiki.main.storage._revisions = None
     store.close()
 

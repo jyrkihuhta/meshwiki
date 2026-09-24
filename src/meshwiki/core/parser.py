@@ -232,7 +232,10 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
         for col in result.columns:
             escaped_col = html_escape(col, quote=True)
             values = row.get(col)
-            td_attrs = f'data-page="{escaped_page}" data-field="{escaped_col}" data-col="{escaped_col}"'
+            td_attrs = (
+                f'data-page="{escaped_page}" data-field="{escaped_col}" '
+                f'data-col="{escaped_col}"'
+            )
             if col in ("name", "title") and values:
                 label = html_escape(values[0])
                 if col == "name":
@@ -251,7 +254,10 @@ def _render_metatable(filters: list, columns: list[str]) -> str:
                     domain = raw
                 escaped_raw = html_escape(raw, quote=True)
                 escaped_domain = html_escape(domain)
-                cell = f'<a href="{escaped_raw}" class="source-link" target="_blank" rel="noopener">{escaped_domain}</a>'
+                cell = (
+                    f'<a href="{escaped_raw}" class="source-link" target="_blank" '
+                    f'rel="noopener">{escaped_domain}</a>'
+                )
                 lines.append(f"<td {td_attrs}>{cell}</td>")
             elif values:
                 cell = html_escape(", ".join(values))
@@ -475,7 +481,8 @@ class TagListPreprocessor(Preprocessor):
             html = ""
         else:
             items = "".join(
-                f'<li><a href="/search?tag={html_escape(tag)}">{html_escape(tag)} ({count})</a></li>'
+                f'<li><a href="/search?tag={html_escape(tag)}">{html_escape(tag)} '
+                f"({count})</a></li>"
                 for tag, count in counter.most_common()
             )
             html = f'<ul class="tag-list">{items}</ul>'
@@ -811,7 +818,8 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         meta_items.append(
             f'<span class="task-meta-item">'
             f'<span class="task-meta-key">Parent</span> '
-            f'<a href="/page/{html_escape(url)}" class="wiki-link">{html_escape(parent)}</a>'
+            f'<a href="/page/{html_escape(url)}" '
+            f'class="wiki-link">{html_escape(parent)}</a>'
             f"</span>"
         )
     meta_html = (
@@ -829,7 +837,10 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             pr_num_match = re.search(r"/pull/(\d+)", pr_url)
             if pr_num_match:
                 pr_num = pr_num_match.group(1)
-                pr_display = f' on <a href="{html_escape(pr_url)}" target="_blank" rel="noopener">PR #{html_escape(pr_num)}</a>'
+                pr_display = (
+                    f' on <a href="{html_escape(pr_url)}" target="_blank" '
+                    f'rel="noopener">PR #{html_escape(pr_num)}</a>'
+                )
         if status == "in_progress":
             if pr_url:
                 phase_text = f"🔨 Grinding — rework in progress{pr_display}"
@@ -851,12 +862,15 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         )
         is_done_status = status in ("merged", "done", "failed", "rejected")
         terminal_html = (
-            f'<div class="task-status-terminal"{" data-terminal-done" if is_done_status else ""}>'
+            "<div "
+            'class="task-status-terminal"'
+            f'{" data-terminal-done" if is_done_status else ""}>'
             '<div class="task-terminal-header">'
             '<span class="task-terminal-dot task-terminal-dot--red"></span>'
             '<span class="task-terminal-dot task-terminal-dot--yellow"></span>'
             '<span class="task-terminal-dot task-terminal-dot--green"></span>'
-            f'<span class="task-terminal-title">kilo &mdash; {html_escape(page_name)}</span>'
+            '<span class="task-terminal-title">kilo &mdash; '
+            f"{html_escape(page_name)}</span>"
             '<button class="task-terminal-expand-btn" title="Expand terminal"'
             ' onclick="(function(b){'
             "var w=b.closest('.task-status-terminal');"
@@ -873,7 +887,8 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             f"var PAGE={page_name_js};"
             f"var EL=document.getElementById('task-terminal-{safe_id}');"
             f"var DONE={str(is_done_status).lower()};"
-            "var NO_SESSION_MSG='\\r\\n\\x1b[2m[no active terminal session for this task]\\x1b[0m\\r\\n';"
+            "var NO_SESSION_MSG='\\r\\n\\x1b[2m[no active terminal session for this "
+            "task]\\x1b[0m\\r\\n';"
             "function boot(){"
             "var t=new Terminal({"
             "cols:160,rows:50,disableStdin:true,convertEol:true,scrollback:5000,"
@@ -894,20 +909,24 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             "bannerEl.textContent=msg;"
             "EL.style.position='relative';EL.appendChild(bannerEl);"
             "}"
-            "function clearBanner(){if(bannerEl&&bannerEl.parentNode){bannerEl.parentNode.removeChild(bannerEl);bannerEl=null;}}"
+            "function "
+            "clearBanner(){if(bannerEl&&bannerEl.parentNode){bannerEl.parentNode.removeChild(bannerEl);bannerEl=null;}}"
             "function connect(){"
-            "var wsPath=PAGE.split('/').map(function(s){return encodeURIComponent(s);}).join('/');"
+            "var wsPath=PAGE.split('/').map(function(s){return "
+            "encodeURIComponent(s);}).join('/');"
             "var ws=new WebSocket(pr+'//'+location.host+'/ws/terminal/'+wsPath);"
             "ws.onmessage=function(e){"
             "if(e.data===NO_SESSION_MSG.trim()){"
-            "if(!bannerEl){showBanner('[session ended — waiting for next grinder run...]');}"
+            "if(!bannerEl){showBanner('[session ended — waiting for next grinder "
+            "run...]');}"
             "}else{"
             "clearBanner();"
             "if(e.data!==NO_SESSION_MSG){t.write(e.data);}"
             "}"
             "};"
             "ws.onclose=function(e){"
-            "if(DONE||e.code===1000){t.write('\\r\\n\\x1b[2m\\u2501\\u2501\\u2501 session ended \\u2501\\u2501\\u2501\\x1b[0m\\r\\n');return;}"
+            "if(DONE||e.code===1000){t.write('\\r\\n\\x1b[2m\\u2501\\u2501\\u2501 "
+            "session ended \\u2501\\u2501\\u2501\\x1b[0m\\r\\n');return;}"
             "clearBanner();"
             "if(retries<retryMax){"
             "retries++;"
@@ -917,7 +936,8 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             "showBanner('[no more retries — reload page]');"
             "}"
             "};"
-            "ws.onerror=function(){t.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n');};"
+            "ws.onerror=function(){t.write('\\r\\n\\x1b[31m[connection "
+            "error]\\x1b[0m\\r\\n');};"
             "};"
             "connect();"
             "}"
@@ -1087,7 +1107,8 @@ def _render_page_list(args_str: str | None, all_pages: list) -> str:
         page_tags = _get_page_tags(page)
         if page_tags:
             tag_links = [
-                f'<a href="/search?tag={html_escape(t)}" class="tag-pill">{html_escape(t)}</a>'
+                f'<a href="/search?tag={html_escape(t)}" '
+                f'class="tag-pill">{html_escape(t)}</a>'
                 for t in page_tags
             ]
             tags_html = f'<span class="page-list-tags">{"".join(tag_links)}</span>'
@@ -1272,7 +1293,8 @@ class ChildrenPreprocessor(Preprocessor):
             parts = ['<ul class="children-list">']
             for child in children:
                 # Normalise: underscores and spaces are interchangeable in page names
-                # (mirrors the _ref() logic in build_page_tree_sync / storage._path_to_name).
+                # (mirrors the _ref() logic in build_page_tree_sync /
+                # storage._path_to_name).
                 normalised = child.replace("_", " ")
                 url = normalised.replace(" ", "_")
                 display = html_escape(normalised)
@@ -1501,7 +1523,8 @@ def _render_include(
                 include_chain=include_chain + [matched_page],
             )
             parts.append(
-                f'<div class="include-content" data-included-page="{html_escape(matched_page)}">'
+                '<div class="include-content" '
+                f'data-included-page="{html_escape(matched_page)}">'
                 f"{nested_html}"
                 f"</div>"
             )
@@ -1757,13 +1780,14 @@ def _render_newpage_macro(
     return (
         f'<span class="new-page-macro">'
         f'<input type="text" class="new-page-input" placeholder="Page name" />'
-        f'<button class="new-page-button" type="button" onclick="{onclick}">{escaped_label}</button>'
+        '<button class="new-page-button" type="button" '
+        f'onclick="{onclick}">{escaped_label}</button>'
         f"</span>"
     )
 
 
 class NewPagePreprocessor(Preprocessor):
-    """Preprocessor that replaces <<NewPage(...)>> macros with an inline creation form."""
+    """Replace <<NewPage(...)>> macros with an inline page-creation form."""
 
     def run(self, lines: list[str]) -> list[str]:
         text = "\n".join(lines)
@@ -1863,7 +1887,8 @@ def _render_epic_status(page_name: str, page_metadata: dict) -> str:
 
         # classDefs
         lines.append(
-            "    classDef epic_node fill:#1e40af,color:#fff,stroke:#1d4ed8,font-weight:bold"
+            "    classDef epic_node "
+            "fill:#1e40af,color:#fff,stroke:#1d4ed8,font-weight:bold"
         )
         lines.append("    classDef planned fill:#94a3b8,color:#fff,stroke:#64748b")
         lines.append("    classDef decomposed fill:#94a3b8,color:#fff,stroke:#64748b")
@@ -1974,7 +1999,8 @@ def create_parser(
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
-        include_chain: List of page names in the current include chain (for circular detection).
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
         page_modified: Last modified datetime of the page (for LastModified macro).
         pages: List of all Page objects for TagList macro.
         toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
@@ -1985,7 +2011,9 @@ def create_parser(
     return Markdown(
         extensions=[
             # Core formatting
-            "extra",  # Includes: abbreviations, attr_list, def_list, fenced_code, footnotes, md_in_html, tables
+            # Includes: abbreviations, attr_list, def_list, fenced_code, footnotes,
+            # md_in_html, tables
+            "extra",
             "sane_lists",  # Better list handling
             "smarty",  # Smart quotes and dashes
             "toc",  # Table of contents
@@ -2043,7 +2071,8 @@ def parse_wiki_content(
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
-        include_chain: List of page names in the current include chain (for circular detection).
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
         page_modified: Last modified datetime of the page (for LastModified macro).
         pages: List of all Page objects for TagList macro.
         toc_html: Pre-generated TOC HTML for <<TableOfContents>> macro injection.
@@ -2098,7 +2127,8 @@ def parse_wiki_content_with_toc(
         page_metadata: Frontmatter dict of the page (for TaskStatus macro).
         recent_pages: List of Page objects for RecentChanges macro.
         page_contents: Dict mapping page names to raw content for Include macro.
-        include_chain: List of page names in the current include chain (for circular detection).
+        include_chain: Page names in the current include chain, used to detect
+            circular includes.
         page_modified: Last modified datetime of the page (for LastModified macro).
         pages: List of all Page objects for TagList macro.
 

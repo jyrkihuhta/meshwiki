@@ -162,8 +162,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             )
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
-            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://unpkg.com "
+            "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com "
+            "https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
             "connect-src 'self' wss:; "
             "font-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;"
@@ -172,7 +174,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # Middleware stack (added in reverse — last added runs outermost):
-# GZipMiddleware → LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware → AuthMiddleware
+# GZipMiddleware → LoggingMiddleware → SecurityHeadersMiddleware → SessionMiddleware →
+# AuthMiddleware
 if settings.auth_enabled:
     app.add_middleware(AuthMiddleware)
 app.add_middleware(
@@ -219,7 +222,8 @@ _revision_store = (
 )
 storage = FileStorage(settings.data_dir, revision_store=_revision_store)
 set_storage(storage)
-page_cache.hard_invalidate()  # clear cache from any prior storage instance (e.g. test reloads)
+# clear cache from any prior storage instance (e.g. test reloads)
+page_cache.hard_invalidate()
 if _revision_store is not None:
     set_revision_store(_revision_store)
 
@@ -237,7 +241,8 @@ async def get_page_tree() -> list[dict]:
     return build_page_tree_sync(pages)
 
 
-# Tags whose pages are hidden as sidebar roots (still appear as children under their parent)
+# Tags whose pages are hidden as sidebar roots (still appear as children under their
+# parent)
 _SIDEBAR_HIDDEN_TAGS: frozenset[str] = frozenset({"intel-entry"})
 
 
@@ -252,7 +257,7 @@ def _is_hidden_page(page: Page) -> bool:
 
 
 def build_page_tree_sync(pages: list[Page]) -> list[dict]:
-    """Build a declarative hierarchy from ``children:`` frontmatter and ``parent_task:`` fields.
+    """Build a hierarchy from ``children:`` frontmatter and ``parent_task:`` fields.
 
     Each node: {"name": str, "title": str, "children": list[dict], "level": int,
     "status": str, "stub": bool}
@@ -283,7 +288,8 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
         if declared:
             children_of[page.name] = [_ref(c) for c in declared]
 
-    # Derive implicit children from parent_task: (append after explicitly declared ones).
+    # Derive implicit children from parent_task: (append after explicitly declared
+    # ones).
     # Compare normalised names to prevent duplicates when a page is both in children:
     # (underscore form) and has parent_task: (space form) pointing at the same parent.
     for page in pages:
@@ -616,7 +622,10 @@ async def restore_page(name: str, rev: int):
 
 @app.get("/page/{name:path}/diff/{rev_range}", response_class=HTMLResponse)
 async def page_diff(request: Request, name: str, rev_range: str):
-    """Show diff between two revisions.  Format: 'A..B' or single rev N (diffs N-1..N)."""
+    """Show the diff between two revisions.
+
+    Format: 'A..B', or a single rev N (diffs N-1..N).
+    """
     _validate_page_name(name)
     if not settings.history_enabled:
         raise HTTPException(status_code=404, detail="History is disabled")
@@ -664,7 +673,8 @@ async def page_diff(request: Request, name: str, rev_range: str):
 @app.get("/page/{name:path}", response_class=HTMLResponse)
 async def view_page(request: Request, name: str):
     """View a wiki page."""
-    # 301 redirect for legacy slash-path URLs (e.g. /page/Docs/Getting_Started → /page/Getting_Started).
+    # 301 redirect for legacy slash-path URLs (e.g. /page/Docs/Getting_Started →
+    # /page/Getting_Started).
     # Only handles one-level-deep legacy paths; deeper nesting is left to fall through.
     if "/" in name:
         parts = name.split("/")
@@ -934,7 +944,10 @@ async def save_page(request: Request, name: str, content: str = Form("")):
                     if new_status not in allowed:
                         raise HTTPException(
                             status_code=422,
-                            detail=f"Cannot transition from '{old_status}' to '{new_status}'. Allowed: {allowed}",
+                            detail=(
+                                f"Cannot transition from '{old_status}' to "
+                                f"'{new_status}'. Allowed: {allowed}"
+                            ),
                         )
                     # Revert status in content — transition_task() will write it
                     setattr(new_meta, "status", old_status)

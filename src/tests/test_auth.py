@@ -160,7 +160,7 @@ def test_ws_terminal_unauthenticated_rejected(sync_auth_client):
 
 
 def test_ws_terminal_authenticated_accepted(sync_auth_client):
-    """Authenticated WebSocket connection reaches the handler (no policy-violation close)."""
+    """An authenticated WebSocket reaches the handler (no policy-violation close)."""
     from meshwiki.core.terminal_sessions import create_session
 
     # Create a closed session so the handler sends the "no output" message and exits
@@ -175,7 +175,8 @@ def test_ws_terminal_authenticated_accepted(sync_auth_client):
 
     # The WebSocket connection should be accepted and then cleanly closed by the server
     with sync_auth_client.websocket_connect("/ws/terminal/AuthedTask") as ws:
-        # Drain any buffered messages; the server closes after replaying a closed session
+        # Drain any buffered messages; the server closes after replaying a closed
+        # session
         try:
             while True:
                 ws.receive_text()

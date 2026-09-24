@@ -165,7 +165,8 @@ def hard_invalidate() -> None:
     discards its result instead of overwriting the freshly-cleared cache.
     Use only when swapping the underlying storage instance (e.g. test reloads).
     """
-    global _pages_cache, _tree_cache, _stale, _refresh_task, _generation, _last_rebuild_started
+    global _pages_cache, _tree_cache, _stale, _refresh_task
+    global _generation, _last_rebuild_started
     _generation += 1
     _pages_cache = None
     _tree_cache = None

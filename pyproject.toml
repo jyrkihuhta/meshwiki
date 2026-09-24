@@ -69,6 +69,10 @@ exclude = ["*.md", ".venv", "build", "dist"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 
+[tool.ruff.lint.pep8-naming]
+# Python-Markdown's extension API requires these camelCase hook names.
+extend-ignore-names = ["extendMarkdown", "handleMatch", "makeExtension"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
