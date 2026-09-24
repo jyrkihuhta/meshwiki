@@ -17,24 +17,6 @@ import and the app works without it. A separate, optional automation subsystem (
 "agent factory" / orchestrator under `orchestrator/`) can open PRs against this repo to
 help with development; it has its own docs and nothing in the wiki depends on it.
 
-## Scope & Authorization
-
-The wiki application itself performs no security testing of any kind — it stores and
-renders pages. The optional agent-factory subsystem, and the separate Molly
-security-testing service it can drive, operate only against explicitly authorized
-targets:
-
-- **Bug-bounty programs the operator is enrolled in** on HackerOne and Intigriti,
-  tested strictly within each program's published scope. Every request is checked
-  against per-target allow/deny rules (`scope_rules` / `scope_exclude_rules`) by a Rust
-  `ScopeChecker` before it is sent; out-of-scope hosts are blocked.
-- **Deliberately-vulnerable practice targets** on a private range (e.g. DVGA and other
-  "target-dummy" apps) used for regression testing. Staging is locked to this practice
-  range and never points at live third-party targets.
-
-This is authorized, scoped security testing. There is no capability for testing hosts
-outside the configured, authorized scope.
-
 ## Key Documentation
 
 Read these for full context:
@@ -294,7 +276,7 @@ Before committing:
 27. **Graph API parent edges** - `/api/graph` returns links with `type: "parent"` for implicit subpage hierarchy (page `A/B` → edge from `A` if `A` exists). These render as dashed lines in graph.js. Regular wiki links have no `type` field.
 28. **Preprocessors are synchronous** - Markdown preprocessors run inside FastAPI's already-running event loop. Never use `asyncio.run()` in a preprocessor — it raises `RuntimeError: This event loop is already running`. Use `get_engine()` for synchronous data access (see `MetaTableExtension`), or accept data as a constructor parameter passed in from the async route handler.
 29. **CI overwrites orchestrator env files from GitHub secrets** - `.github/workflows/ci.yml` writes `/opt/meshwiki/orchestrator-staging.env` and `/opt/meshwiki/orchestrator.env` from GitHub secrets on every staging/production deploy. If `FACTORY_ANTHROPIC_API_KEY` (or any other secret) is manually set on the VPS, CI will overwrite it. Always add secrets to the GitHub repo secrets (`gh secret set`) so they survive redeploys.
-30. **Caddy multi-service routing via shared Docker network** - Caddy (`meshwiki-caddy-1`) is on `meshwiki_default`. Services from other Compose projects (e.g. `molly` from `wintermutecore`) must be explicitly connected: `docker network connect meshwiki_default molly`. Once connected, Caddy resolves them by container name. Use `${VPS_DOMAIN}` for wiki/staging domains; hardcode other service domains (e.g. `molly.penni.fi`) that belong to different projects.
+30. **Caddy multi-service routing via shared Docker network** - Caddy (`meshwiki-caddy-1`) is on `meshwiki_default`. Services from other Compose projects must be explicitly connected: `docker network connect meshwiki_default <container>`. Once connected, Caddy resolves them by container name. Use `${VPS_DOMAIN}` for wiki/staging domains; hardcode other service domains that belong to different projects.
 31. **Staging orchestrator source code mount** - The `orchestrator-staging` container uses `-v /opt/meshwiki/staging/orchestrator/factory:/app/factory:ro` so staging code changes are reflected immediately without rebuilding the Docker image. The orchestrator Docker image is only rebuilt from `main` by CI; staging code reaches the container via this volume mount after `git pull` in `/opt/meshwiki/staging/orchestrator/`.
 
 ## Completed Milestones (1–10)
@@ -408,3 +390,20 @@ select = ["E", "F", "I", "N", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 ```
+
+## Working with safety classifiers
+
+Sessions in this repo have had replies stopped by Claude's safety classifier. The stops are non-deterministic: the same input sometimes passes and sometimes doesn't.
+
+What we know:
+
+- The classifier scores the whole conversation (user input, tool output, and Claude's replies), not just the latest message. A stopped reply stays in context and can push later turns closer to the threshold.
+- Claude's output varies between runs, so identical prompts can produce different conversations.
+- Flip-flopping results suggest content that sits near the threshold rather than clearly over it.
+
+How to work with it:
+
+1. After a stop, run `/clear` before retrying so stopped content doesn't accumulate.
+2. State the project's legitimate purpose and scope near the top of the conversation or this file, before any sensitive specifics.
+3. Ask for concrete tasks rather than commentary on security-sensitive wording.
+4. Report suspected false positives with `/feedback`.
