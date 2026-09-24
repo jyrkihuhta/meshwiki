@@ -113,16 +113,15 @@ async def transition_task(
             f"Set 'assignee: factory' in the page frontmatter first."
         )
 
-    # Apply status change
-    await storage.update_frontmatter_field(page_name, "status", new_status)
-
-    # Apply optional extra fields
+    # Apply the status change together with any extra fields in a single
+    # atomic read-modify-write.  Doing one write per field (as before) means a
+    # multi-field transition re-reads and re-writes the whole file N times,
+    # which races with concurrent transitions (e.g. the webhook merge flow's
+    # review→merged→done) and can lose updates.
+    fields: dict[str, str | None] = {"status": new_status}
     if extra_fields:
-        for field_name, value in extra_fields.items():
-            await storage.update_frontmatter_field(page_name, field_name, value)
-
-    # Reload to return current metadata
-    updated = await storage.get_page(page_name)
+        fields.update(extra_fields)
+    updated = await storage.patch_frontmatter(page_name, fields)
     assert updated is not None
     metadata_dict = updated.metadata.model_dump()
 
