@@ -1,5 +1,6 @@
 """Tests for graph engine integration with the FastAPI application."""
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -87,6 +88,27 @@ class TestGraphModule:
         engine = init_engine(tmp_path, watch=False)
         assert engine is not None
         assert engine.page_count() == 0
+
+    @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    def test_watch_through_symlinked_data_dir(self, tmp_path):
+        """Files written under a symlinked data dir still reach the engine.
+
+        macOS FSEvents reports canonical paths, so an engine given the
+        symlink path used to ignore every change.
+        """
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link_dir = tmp_path / "link"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+
+        engine = init_engine(link_dir, watch=True)
+        assert engine is not None
+        (real_dir / "Fresh.md").write_text("# Fresh\n")
+
+        deadline = time.monotonic() + 5.0
+        while not engine.page_exists("Fresh") and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert engine.page_exists("Fresh")
 
 
 # ============================================================

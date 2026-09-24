@@ -1,6 +1,7 @@
 """E2E tests for the editor: toolbar, keyboard shortcuts, preview, autocomplete."""
 
 import re
+import time
 
 from playwright.sync_api import Page, expect
 
@@ -131,13 +132,31 @@ class TestLivePreview:
         )
 
 
+def _wait_until_suggested(page: Page, base_url: str, name: str) -> None:
+    """Wait until autocomplete can suggest ``name``.
+
+    Pages written straight to disk reach the graph engine through the file
+    watcher a moment after the write. The editor fetches suggestions once per
+    keystroke, so typing before the page is indexed gets no matches and
+    nothing fetches again.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        resp = page.request.get(f"{base_url}/api/autocomplete", params={"q": name})
+        if f'data-value="{name}"' in resp.text():
+            return
+        page.wait_for_timeout(200)
+    raise AssertionError(f"autocomplete never suggested {name!r}")
+
+
 class TestWikiLinkAutocomplete:
     def test_autocomplete_shows_on_bracket(
         self, page: Page, base_url: str, create_page, live_prefix: str
     ):
-        create_page("Python", "# Python")
+        name = create_page("Python", "# Python")
         create_page("PythonGuide", "# Python Guide")
         create_page("Rust", "# Rust")
+        _wait_until_suggested(page, base_url, name)
         page.goto(f"{base_url}/page/ACTest/edit")
         textarea = page.locator("#content")
         textarea.fill("")
@@ -151,6 +170,7 @@ class TestWikiLinkAutocomplete:
         self, page: Page, base_url: str, create_page, live_prefix: str
     ):
         name = create_page("ClickTarget", "# Click Target")
+        _wait_until_suggested(page, base_url, name)
         page.goto(f"{base_url}/page/ACClick/edit")
         textarea = page.locator("#content")
         textarea.fill("")
@@ -165,7 +185,8 @@ class TestWikiLinkAutocomplete:
     def test_escape_closes_autocomplete(
         self, page: Page, base_url: str, create_page, live_prefix: str
     ):
-        create_page("EscPage", "# Esc")
+        name = create_page("EscPage", "# Esc")
+        _wait_until_suggested(page, base_url, name)
         page.goto(f"{base_url}/page/ACEsc/edit")
         textarea = page.locator("#content")
         textarea.fill("")

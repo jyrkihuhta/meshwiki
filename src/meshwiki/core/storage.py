@@ -309,7 +309,7 @@ class FileStorage(Storage):
         return name_matches + content_matches
 
     def list_pages_with_metadata_sync(self) -> list[Page]:
-        """Synchronous disk scan — call via run_in_executor to avoid blocking the event loop."""
+        """Scan pages on disk synchronously; call it via run_in_executor."""
         pages = []
         for path in self.base_path.glob("**/*.md"):
             name = self._path_to_name(path)

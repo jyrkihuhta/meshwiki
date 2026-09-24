@@ -624,8 +624,8 @@ jobs:
           sed -i '/^MESHWIKI_VERSION=/d' .env
           echo "MESHWIKI_VERSION=${NEW_VERSION}" >> .env
 
-          MESHWIKI_VERSION="${NEW_VERSION}" docker compose pull
-          MESHWIKI_VERSION="${NEW_VERSION}" docker compose up -d
+          MESHWIKI_VERSION="${NEW_VERSION}" docker compose pull meshwiki orchestrator
+          MESHWIKI_VERSION="${NEW_VERSION}" docker compose up -d meshwiki orchestrator
 
           CONTAINER=\$(docker compose ps -q meshwiki 2>/dev/null | head -1)
           for i in \$(seq 1 30); do

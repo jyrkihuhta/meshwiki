@@ -98,7 +98,10 @@ class ConnectionManager:
                         if msg.get("type") == "page_updated":
                             page = msg.get("page", "")
                             now = time.monotonic()
-                            if now - self._last_page_broadcast.get(page, 0.0) < _PAGE_EVENT_DEDUP_SECS:
+                            if (
+                                now - self._last_page_broadcast.get(page, 0.0)
+                                < _PAGE_EVENT_DEDUP_SECS
+                            ):
                                 continue
                             self._last_page_broadcast[page] = now
                         page_cache.invalidate()

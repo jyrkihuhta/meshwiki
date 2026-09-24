@@ -79,7 +79,9 @@ class RevisionStore:
             next_rev = row[0] + 1
             self._conn.execute(
                 """
-                INSERT INTO revisions (page_name, revision, timestamp, content, message, author, operation)
+                INSERT INTO revisions
+                    (page_name, revision, timestamp, content,
+                     message, author, operation)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -124,7 +126,8 @@ class RevisionStore:
     def get_latest_revision(self, page_name: str) -> Revision | None:
         """Fetch the most recent revision for a page."""
         row = self._conn.execute(
-            "SELECT * FROM revisions WHERE page_name = ? ORDER BY revision DESC LIMIT 1",
+            "SELECT * FROM revisions WHERE page_name = ? ORDER BY revision DESC LIMIT "
+            "1",
             (page_name,),
         ).fetchone()
         return _row_to_revision(row) if row else None

@@ -173,8 +173,11 @@ class TestEditorTemplate:
 
     @pytest.mark.asyncio
     async def test_edit_with_template_prepopulates_content(self, client):
-        """GET /page/NewPage/edit?template=TemplateName pre-populates with template content."""
-        template_content = "---\ntitle: Task Template\ntags:\n  - task\n---\n\n# Task\n\nDescription here."
+        """GET /page/X/edit?template=Name pre-fills the editor with the template."""
+        template_content = (
+            "---\ntitle: Task Template\ntags:\n  - task\n---\n\n# Task\n\nDescription "
+            "here."
+        )
         await meshwiki.main.storage.save_page("TaskTemplate", template_content)
 
         resp = await client.get("/page/NewPage/edit?template=TaskTemplate")

@@ -51,7 +51,11 @@ def init_engine(data_dir: Path, watch: bool = True) -> "GraphEngine | None":
         return None
 
     try:
-        _engine = GraphEngine(str(data_dir))
+        # Resolve symlinks first: macOS FSEvents reports canonical paths (e.g.
+        # /private/var/... for /var/...), and the watcher ignores events whose
+        # paths don't sit under the directory it was given, so a symlinked
+        # data dir would silently get no live updates.
+        _engine = GraphEngine(str(Path(data_dir).resolve()))
         _engine.rebuild()
         log.info(
             "graph_engine_initialized",

@@ -45,7 +45,10 @@ class RunningClockPreprocessor(Preprocessor):
                 zoneinfo.ZoneInfo(tz_name)
             except (zoneinfo.ZoneInfoNotFoundError, KeyError):
                 return f'<span class="macro-error">Unknown timezone: {tz_name}</span>'
-            return f'<span class="running-clock" data-clock data-timezone="{tz_name}"></span>'
+            return (
+                '<span class="running-clock" data-clock '
+                f'data-timezone="{tz_name}"></span>'
+            )
 
         text = _MACRO_RE.sub(replace_match, text)
 

@@ -26,7 +26,7 @@ class TestClockWidgetScriptTag:
         rendered = render_base_html(
             app_title="MeshWiki",
             page_tree=None,
-            request=_mock_request(),
+            request=_MockRequest(),
         )
         soup = BeautifulSoup(rendered, "html.parser")
         script_tags = soup.find_all("script", src=True)
@@ -50,7 +50,7 @@ class TestClockWidgetFile:
             clock_js_path
         ), f"clock_widget.js not found at {clock_js_path}"
 
-    def test_clock_widget_js_has_no_innerHTML(self):
+    def test_clock_widget_js_has_no_inner_html(self):
         clock_js_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -77,8 +77,9 @@ class TestClockWidgetFile:
         assert "eval" not in content, "clock_widget.js must not use eval"
 
 
-class _mock_request:
-    class session:
+class _MockRequest:
+    # Lowercase on purpose: stands in for the request.session attribute.
+    class session:  # noqa: N801
         @staticmethod
         def get(_):
             return None

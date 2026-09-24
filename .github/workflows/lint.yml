@@ -2,7 +2,9 @@ name: Lint
 
 on:
   pull_request:
-    branches: [main]
+    # staging too: factory PRs land there first, and lint that only ran on
+    # PRs into main let 74 errors pile up before the last promotion.
+    branches: [main, staging]
 
 jobs:
   lint:

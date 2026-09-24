@@ -65,7 +65,7 @@ class TestTableOfContentsMacro:
         assert '<nav class="wiki-toc wiki-toc-inline">' not in result
 
     def test_toc_macro_default_depth_with_deep_nesting(self) -> None:
-        """<<TableOfContents>> with default depth on page with deeply nested headings."""
+        """<<TableOfContents>> at default depth on a deeply nested page."""
         source = (
             "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6\n\n<<TableOfContents>>"
         )

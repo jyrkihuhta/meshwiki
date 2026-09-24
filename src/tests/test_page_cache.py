@@ -20,7 +20,7 @@ def reset_cache():
 
 @pytest.mark.asyncio
 async def test_cache_hit_on_second_call(tmp_path):
-    """list_pages_with_metadata is called exactly once across multiple get_pages_metadata calls."""
+    """Repeated get_pages_metadata calls scan the disk only once."""
     import meshwiki.core.page_cache as pc
 
     mock_pages = []
