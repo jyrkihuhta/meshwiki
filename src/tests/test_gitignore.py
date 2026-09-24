@@ -110,3 +110,41 @@ def test_pytest_run_leaves_no_untracked_pycache(tmp_path: Path) -> None:
         if "__pycache__" in line or line.endswith(".pyc")
     ]
     assert not offenders, f"pytest would leak bytecode into git status: {offenders}"
+
+
+def test_actual_pytest_run_leaves_no_untracked_pycache() -> None:
+    """Acceptance criterion: a real ``pytest`` invocation must not pollute
+    ``git status --porcelain`` with ``__pycache__`` or ``.pyc`` entries.
+
+    Runs a single collected test from ``src/tests`` so bytecode is generated
+    for ``src/meshwiki`` modules, then asserts the working tree stays clean
+    of bytecode artifacts.
+    """
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "pytest",
+            "src/tests/test_gitignore.py::test_gitignore_has_pyc_extension",
+            "-q",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "passed" in result.stdout, f"pytest did not report success: {result.stdout}"
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    offenders = [
+        line
+        for line in status.stdout.splitlines()
+        if "__pycache__" in line or line.endswith(".pyc")
+    ]
+    assert not offenders, f"pytest polluted git status with bytecode: {offenders}"
