@@ -5,6 +5,11 @@ services:
     volumes:
       - /opt/meshwiki/data/pages:/data/pages
     env_file: /opt/meshwiki/.env
+    # The host runs other workloads and can run short of memory. Reserve
+    # some and lower the OOM score so the kernel kills other processes
+    # before the wiki (staging's worker was OOM-killed on 2026-09-24).
+    mem_reservation: 512m
+    oom_score_adj: -500
     expose:
       - "8000"
     healthcheck:
@@ -31,6 +36,11 @@ services:
       - /opt/meshwiki/staging/src/meshwiki:/app/meshwiki:ro
       - /opt/meshwiki/data/staging-pages:/data/pages
     env_file: /opt/meshwiki/staging.env
+    # The host runs other workloads and can run short of memory. Reserve
+    # some and lower the OOM score so the kernel kills other processes
+    # before the wiki (staging's worker was OOM-killed on 2026-09-24).
+    mem_reservation: 512m
+    oom_score_adj: -500
     expose:
       - "8000"
     command:
@@ -44,11 +54,19 @@ services:
       - --reload-dir
       - /app/meshwiki
     healthcheck:
+      # The --reload supervisor (PID 1) only starts a new worker when files
+      # change. If the worker dies (OOM-killed on 2026-09-24), the port stays
+      # open with nothing serving it, and Docker never restarts a container
+      # just for being unhealthy. After 5 straight failures, stop PID 1 so
+      # the container exits and restart: unless-stopped brings it back.
       test:
-        - CMD
-        - python3
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request;
+          urllib.request.urlopen('http://localhost:8000/health/live', timeout=5)"
+          && rm -f /tmp/hc_failures
+          || { n=$$(( $$(cat /tmp/hc_failures 2>/dev/null || echo 0) + 1 ));
+          echo $$n > /tmp/hc_failures; [ $$n -lt 5 ] || kill 1; exit 1; }
       interval: 30s
       timeout: 10s
       start_period: 10s
