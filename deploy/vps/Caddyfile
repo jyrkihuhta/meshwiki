@@ -17,3 +17,7 @@ staging.${VPS_DOMAIN} {
 molly.penni.fi {
     reverse_proxy molly:8780
 }
+
+memory.penni.fi {
+    reverse_proxy molly-memory:8791
+}
