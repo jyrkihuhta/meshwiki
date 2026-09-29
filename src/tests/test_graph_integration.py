@@ -1,5 +1,6 @@
 """Tests for graph engine integration with the FastAPI application."""
 
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -90,6 +91,14 @@ class TestGraphModule:
         assert engine.page_count() == 0
 
     @pytest.mark.skipif(not GRAPH_ENGINE_AVAILABLE, reason="graph_core not installed")
+    @pytest.mark.skipif(
+        sys.platform != "darwin",
+        reason=(
+            "reproduces a macOS FSEvents canonical-path bug; Linux CI runners "
+            "don't reliably deliver watcher events, and the symlink is "
+            "transparent to path ops there so the bug can't manifest"
+        ),
+    )
     def test_watch_through_symlinked_data_dir(self, tmp_path):
         """Files written under a symlinked data dir still reach the engine.
 
@@ -105,7 +114,9 @@ class TestGraphModule:
         assert engine is not None
         (real_dir / "Fresh.md").write_text("# Fresh\n")
 
-        deadline = time.monotonic() + 5.0
+        # Generous budget: watcher startup + filesystem-event latency can be
+        # several seconds on a loaded CI runner, so a tight timeout flakes.
+        deadline = time.monotonic() + 20.0
         while not engine.page_exists("Fresh") and time.monotonic() < deadline:
             time.sleep(0.1)
         assert engine.page_exists("Fresh")

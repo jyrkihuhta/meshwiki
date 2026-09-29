@@ -1,5 +1,6 @@
 """Storage abstraction for wiki pages."""
 
+import asyncio
 import re
 import uuid as uuid_mod
 from abc import ABC, abstractmethod
@@ -319,8 +320,13 @@ class FileStorage(Storage):
         return sorted(pages, key=lambda p: p.name.lower())
 
     async def list_pages_with_metadata(self) -> list[Page]:
-        """List all pages with full metadata."""
-        return self.list_pages_with_metadata_sync()
+        """List all pages with full metadata.
+
+        The scan reads and parses every page on disk, which is slow at wiki
+        scale, so it runs in a thread to avoid blocking the event loop.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.list_pages_with_metadata_sync)
 
     async def search_by_tag(self, tag: str) -> list[Page]:
         """Filter pages by tag."""
