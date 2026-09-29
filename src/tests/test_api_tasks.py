@@ -204,3 +204,124 @@ async def test_transition_with_extra_fields(client):
     assert metadata["status"] == "in_progress"
     assert metadata["assignee"] == "grinder-1"
     assert metadata["branch"] == "factory/task-012"
+
+
+# ---------------------------------------------------------------------------
+# Graph-index fast path (list_tasks with a live watcher)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def watching_factory_settings(tmp_path):
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        data_dir=tmp_path,
+        factory_enabled=True,
+        factory_api_key="test-key-123",
+        graph_watch=True,
+        auth_enabled=False,
+    )
+    importlib.reload(meshwiki.main)
+    yield cfg.settings
+    cfg.settings = original
+    importlib.reload(meshwiki.main)
+
+
+@pytest.fixture
+async def watching_client(watching_factory_settings):
+    from meshwiki.core.graph import (
+        GRAPH_ENGINE_AVAILABLE,
+        init_engine,
+        shutdown_engine,
+    )
+
+    if not GRAPH_ENGINE_AVAILABLE:
+        pytest.skip("graph_core not installed")
+
+    engine = init_engine(watching_factory_settings.data_dir, watch=True)
+    if engine is None or not engine.is_watching():
+        shutdown_engine()
+        pytest.skip("graph engine watcher unavailable")
+    meshwiki.main.manager.start_polling()
+    async with AsyncClient(
+        transport=ASGITransport(app=meshwiki.main.app),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as c:
+        yield c, watching_factory_settings.data_dir, engine
+    meshwiki.main.manager.stop_polling()
+    shutdown_engine()
+
+
+def _write_and_index(data_dir, engine, name, content):
+    """Write a page to disk and rebuild the index deterministically.
+
+    The production index is watcher-maintained, but FSEvents latency makes a
+    watcher-based test flaky, so rebuild() (a synchronous full scan) is used to
+    make the index reflect disk without timing races.
+    """
+    (data_dir / f"{name}.md").write_text(content, encoding="utf-8")
+    engine.rebuild()
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_fast_path_filters(watching_client):
+    client, data_dir, engine = watching_client
+    _write_and_index(
+        data_dir,
+        engine,
+        "FastReview",
+        "---\ntype: task\nstatus: review\nassignee: factory\n---\nReview task",
+    )
+    _write_and_index(
+        data_dir,
+        engine,
+        "FastPlanned",
+        "---\ntype: task\nstatus: planned\nassignee: factory\n---\nPlanned task",
+    )
+    _write_and_index(
+        data_dir,
+        engine,
+        "FastEpic",
+        "---\ntype: epic\nstatus: review\nassignee: factory\n---\nAn epic",
+    )
+    _write_and_index(
+        data_dir,
+        engine,
+        "FastNote",
+        "Just a normal page, not a task",
+    )
+
+    resp = await client.get(
+        "/api/v1/tasks?status=review&assignee=factory", headers=_AUTH
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    # review task + review epic match; planned task and non-task excluded
+    assert {t["name"] for t in payload} == {"FastReview", "FastEpic"}
+    # response shape is unchanged: metadata carries scalar frontmatter fields
+    review = next(t for t in payload if t["name"] == "FastReview")
+    assert review["metadata"]["status"] == "review"
+    assert review["metadata"]["assignee"] == "factory"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_fast_path_does_not_full_scan(watching_client, monkeypatch):
+    """With the watcher live, /tasks must serve from the index, not scan disk."""
+    client, data_dir, engine = watching_client
+    _write_and_index(
+        data_dir,
+        engine,
+        "IndexedTask",
+        "---\ntype: task\nstatus: review\nassignee: factory\n---\nTask",
+    )
+
+    async def _boom(*a, **k):
+        raise AssertionError("list_tasks must not full-scan on the fast path")
+
+    monkeypatch.setattr(meshwiki.main.storage, "list_pages_with_metadata", _boom)
+    resp = await client.get(
+        "/api/v1/tasks?status=review&assignee=factory", headers=_AUTH
+    )
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()] == ["IndexedTask"]

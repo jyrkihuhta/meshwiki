@@ -24,6 +24,86 @@ class TerminalChunkRequest(BaseModel):
     data: str
 
 
+def _task_matches(
+    extra: dict,
+    status: str | None,
+    assignee: str | None,
+    parent_task: str | None,
+    priority: str | None,
+    repo: str | None,
+) -> bool:
+    """Return whether a page's frontmatter matches the task-list filters."""
+    if extra.get("type") not in ("task", "epic"):
+        return False
+    if status is not None and extra.get("status") != status:
+        return False
+    if assignee is not None and extra.get("assignee") != assignee:
+        return False
+    if parent_task is not None and extra.get("parent_task") != parent_task:
+        return False
+    if priority is not None and extra.get("priority") != priority:
+        return False
+    if repo is not None and extra.get("repo") != repo:
+        return False
+    return True
+
+
+def _candidate_task_names(
+    status: str | None,
+    assignee: str | None,
+    parent_task: str | None,
+    priority: str | None,
+    repo: str | None,
+) -> list[str] | None:
+    """Use the in-memory graph index to narrow task pages by the given filters.
+
+    Returns a candidate list of page names (a superset of the true matches, to
+    be re-checked against disk by ``_task_matches``), or ``None`` if the graph
+    engine is unavailable so the caller falls back to a full scan.
+
+    The engine holds every page's frontmatter in memory and is kept current by
+    the file watcher, so this avoids reading and parsing all pages on disk for
+    every request. It can lag disk by the watcher's latency, which is fine for
+    the factory's polling: a just-changed page is picked up on the next poll.
+    """
+    from meshwiki.core.graph import GRAPH_ENGINE_AVAILABLE, get_engine
+
+    if not GRAPH_ENGINE_AVAILABLE:
+        return None
+    engine = get_engine()
+    if engine is None:
+        return None
+    # Page writes reach the index only through the file watcher, so trust the
+    # index as a query source only while a watcher is keeping it current;
+    # otherwise it is a stale snapshot and we must scan disk instead.
+    if not engine.is_watching():
+        return None
+
+    from graph_core import Filter  # type: ignore[import]
+
+    base = []
+    if status is not None:
+        base.append(Filter.equals("status", status))
+    if assignee is not None:
+        base.append(Filter.equals("assignee", assignee))
+    if parent_task is not None:
+        base.append(Filter.equals("parent_task", parent_task))
+    if priority is not None:
+        base.append(Filter.equals("priority", priority))
+    if repo is not None:
+        base.append(Filter.equals("repo", repo))
+
+    # type is task OR epic, and query filters are AND-ed, so query per type.
+    names: list[str] = []
+    seen: set[str] = set()
+    for page_type in ("task", "epic"):
+        for info in engine.query([Filter.equals("type", page_type), *base]):
+            if info.name not in seen:
+                seen.add(info.name)
+                names.append(info.name)
+    return names
+
+
 @router.get("/tasks")
 async def list_tasks(
     status: str | None = None,
@@ -33,34 +113,42 @@ async def list_tasks(
     repo: str | None = None,
     storage: FileStorage = Depends(get_storage),
 ) -> list[dict]:
-    """List task pages with optional filters."""
+    """List task pages with optional filters.
+
+    Fast path: the graph index narrows candidates in memory, then only those
+    pages are loaded from disk. Falls back to a full scan when the engine is
+    unavailable. Both paths re-check ``_task_matches`` so the result reflects
+    what is actually on disk.
+    """
+    names = _candidate_task_names(status, assignee, parent_task, priority, repo)
+
+    if names is not None:
+        results = []
+        for name in names:
+            page = await storage.get_page(name)
+            if page is None:
+                continue  # indexed but since deleted
+            extra = page.metadata.model_extra or {}
+            if _task_matches(extra, status, assignee, parent_task, priority, repo):
+                results.append(
+                    {"name": page.name, "metadata": page.metadata.model_dump()}
+                )
+        return results
+
+    # Fallback: full scan (runs off the event loop in list_pages_with_metadata).
     pages = await storage.list_pages_with_metadata()
-
-    results = []
-    for page in pages:
-        extra = page.metadata.model_extra or {}
-
-        if extra.get("type") not in ("task", "epic"):
-            continue
-        if status is not None and extra.get("status") != status:
-            continue
-        if assignee is not None and extra.get("assignee") != assignee:
-            continue
-        if parent_task is not None and extra.get("parent_task") != parent_task:
-            continue
-        if priority is not None and extra.get("priority") != priority:
-            continue
-        if repo is not None and extra.get("repo") != repo:
-            continue
-
-        results.append(
-            {
-                "name": page.name,
-                "metadata": page.metadata.model_dump(),
-            }
+    return [
+        {"name": page.name, "metadata": page.metadata.model_dump()}
+        for page in pages
+        if _task_matches(
+            page.metadata.model_extra or {},
+            status,
+            assignee,
+            parent_task,
+            priority,
+            repo,
         )
-
-    return results
+    ]
 
 
 @router.post("/tasks/{name:path}/transition")
