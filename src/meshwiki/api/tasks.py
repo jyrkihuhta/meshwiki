@@ -123,17 +123,21 @@ async def list_tasks(
     names = _candidate_task_names(status, assignee, parent_task, priority, repo)
 
     if names is not None:
-        results = []
-        for name in names:
-            page = await storage.get_page(name)
-            if page is None:
-                continue  # indexed but since deleted
-            extra = page.metadata.model_extra or {}
-            if _task_matches(extra, status, assignee, parent_task, priority, repo):
-                results.append(
-                    {"name": page.name, "metadata": page.metadata.model_dump()}
-                )
-        return results
+        # Load the candidates in one batch off the event loop; missing ones
+        # (indexed but since deleted) are skipped.
+        pages = await storage.get_pages(names)
+        return [
+            {"name": page.name, "metadata": page.metadata.model_dump()}
+            for page in pages
+            if _task_matches(
+                page.metadata.model_extra or {},
+                status,
+                assignee,
+                parent_task,
+                priority,
+                repo,
+            )
+        ]
 
     # Fallback: full scan (runs off the event loop in list_pages_with_metadata).
     pages = await storage.list_pages_with_metadata()

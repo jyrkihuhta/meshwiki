@@ -346,3 +346,24 @@ class TestSearchByTag:
         await storage.save_page("NoTags", "just content")
         results = await storage.search_by_tag("anything")
         assert results == []
+
+
+@pytest.mark.asyncio
+async def test_get_pages_batch(storage):
+    await storage.save_page("Alpha", "---\ntype: task\n---\nA")
+    await storage.save_page("Beta", "---\ntype: task\n---\nB")
+    pages = await storage.get_pages(["Alpha", "Beta"])
+    assert [p.name for p in pages] == ["Alpha", "Beta"]
+    assert all(p.exists for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_get_pages_skips_missing(storage):
+    await storage.save_page("Real", "---\ntype: task\n---\nR")
+    pages = await storage.get_pages(["Real", "Ghost", "AlsoGone"])
+    assert [p.name for p in pages] == ["Real"]
+
+
+@pytest.mark.asyncio
+async def test_get_pages_empty(storage):
+    assert await storage.get_pages([]) == []

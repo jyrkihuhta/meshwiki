@@ -319,6 +319,34 @@ class FileStorage(Storage):
             pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
         return sorted(pages, key=lambda p: p.name.lower())
 
+    def get_pages_sync(self, names: list[str]) -> list[Page]:
+        """Load the named pages from disk, skipping any that no longer exist.
+
+        Reads and parses each named file; call via ``run_in_executor`` so the
+        batch of disk reads does not block the event loop.
+        """
+        pages: list[Page] = []
+        for name in names:
+            path = self._get_path(name)
+            if not path.exists():
+                continue
+            raw = path.read_text(encoding="utf-8")
+            metadata, body = self._parse_frontmatter(raw)
+            pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
+        return pages
+
+    async def get_pages(self, names: list[str]) -> list[Page]:
+        """Load the named pages, off the event loop.
+
+        For a large candidate set (e.g. a status filter matching many tasks),
+        loading each page inline would occupy the loop for the whole batch, so
+        the reads run in a thread.
+        """
+        if not names:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.get_pages_sync, names)
+
     async def list_pages_with_metadata(self) -> list[Page]:
         """List all pages with full metadata.
 
