@@ -1155,6 +1155,160 @@ def test_build_grinder_task_prompt_playbook_references_test_playbook_script() ->
     assert "python -m pytest tests/test_playbook_loader.py" in prompt
 
 
+def test_build_grinder_task_prompt_meshwiki_runs_test_suite_once() -> None:
+    """MeshWiki prompts must instruct the agent to run the full test suite
+    exactly once and forbid redundant re-runs for confirmation.
+
+    Acceptance criteria for Task_0011 (single final test sweep):
+      - Task prompts instruct the agent to run the full test suite exactly
+        once at the end.
+      - The instruction explicitly forbids re-running the same test file
+        or subset for confirmation.
+      - Log files show at most one final pytest invocation per task.
+    """
+    sub = _make_prompt_subtask("0001-meshwiki-once")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+    # Final-run guidance must be present.
+    assert "EXACTLY ONCE" in prompt
+    assert "FINAL test run" in prompt
+    # Must explicitly forbid redundant re-runs.
+    assert "DO NOT re-run" in prompt
+    assert "confirmation" in prompt
+    assert "sanity" in prompt or "double-check" in prompt
+    # Step 6 must reinforce the single-sweep rule.
+    assert "NEVER re-run" in prompt or "do not re-run" in prompt.lower()
+
+
+def test_build_grinder_task_prompt_playbook_md_only_runs_test_suite_once() -> None:
+    """The markdown-only playbook branch (narrow loader test) must also
+    carry the "run once" rule, otherwise the agent re-runs the loader test
+    multiple times after the first green invocation."""
+    sub = _make_prompt_subtask("0001-playbook-once")
+    sub["files_touched"] = ["playbooks/single-sweep.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The narrow-loader test_step must include the single-sweep instruction.
+    assert "EXACTLY ONCE" in prompt
+    assert "DO NOT re-run" in prompt
+    # And it must forbid re-running the loader test specifically.
+    assert "test_playbook_loader.py" in prompt
+    # Must NOT advise falling back to the full pytest tests/ suite (that
+    # would be a redundant extra sweep).
+    assert "do NOT retry the full" in prompt
+
+
+def test_build_grinder_task_prompt_playbook_full_suite_runs_once() -> None:
+    """The full pytest tests/ branch for playbook tasks (Python files in
+    scope) must also instruct a single final sweep."""
+    sub = _make_prompt_subtask("0001-playbook-full-once")
+    sub["files_touched"] = [
+        "playbooks/full-sweep.md",
+        "molly/playbook_loader.py",
+    ]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "EXACTLY ONCE" in prompt
+    assert "FINAL test run" in prompt
+    assert "DO NOT re-run" in prompt
+
+
+def test_build_grinder_task_prompt_armory_tool_runs_test_suite_once() -> None:
+    """The non-playbook armory (tool) branch must also enforce the single
+    final sweep — same root cause as the MeshWiki / Playbook branches."""
+    sub = _make_prompt_subtask("0001-tool-once")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "EXACTLY ONCE" in prompt
+    assert "FINAL test run" in prompt
+    assert "DO NOT re-run" in prompt
+    assert "confirmation" in prompt
+
+
+def test_build_grinder_task_prompt_single_sweep_allows_debug_runs() -> None:
+    """Step 6 must allow debug-driven individual test runs (e.g. a single
+    failing test) — these don't count as the "final sweep" and are how the
+    agent iterates on failures. Only redundant re-runs of the same
+    invocation are forbidden."""
+    sub = _make_prompt_subtask("0001-debug-ok")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+    # Step 6 must mention debug runs as allowed.
+    assert "Debug-driven" in prompt or "debug-driven" in prompt.lower()
+    # And it must explicitly say debug runs DON'T count as the final sweep.
+    assert "do not count as the final sweep" in prompt or (
+        "do NOT count as the final sweep" in prompt
+    )
+
+
+def test_build_grinder_task_prompt_single_sweep_distinct_from_pytest_command() -> None:
+    """The 'run once' instruction must appear in addition to the pytest
+    command itself, and must not REPLACE the test_step command. Regression
+    guard: if the suffix shadows the command line, the agent may skip the
+    test run entirely."""
+    sub = _make_prompt_subtask("0001-no-shadow")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+    # The pytest command line must still be present.
+    assert "python -m pytest src/tests/ -x -q" in prompt
+    # And the EXACTLY ONCE instruction must follow the command line, not
+    # replace it.
+    cmd_idx = prompt.index("python -m pytest src/tests/ -x -q")
+    once_idx = prompt.index("EXACTLY ONCE")
+    assert once_idx > cmd_idx, (
+        "EXACTLY ONCE instruction must come AFTER the pytest command, not "
+        "replace it. Found instruction before command line."
+    )
+
+
 # ---------------------------------------------------------------------------
 # grind_subtask: E2B routing and integration tests
 # ---------------------------------------------------------------------------
