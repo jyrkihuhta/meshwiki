@@ -1394,22 +1394,26 @@ async def test_grind_subtask_e2b_preinstalls_cryptography_in_bootstrap() -> None
             mock_cls.create = AsyncMock(return_value=mock_sbx)
             await grind_subtask_e2b(state, subtask, meshwiki_client)
 
-    crypto_calls = [c for c in install_calls if "pip install cryptography" in c]
-    assert crypto_calls, (
-        "bootstrap must run `pip install cryptography` before launching Kilo; "
-        f"got install_calls={install_calls!r}"
+    bootstrap_calls = [
+        c
+        for c in install_calls
+        if "pip install" in c and "bootstrap/requirements.txt" in c
+    ]
+    assert bootstrap_calls, (
+        "bootstrap must run `pip install -r bootstrap/requirements.txt` before "
+        f"launching Kilo; got install_calls={install_calls!r}"
     )
     # Must run before the orchestrator/meshwiki pip install -e steps.
-    crypto_idx = install_calls.index(crypto_calls[0])
+    bootstrap_idx = install_calls.index(bootstrap_calls[0])
     orchestrator_idxs = [
         i
         for i, c in enumerate(install_calls)
         if "pip install" in c and ("orchestrator" in c or "'.[dev]'" in c)
     ]
     assert orchestrator_idxs, "expected at least one meshwiki/orchestrator pip install"
-    assert crypto_idx < min(orchestrator_idxs), (
-        "`pip install cryptography` must run BEFORE the meshwiki/orchestrator "
-        "`pip install -e '.[dev]'` steps."
+    assert bootstrap_idx < min(orchestrator_idxs), (
+        "`pip install -r bootstrap/requirements.txt` must run BEFORE the "
+        "meshwiki/orchestrator `pip install -e '.[dev]'` steps."
     )
 
 
@@ -1535,4 +1539,38 @@ def test_build_grinder_task_prompt_mentions_cryptography_and_pythonpath() -> Non
     assert ".venv/bin/python" in prompt, (
         "task prompt must call out that .venv/bin/ is empty and the agent "
         "should use the system `python` interpreter"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task-0007: bootstrap/requirements.txt pre-installs test-time dependencies
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_requirements_file_exists_and_lists_cryptography() -> None:
+    """Acceptance criterion: `bootstrap/requirements.txt` must exist in the
+    repo and list `cryptography` (the test-time dep the agent used to have
+    to install mid-task)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    req_file = repo_root / "bootstrap" / "requirements.txt"
+    assert req_file.is_file(), (
+        f"bootstrap/requirements.txt must exist at {req_file}; "
+        "the agent needs an authoritative list of test-time deps so we can "
+        "`pip install -r` it during sandbox bootstrap."
+    )
+    contents = req_file.read_text(encoding="utf-8")
+    # Strip comments and blank lines before matching the package name so the
+    # test is robust to header comments explaining the file's purpose.
+    package_lines = [
+        line.strip()
+        for line in contents.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert any(
+        line.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].strip()
+        == "cryptography"
+        for line in package_lines
+    ), (
+        "bootstrap/requirements.txt must list `cryptography` so the bootstrap "
+        "step pre-installs it; contents were:\n" + contents
     )
