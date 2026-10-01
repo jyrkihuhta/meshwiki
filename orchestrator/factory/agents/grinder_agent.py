@@ -868,6 +868,11 @@ def build_grinder_task_prompt(
         if md_only:
             test_step = (
                 "5. Run ONLY: python -m pytest tests/test_playbook_loader.py -q\n"
+                "   Or use the documented wrapper: ./scripts/test_playbook.sh\n"
+                "   (Both invocations are equivalent — the wrapper sets PYTHONPATH, applies a "
+                "60s per-test timeout via `--timeout=60`, and refuses to use a `-k` filter that "
+                "would deselect most tests. With a slug arg it narrows via `-k`: "
+                "`./scripts/test_playbook.sh <playbook_slug>`.)\n"
                 "   (This subtask touches only `.md` files inside `playbooks/`, so the full "
                 "`pytest tests/` suite is unnecessary — it pulls in `cryptography`-dependent "
                 "fixtures that aren't installed in this env and 120s-timeout. The loader test "
