@@ -841,6 +841,22 @@ def build_grinder_task_prompt(
     repo_intro = _artifact_intro(artifact_type, task_repo_root)
     armory_protocol = get_armory_prompt(artifact_type)
 
+    # Shared "run tests exactly once" rule applied to every test_step so the
+    # agent never does a redundant subset confirmation sweep after the final
+    # full run. Acceptance criteria for Task_0011 (single final test sweep):
+    #   - Prompt instructs the agent to run the full test suite exactly once
+    #     at the end.
+    #   - It explicitly forbids re-running the same test file or subset for
+    #     "confirmation" after the final run.
+    run_once_suffix = (
+        "   This is the FINAL test run — run it EXACTLY ONCE, then move to step 6.\n"
+        "   DO NOT re-run the same test file, the same subset, or the full suite a\n"
+        '   second time for "confirmation" / "sanity" / "double-check" — the result\n'
+        "   is identical and the extra pytest invocation wastes a full grinder\n"
+        "   round-trip. If step 6 says a test failed, FIX the code and re-run; do\n"
+        "   not re-run before making a code change.\n"
+    )
+
     if is_meshwiki:
         autofix_step = (
             "4. Run autofix on Python files only (`.py` files exclusively — "
@@ -853,7 +869,7 @@ def build_grinder_task_prompt(
             "Python-bearing trees in this repo; pass exactly those globs and "
             "no others.)\n"
         )
-        test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
+        test_step = "5. Run: python -m pytest src/tests/ -x -q\n" + run_once_suffix
     elif artifact_type == "playbook":
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "playbooks"
         autofix_step = (
@@ -888,6 +904,12 @@ def build_grinder_task_prompt(
                 "missing `cryptography` or similar), REPORT that failure and CONTINUE — "
                 "do NOT retry the full `pytest tests/` suite, as it will fail the same way "
                 "and waste a full grinder iteration.\n"
+                "   This is the FINAL test run — run it EXACTLY ONCE, then move to step 6.\n"
+                "   DO NOT re-run `tests/test_playbook_loader.py`, the full `pytest tests/`\n"
+                '   suite, or any subset for "confirmation" / "sanity" / "double-check"\n'
+                "   after the final run — the result is identical and the extra pytest\n"
+                "   invocation wastes a full grinder round-trip. If step 6 says a test\n"
+                "   failed, FIX the code and re-run; do not re-run before making a code change.\n"
             )
         else:
             test_step = (
@@ -895,6 +917,12 @@ def build_grinder_task_prompt(
                 "   (This subtask touches Python files or files outside `playbooks/`, so the "
                 "full `tests/` suite is required — `test_playbook_loader.py` alone would not "
                 "cover module imports or other code paths affected by the change.)\n"
+                "   This is the FINAL test run — run it EXACTLY ONCE, then move to step 6.\n"
+                "   DO NOT re-run the same test file, the same subset, or the full suite a\n"
+                '   second time for "confirmation" / "sanity" / "double-check" — the result\n'
+                "   is identical and the extra pytest invocation wastes a full grinder\n"
+                "   round-trip. If step 6 says a test failed, FIX the code and re-run; do\n"
+                "   not re-run before making a code change.\n"
             )
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
@@ -924,7 +952,15 @@ def build_grinder_task_prompt(
             f"Pass exactly the glob `{lint_target}/` and no other paths — "
             f"never glob `*.sh` / `*.md` / `*.yml` into black/isort/ruff.)\n"
         )
-        test_step = "5. Run: python -m pytest tests/ -x -q\n"
+        test_step = (
+            "5. Run: python -m pytest tests/ -x -q\n"
+            "   This is the FINAL test run — run it EXACTLY ONCE, then move to step 6.\n"
+            "   DO NOT re-run the same test file, the same subset, or the full suite a\n"
+            '   second time for "confirmation" / "sanity" / "double-check" — the result\n'
+            "   is identical and the extra pytest invocation wastes a full grinder\n"
+            "   round-trip. If step 6 says a test failed, FIX the code and re-run; do\n"
+            "   not re-run before making a code change.\n"
+        )
 
     return (
         f"{repo_intro} "
@@ -956,6 +992,10 @@ def build_grinder_task_prompt(
         f"   (where `$REPO_ROOT` is the cloned repo root, e.g. `/tmp/repo`) — the sandbox\n"
         f"   env already exports PYTHONPATH=/tmp/repo, but if you `cd` into a subdirectory\n"
         f"   or open a fresh shell, re-source `scripts/bootstrap.sh` to re-export it.\n"
+        f"   Re-running tests is ONLY allowed after you make a code change. NEVER re-run\n"
+        f'   pytest to "confirm" or "double-check" a green run — the step 5 result is\n'
+        f"   final. Debug-driven runs of a single failing test (e.g. `pytest -x tests/path/to/test_x.py::test_y`)\n"
+        f"   ARE allowed and do not count as the final sweep.\n"
         f"7. Commit your changes\n"
         f"8. Rebase onto the latest {base_branch} to avoid merge conflicts:\n"
         f"   First verify the working tree is clean — pytest will have left __pycache__/*.pyc\n"
