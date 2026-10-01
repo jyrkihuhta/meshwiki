@@ -423,3 +423,58 @@ def get_armory_prompt(artifact_type: str | None) -> str:
     if artifact_type is None or artifact_type == "code":
         return ""
     return _ARTIFACT_PROMPTS.get(artifact_type, "")
+
+
+# ---------------------------------------------------------------------------
+# Common Mistakes to Avoid footer
+# ---------------------------------------------------------------------------
+#
+# Standardized footer appended to every grinder task prompt via
+# ``get_common_mistakes_footer()``. The four rules below were derived from
+# InsightBot observations of recurring grinder failures over the past week.
+# Centralising them here means a single edit propagates to fresh runs,
+# reworks, MeshWiki code tasks, and every armory artifact type (playbook,
+# tool, wordlist, toolspec) — no copy-paste, no drift between call sites.
+#
+# DO NOT add rules that contradict the per-artifact ``*_SCHEMA`` docs above
+# (e.g. "always run `ruff check`" would fight PLAYBOOK_SCHEMA). These are
+# cross-cutting guardrails, not artifact-specific instructions.
+
+COMMON_MISTAKES_FOOTER: str = """\
+
+## Common Mistakes to Avoid
+
+Recurring failures from past grinder runs — DO NOT repeat any of these:
+
+- **DO NOT** run `pip install -e .` (or `pip install --editable .`). Armory
+  repos ship no `pyproject.toml` / `setup.py`, and MeshWiki's bootstrap
+  already exports `PYTHONPATH` and installs the only third-party dep that
+  isn't in the base sandbox (`cryptography`). If an import fails it is an
+  environment problem to report — not a missing editable install.
+- **DO NOT** run `ruff check` / `black --check` / `isort` on non-Python
+  files (`.md` playbooks, `.md` toolspecs, `.txt` wordlists, `.sh`
+  scripts). Those tools only parse Python; on anything else they emit
+  spurious `No Python files found` / `Cannot parse: 1:3: ---` errors that
+  waste a full grinder iteration.
+- **DO NOT** re-run an identical test command after a clear environment
+  failure (e.g. `ModuleNotFoundError: cryptography`). If the test fails
+  the same way twice, it is not flaky — it is telling you the env cannot
+  support that test. Narrow the test scope (e.g. `test_playbook_loader`
+  for playbook-only diffs) or stop and report the missing dep.
+- **DO NOT** write an ad-hoc YAML validator for playbook frontmatter. The
+  repo provides `scripts/validate_playbooks.py` (or, for wordlists,
+  `scripts/validate_wordlists.py`) — use that. It is the source of truth
+  for schema rules and catches edge cases (e.g. note-only mutations,
+  `scope: target-specific` without `target:`) that a one-liner will miss.
+"""
+
+
+def get_common_mistakes_footer() -> str:
+    """Return the standardized 'Common Mistakes to Avoid' footer.
+
+    Appended to every grinder task prompt (fresh or rework, MeshWiki or
+    armory artifact type) so the four recurring-failure rules travel with
+    the prompt via template inheritance. Single source of truth — edit
+    ``COMMON_MISTAKES_FOOTER`` to update every dispatch.
+    """
+    return COMMON_MISTAKES_FOOTER
