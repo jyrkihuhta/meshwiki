@@ -843,8 +843,15 @@ def build_grinder_task_prompt(
 
     if is_meshwiki:
         autofix_step = (
-            "4. Run autofix on Python files only: black src/ && isort --profile black src/ && ruff check src/\n"
-            "   (Tools are installed globally — do NOT use .venv/bin/ prefix. black/isort are for .py files ONLY; do not run them on .js, .css, or other file types.)\n"
+            "4. Run autofix on Python files only (`.py` files exclusively — "
+            "do NOT pass any `.sh`, `.md`, `.yml`, `.js`, or `.css` path to "
+            "these tools; black will fail with `Cannot parse: 1:3: ---` and "
+            "ruff will fail with `No Python files found` on non-Python files):\n"
+            "     black src/ orchestrator/ && isort --profile black src/ orchestrator/ && ruff check src/ orchestrator/\n"
+            "   (Tools are installed globally — do NOT use .venv/bin/ prefix. "
+            "The two paths above (`src/` and `orchestrator/`) are the ONLY "
+            "Python-bearing trees in this repo; pass exactly those globs and "
+            "no others.)\n"
         )
         test_step = "5. Run: python -m pytest src/tests/ -x -q\n"
     elif artifact_type == "playbook":
@@ -892,13 +899,17 @@ def build_grinder_task_prompt(
     else:
         lint_target = task_repo_root.rstrip("/") if task_repo_root else "."
         autofix_step = (
-            f"4. SKIP `ruff check` / `black --check` / `isort` if the diff contains no `.py` "
-            f"files — running Python linters on `.md` playbook files always produces spurious "
-            f"`No Python files found` / `Cannot parse: 1:3: ---` errors. Inspect the change "
-            f"set first:\n"
+            f"4. Run autofix on Python files only (`.py` files exclusively — "
+            f"do NOT pass any `.sh`, `.md`, `.yml`, `.json`, or `.toml` path "
+            f"to these tools; black fails with `Cannot parse: 1:3: ---` and "
+            f"ruff fails with `No Python files found` on non-Python files, "
+            f"wasting a round-trip). SKIP `ruff check` / `black --check` / "
+            f"`isort` if the diff contains no `.py` files. First inspect the "
+            f"change set, then run the linters ONLY against the exact glob "
+            f"`{lint_target}/`:\n"
             f"     changed=$(git diff --name-only origin/{base_branch}...HEAD)\n"
             f"     if echo \"$changed\" | grep -q '\\.py$'; then\n"
-            f"       ruff check --fix {lint_target} && black {lint_target}\n"
+            f"       ruff check --fix {lint_target} && black {lint_target} && isort --profile black {lint_target}\n"
             f"     else\n"
             f"       echo 'No Python files changed — skipping ruff/black/isort.'\n"
             f"       # If the change set contains playbook `.md` files, validate the\n"
@@ -909,7 +920,9 @@ def build_grinder_task_prompt(
             f'           || echo "FAIL: $f"\n'
             f"       done\n"
             f"     fi\n"
-            f"   (Tools are installed globally — do NOT use .venv/bin/ prefix.)\n"
+            f"   (Tools are installed globally — do NOT use .venv/bin/ prefix. "
+            f"Pass exactly the glob `{lint_target}/` and no other paths — "
+            f"never glob `*.sh` / `*.md` / `*.yml` into black/isort/ruff.)\n"
         )
         test_step = "5. Run: python -m pytest tests/ -x -q\n"
 
