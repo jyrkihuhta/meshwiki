@@ -26,7 +26,6 @@ from factory.nodes.validate_armory import (
     validate_armory_node,
 )
 
-
 # ---------------------------------------------------------------------------
 # armory_prompts
 # ---------------------------------------------------------------------------
@@ -55,6 +54,43 @@ def test_get_armory_prompt_playbook_mentions_checks() -> None:
     prompt = get_armory_prompt("playbook")
     assert "checks" in prompt
     assert "leaf_type" in prompt
+
+
+def test_get_armory_prompt_playbook_documents_references_as_markdown_section() -> None:
+    """Playbook template must define references as a bottom Markdown
+    `## References` section — NOT a YAML frontmatter key. This was the
+    ambiguity that caused grinder first-edit failures (agent targeted
+    frontmatter, missed body section, had to re-read file)."""
+    prompt = get_armory_prompt("playbook")
+    # Bottom-section guidance is documented explicitly.
+    assert "## References" in prompt
+    assert "bottom" in prompt.lower() or "file bottom" in prompt.lower()
+    # Frontmatter-references anti-pattern is called out.
+    assert "frontmatter" in prompt.lower()
+    assert "references:" in prompt
+    # The template code block shows the section after the frontmatter close.
+    ref_section_idx = prompt.find("## References")
+    frontmatter_close_idx = prompt.find("Body prose explaining")
+    assert ref_section_idx > -1
+    assert frontmatter_close_idx > -1
+    assert ref_section_idx > frontmatter_close_idx
+
+
+def test_get_armory_prompt_playbook_template_has_references_section_in_example() -> (
+    None
+):
+    """The reference (template) playbook in the schema must include a
+    `## References` Markdown section — concrete example, not just prose."""
+    prompt = get_armory_prompt("playbook")
+    # Find the absolute-minimum template block and assert it ends with
+    # `## References` before the closing fence.
+    template_start = prompt.find("### Reference: the absolute-minimum")
+    assert template_start > -1
+    template_end = prompt.find("### References — Markdown section", template_start)
+    assert template_end > -1
+    template_block = prompt[template_start:template_end]
+    assert "## References" in template_block
+    assert "Body prose explaining" in template_block
 
 
 def test_get_armory_prompt_wordlist_mentions_format() -> None:
@@ -216,7 +252,9 @@ def _make_md_file(filename: str, added_content: str) -> dict:
 
 
 def test_check_playbook_files_valid_returns_empty() -> None:
-    files = [_make_md_file("playbooks/test.md", _VALID_FRONTMATTER + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _VALID_FRONTMATTER + _VALID_CHECKS_YAML)
+    ]
     assert _check_playbook_files(files) == []
 
 
@@ -227,7 +265,9 @@ def test_check_playbook_files_invalid_yaml_block() -> None:
 
 
 def test_check_playbook_files_missing_leaf_type() -> None:
-    files = [_make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)
+    ]
     errors = _check_playbook_files(files)
     assert any("leaf_type" in e for e in errors)
 
@@ -296,7 +336,9 @@ def test_check_playbook_files_ignores_non_playbook_files() -> None:
 
 
 def test_check_playbook_files_missing_scope() -> None:
-    files = [_make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)]
+    files = [
+        _make_md_file("playbooks/test.md", _MISSING_LEAF_TYPE_FM + _VALID_CHECKS_YAML)
+    ]
     errors = _check_playbook_files(files)
     assert any("scope" in e for e in errors), errors
 
@@ -770,7 +812,11 @@ async def test_validate_armory_pass_through_for_explicit_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_subtask(subtask_id: str, status: str = "merged", pr_url: str = "https://github.com/owner/repo/pull/42") -> dict:
+def _make_subtask(
+    subtask_id: str,
+    status: str = "merged",
+    pr_url: str = "https://github.com/owner/repo/pull/42",
+) -> dict:
     return {
         "id": subtask_id,
         "wiki_page": subtask_id,
@@ -810,7 +856,11 @@ async def test_validate_armory_tool_clean_passes() -> None:
         task_repo="jyrkihuhta/molly-armory",
         subtasks=[_make_subtask("task-0099")],
     )
-    clean_files = [_make_file("python/molly/tools/my_tool.py", "+from molly.tools.base import ToolBase\n")]
+    clean_files = [
+        _make_file(
+            "python/molly/tools/my_tool.py", "+from molly.tools.base import ToolBase\n"
+        )
+    ]
     mock_gh = _mock_github(clean_files)
 
     with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):
@@ -879,10 +929,12 @@ async def test_validate_armory_toolspec_non_proposed_status_fails() -> None:
         task_repo="jyrkihuhta/molly-armory",
         subtasks=[_make_subtask("task-0099")],
     )
-    bad_files = [_make_md_file(
-        "toolspecs/bad.md",
-        "---\ntoolspec: x\nname: X\ncapability_name: x\nstatus: forged\ncategory: misc\n---\n",
-    )]
+    bad_files = [
+        _make_md_file(
+            "toolspecs/bad.md",
+            "---\ntoolspec: x\nname: X\ncapability_name: x\nstatus: forged\ncategory: misc\n---\n",
+        )
+    ]
     mock_gh = _mock_github(bad_files)
 
     with patch("factory.nodes.validate_armory.GitHubClient", return_value=mock_gh):

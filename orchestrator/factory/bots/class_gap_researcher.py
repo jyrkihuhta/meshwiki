@@ -243,7 +243,9 @@ def _render_playbook_task_page(
         "`critical|high|medium|low|info|unknown`, a non-trivial `technique` "
         "describing the attack and win condition, and `mutations` as a list "
         "of mappings with keys `body|header|value|url_override|note`.\n"
-        "3. References — at least 1 H1 report, CVE, or research writeup.\n\n"
+        "3. References — at least 1 H1 report, CVE, or research writeup, "
+        "added to `## References` at the file bottom (Markdown section, "
+        "NOT a `references:` frontmatter key — see the Playbook Schema).\n\n"
         "## Acceptance Criteria\n\n"
         f"- [ ] Playbook file at `{filename}` lints clean via "
         "`PlaybookLoader.load_all()`\n"
@@ -253,7 +255,8 @@ def _render_playbook_task_page(
         "- [ ] At least 3 checks with non-trivial `technique` text\n"
         "- [ ] All checks use valid `mode` and `severity` values\n"
         "- [ ] Mutations are mappings, not bare strings\n"
-        "- [ ] References section cites at least 1 external source\n"
+        "- [ ] `## References` Markdown section at file bottom cites at "
+        "least 1 external source (no `references:` frontmatter key)\n"
     )
 
     return page_name, frontmatter + body
@@ -321,7 +324,9 @@ def _render_toolspec_task_page(suggestion: dict, armory_repo: str) -> tuple[str,
     return page_name, frontmatter + body
 
 
-def _render_task_page(suggestion: dict, base_url: str, armory_repo: str) -> tuple[str, str]:
+def _render_task_page(
+    suggestion: dict, base_url: str, armory_repo: str
+) -> tuple[str, str]:
     """Dispatch to the right task-page renderer for suggestion["kind"]."""
     if suggestion["kind"] == KIND_TOOL_IDEA:
         return _render_toolspec_task_page(suggestion, armory_repo)
@@ -379,7 +384,10 @@ class ClassGapResearcherBot(BaseBot):
         # 1. Inventory existing playbooks + tool ideas in the armory, and
         # open factory tasks.
         try:
-            existing_target_specific, existing_generic_slugs = await self._fetch_armory_classes()
+            (
+                existing_target_specific,
+                existing_generic_slugs,
+            ) = await self._fetch_armory_classes()
         except Exception as e:
             errors.append(f"fetch armory playbooks: {type(e).__name__}: {e}")
             existing_target_specific, existing_generic_slugs = set(), set()
@@ -397,19 +405,24 @@ class ClassGapResearcherBot(BaseBot):
         if errors:
             elapsed = time.monotonic() - started
             return BotResult(
-                ran_at=started, actions_taken=0, errors=errors,
+                ran_at=started,
+                actions_taken=0,
+                errors=errors,
                 details=f"survey failed elapsed={elapsed:.2f}s",
             )
 
         # 2. Ask the LLM for suggestions
         try:
             suggestions = await self._propose_gaps(
-                existing_target_specific, existing_generic_slugs,
-                existing_tool_ideas, open_tasks,
+                existing_target_specific,
+                existing_generic_slugs,
+                existing_tool_ideas,
+                open_tasks,
             )
         except Exception as e:
             return BotResult(
-                ran_at=started, actions_taken=0,
+                ran_at=started,
+                actions_taken=0,
                 errors=[f"llm: {type(e).__name__}: {e}"],
                 details=(
                     f"existing_target_specific={len(existing_target_specific)} "
@@ -453,7 +466,9 @@ class ClassGapResearcherBot(BaseBot):
         if not unique:
             elapsed = time.monotonic() - started
             return BotResult(
-                ran_at=started, actions_taken=0, errors=[],
+                ran_at=started,
+                actions_taken=0,
+                errors=[],
                 details=(
                     f"all {len(suggestions)} suggestions were duplicates; "
                     f"existing_target_specific={len(existing_target_specific)} "
@@ -465,7 +480,11 @@ class ClassGapResearcherBot(BaseBot):
 
         # 4. Create MeshWiki task pages
         for s in unique:
-            base_url = self._target_base_url(s["target"]) if s.get("kind") != KIND_TOOL_IDEA else ""
+            base_url = (
+                self._target_base_url(s["target"])
+                if s.get("kind") != KIND_TOOL_IDEA
+                else ""
+            )
             page_name, content = _render_task_page(s, base_url, self._armory_repo)
             try:
                 async with MeshWikiClient() as wiki:
@@ -473,7 +492,8 @@ class ClassGapResearcherBot(BaseBot):
                 actions += 1
                 logger.info(
                     "class-gap-researcher: created task %s (kind=%s)",
-                    page_name, s.get("kind"),
+                    page_name,
+                    s.get("kind"),
                 )
             except Exception as e:
                 errors.append(f"create {page_name}: {type(e).__name__}: {e}")
@@ -614,11 +634,13 @@ class ClassGapResearcherBot(BaseBot):
                     name = t.get("name") or ""
                     m = toolspec_re.match(name)
                     if m:
-                        records.append({
-                            "kind": KIND_TOOL_IDEA,
-                            "capability_name": m.group(1).replace("-", "_"),
-                            "page": name,
-                        })
+                        records.append(
+                            {
+                                "kind": KIND_TOOL_IDEA,
+                                "capability_name": m.group(1).replace("-", "_"),
+                                "page": name,
+                            }
+                        )
                         continue
                     m = playbook_re.match(name)
                     if not m:
@@ -626,10 +648,19 @@ class ClassGapResearcherBot(BaseBot):
                     raw_target, raw_class = m.group(1), m.group(2)
                     target = raw_target.replace("_", "-")
                     vuln_class = raw_class.replace("_", "-")
-                    kind = KIND_TARGET_SPECIFIC if target in KNOWN_TARGETS else KIND_GENERIC
-                    records.append({
-                        "kind": kind, "target": target, "vuln_class": vuln_class, "page": name,
-                    })
+                    kind = (
+                        KIND_TARGET_SPECIFIC
+                        if target in KNOWN_TARGETS
+                        else KIND_GENERIC
+                    )
+                    records.append(
+                        {
+                            "kind": kind,
+                            "target": target,
+                            "vuln_class": vuln_class,
+                            "page": name,
+                        }
+                    )
         return records
 
     # ------------------------------------------------------------------
@@ -643,17 +674,28 @@ class ClassGapResearcherBot(BaseBot):
         existing_tool_ideas: set[str],
         open_tasks: list[dict],
     ) -> list[dict]:
-        target_specific_lines = "\n".join(
-            f"- {t}: {c}" for t, c in sorted(existing_target_specific)
-        ) or "(none)"
-        generic_lines = "\n".join(f"- {s}" for s in sorted(existing_generic_slugs)) or "(none)"
-        tool_idea_lines = "\n".join(f"- {c}" for c in sorted(existing_tool_ideas)) or "(none)"
-        task_lines = "\n".join(
-            f"- [{t['kind']}] "
-            + (f"{t.get('target')}: {t.get('vuln_class')}" if t["kind"] != KIND_TOOL_IDEA
-               else t.get("capability_name", ""))
-            for t in open_tasks
-        ) or "(none)"
+        target_specific_lines = (
+            "\n".join(f"- {t}: {c}" for t, c in sorted(existing_target_specific))
+            or "(none)"
+        )
+        generic_lines = (
+            "\n".join(f"- {s}" for s in sorted(existing_generic_slugs)) or "(none)"
+        )
+        tool_idea_lines = (
+            "\n".join(f"- {c}" for c in sorted(existing_tool_ideas)) or "(none)"
+        )
+        task_lines = (
+            "\n".join(
+                f"- [{t['kind']}] "
+                + (
+                    f"{t.get('target')}: {t.get('vuln_class')}"
+                    if t["kind"] != KIND_TOOL_IDEA
+                    else t.get("capability_name", "")
+                )
+                for t in open_tasks
+            )
+            or "(none)"
+        )
         user_msg = (
             f"## Already covered by an existing target-specific playbook\n\n"
             f"{target_specific_lines}\n\n"
@@ -679,7 +721,9 @@ class ClassGapResearcherBot(BaseBot):
         )
 
         text, _toks = await self._call_llm(user_msg)
-        return _parse_suggestions(text, self._suggestions_per_run, self._allow_target_specific)
+        return _parse_suggestions(
+            text, self._suggestions_per_run, self._allow_target_specific
+        )
 
     async def _call_llm(self, user_msg: str) -> tuple[str, int]:
         """Call the configured LLM via the right provider for this model name."""
@@ -757,7 +801,9 @@ async def _openai_compat_call(
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(
-            f"{base_url}/chat/completions", headers=headers, json=body,
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=body,
         )
         r.raise_for_status()
         data = r.json()
@@ -778,7 +824,7 @@ def _parse_suggestions(text: str, cap: int, allow_target_specific: bool) -> list
         # Drop opening fence + language tag
         first_newline = s.find("\n")
         if first_newline != -1:
-            s = s[first_newline + 1:]
+            s = s[first_newline + 1 :]
         if s.endswith("```"):
             s = s[:-3]
         s = s.strip()
@@ -807,13 +853,17 @@ def _parse_suggestions(text: str, cap: int, allow_target_specific: bool) -> list
     if not isinstance(arr, list):
         return []
 
-    allowed_kinds = _ALL_KINDS if allow_target_specific else (_ALL_KINDS - {KIND_TARGET_SPECIFIC})
+    allowed_kinds = (
+        _ALL_KINDS if allow_target_specific else (_ALL_KINDS - {KIND_TARGET_SPECIFIC})
+    )
 
     valid: list[dict] = []
     for item in arr[:cap]:
         if not isinstance(item, dict):
             continue
-        kind = item.get("kind", KIND_GENERIC)  # default for backward-compat with older prompts
+        kind = item.get(
+            "kind", KIND_GENERIC
+        )  # default for backward-compat with older prompts
         if kind not in allowed_kinds:
             continue
         if kind == KIND_TOOL_IDEA:

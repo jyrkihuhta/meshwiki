@@ -234,12 +234,36 @@ checks:
 ---
 
 Body prose explaining what this playbook tests and why.
+
+## References
+
+- https://example.com/h1-report-or-cve
 ```
+
+### References — Markdown section at file bottom, NOT frontmatter
+
+References (HackerOne reports, CVEs, research writeups, blog posts)
+live in a Markdown `## References` section at the **bottom** of the
+playbook file — NOT in YAML frontmatter. Playbook frontmatter is the
+source of truth for schema/loader fields only (`playbook`, `name`,
+`leaf_type`, `scope`, `target`, `applies_to`, `checks`,
+`sub_tech`). A `references:` key in the frontmatter is ignored by
+`PlaybookLoader.from_doc()` and has historically caused agents to
+target the wrong location on the first edit — they updated the
+frontmatter list, missed the body `## References` section, and had
+to re-read the file before the second edit landed.
+
+Rule of thumb: every external citation goes in the body
+`## References` list. Frontmatter stays clean for loader-consumed
+fields only.
 
 ### Pitfalls to avoid
 
 - **DO NOT** put `checks:` in a fenced ```yaml block in the body — it
   must be inside the `---` frontmatter delimiters.
+- **DO NOT** add a `references:` key to YAML frontmatter — references
+  live in the bottom `## References` Markdown section. The frontmatter
+  is for loader-consumed schema fields only.
 - **DO NOT** write `mode: intruder` — use `mode: deterministic`.
 - **DO NOT** write `mutations:` as a list of bare payload strings.
 - **DO NOT** write a deterministic/oob check whose mutations are all
