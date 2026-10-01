@@ -921,6 +921,15 @@ def build_grinder_task_prompt(
         f"{page_content}\n"
         f"{rework_section}\n"
         f"## Instructions\n"
+        f"0. Environment notes — bootstrap has already done the following so you\n"
+        f"   do NOT need to re-run them:\n"
+        f"     - `pip install cryptography` is pre-installed in the sandbox.\n"
+        f"     - `PYTHONPATH=/tmp/repo` is exported both in the sandbox env and\n"
+        f'       in your shell rc, so `python -c "import molly.playbook"` and\n'
+        f"       any other clone-root module import works without `pip install -e .`\n"
+        f"       (armory repos do not ship a pyproject.toml).\n"
+        f"   Always run `python` (the system interpreter on PATH), NOT\n"
+        f"   `.venv/bin/python` — there is no venv and `.venv/bin/` is empty.\n"
         f"1. Explore the codebase to understand context\n"
         f"{branch_instruction}"
         f"3. Implement the changes with tests\n"
@@ -1133,6 +1142,14 @@ async def grind_subtask_e2b(
                     "TERM": "xterm-256color",
                     "COLORTERM": "truecolor",
                     "FORCE_COLOR": "1",
+                    # The meshwiki-grinder template does not bake cryptography into
+                    # the image. Several test fixtures (notably the playbook
+                    # contract tests under /data/molly-armory/contract-test/)
+                    # import it, so we set PYTHONPATH and pre-install it in
+                    # bootstrap below. PYTHONPATH lets `molly.playbook`,
+                    # `molly.tools.*`, etc. be imported without `pip install -e .`
+                    # in the cloned repo (which lacks pyproject.toml).
+                    "PYTHONPATH": "/tmp/repo",
                 },
             ),
             timeout=120,  # 2 min to create the sandbox; lifetime timeout is separate
@@ -1193,6 +1210,18 @@ async def grind_subtask_e2b(
                 + _scrub_secrets(result.stderr or "", settings.github_token)
             )
 
+        # Pre-install `cryptography` so test fixtures and molly-armory contract
+        # tests that depend on it don't waste a grinder iteration retrying
+        # `pip install cryptography` (and so we never have to fall back to
+        # `pip install -e .`, which fails on the cloned repo because the
+        # armory/molly playbook repos don't ship a pyproject.toml).
+        await sbx.commands.run(
+            "pip install cryptography -q --no-cache-dir",
+            timeout=300,
+            on_stdout=_on_stdout,
+            on_stderr=_on_stderr,
+        )
+
         # Install Python deps — MeshWiki only; armory repos are not Python packages.
         if is_meshwiki:
             await sbx.commands.run(
@@ -1237,7 +1266,14 @@ async def grind_subtask_e2b(
         pid = pty_handle.pid
 
         # Run Kilo then exit bash so pty_handle.wait() returns.
+        # `export PYTHONPATH=/tmp/repo` is set inline so any `python -c "import
+        # molly.playbook"` smoke check the agent runs sees the cloned repo
+        # modules without needing `pip install -e .` (the cloned armory repos
+        # don't ship a pyproject.toml). The sandbox `envs` block already sets
+        # PYTHONPATH for Kilo's own process; this redundant export covers the
+        # child shell that the agent opens for individual commands.
         kilo_cmd = (
+            f"export PYTHONPATH=/tmp/repo && "
             f"cd /tmp/repo && kilo run --auto --model {model_arg}"
             f' "$(cat /tmp/task.md)" ; exit\n'
         )

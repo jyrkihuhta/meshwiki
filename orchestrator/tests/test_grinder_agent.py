@@ -1230,11 +1230,21 @@ def _e2b_command_sequence() -> list:
       1. git config (combined: email + name + credential helper)
       2. Node.js bootstrap (nodesource + apt + npm install -g kilo)
       3. git clone
-      4. pip install
-    Kilo now runs via PTY (not commands.run), so there is no 5th entry.
+      4. pip install cryptography (pre-installed so the agent doesn't waste
+         an iteration retrying it)
+      5. pip install -e '.[dev]' (MeshWiki only)
+      6. pip install -e '.[dev]' in /tmp/repo/orchestrator (MeshWiki only)
+    Kilo now runs via PTY (not commands.run), so there is no 7th entry.
     """
     ok = MagicMock(exit_code=0, stdout="", stderr="")
-    return [ok, ok, MagicMock(exit_code=0, stdout="", stderr=""), ok]
+    return [
+        ok,
+        ok,
+        MagicMock(exit_code=0, stdout="", stderr=""),
+        ok,
+        ok,
+        ok,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1329,3 +1339,200 @@ async def test_grind_subtask_e2b_sandbox_error() -> None:
 
     assert result["subtask"]["status"] == "failed"
     assert result["subtask"]["pr_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# Task-0004: pre-install cryptography and export PYTHONPATH in bootstrap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grind_subtask_e2b_preinstalls_cryptography_in_bootstrap() -> None:
+    """Acceptance criterion: `pip install cryptography` must run in bootstrap
+    before Kilo is launched, so the agent never wastes an iteration retrying
+    it (and so we don't fall back to `pip install -e .` in repos that lack a
+    pyproject.toml)."""
+    state = _make_state()
+    subtask = _make_subtask()
+    meshwiki_client = AsyncMock()
+    meshwiki_client.get_page = AsyncMock(return_value={"content": "# Task spec"})
+    meshwiki_client.transition_task = AsyncMock(return_value={})
+
+    install_calls: list[str] = []
+
+    mock_sbx = AsyncMock()
+    mock_sbx.kill = AsyncMock()
+
+    async def _fake_run(cmd: str, **kwargs):
+        install_calls.append(cmd)
+        result = AsyncMock()
+        result.exit_code = 0
+        result.stderr = ""
+        return result
+
+    mock_sbx.commands.run = _fake_run
+    mock_sbx.files.write = AsyncMock()
+
+    mock_pty_handle = AsyncMock()
+    mock_pty_handle.pid = 1234
+    mock_pty_handle.wait = AsyncMock(return_value=None)
+    mock_sbx.pty.create = AsyncMock(return_value=mock_pty_handle)
+    mock_sbx.pty.send_stdin = AsyncMock()
+
+    mock_settings = MagicMock(
+        e2b_api_key="e2b-test",
+        github_token="ghp_test",
+        github_repo="owner/repo",
+        minimax_api_key="mm-test",
+        grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
+    )
+
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.AsyncSandbox") as mock_cls:
+            mock_cls.create = AsyncMock(return_value=mock_sbx)
+            await grind_subtask_e2b(state, subtask, meshwiki_client)
+
+    crypto_calls = [c for c in install_calls if "pip install cryptography" in c]
+    assert crypto_calls, (
+        "bootstrap must run `pip install cryptography` before launching Kilo; "
+        f"got install_calls={install_calls!r}"
+    )
+    # Must run before the orchestrator/meshwiki pip install -e steps.
+    crypto_idx = install_calls.index(crypto_calls[0])
+    orchestrator_idxs = [
+        i
+        for i, c in enumerate(install_calls)
+        if "pip install" in c and ("orchestrator" in c or "'.[dev]'" in c)
+    ]
+    assert orchestrator_idxs, "expected at least one meshwiki/orchestrator pip install"
+    assert crypto_idx < min(orchestrator_idxs), (
+        "`pip install cryptography` must run BEFORE the meshwiki/orchestrator "
+        "`pip install -e '.[dev]'` steps."
+    )
+
+
+@pytest.mark.asyncio
+async def test_grind_subtask_e2b_sandbox_env_includes_pythonpath() -> None:
+    """Acceptance criterion: PYTHONPATH=/tmp/repo must be in the sandbox env
+    so that `molly.playbook` and other clone-root modules import cleanly
+    without `pip install -e .`."""
+    state = _make_state()
+    subtask = _make_subtask()
+    meshwiki_client = AsyncMock()
+    meshwiki_client.get_page = AsyncMock(return_value={"content": "# Task spec"})
+    meshwiki_client.transition_task = AsyncMock(return_value={})
+
+    mock_sbx = AsyncMock()
+    mock_sbx.kill = AsyncMock()
+    mock_sbx.commands.run = AsyncMock(
+        side_effect=lambda cmd, **kwargs: AsyncMock(exit_code=0, stdout="", stderr="")
+    )
+    mock_sbx.files.write = AsyncMock()
+    mock_pty_handle = AsyncMock()
+    mock_pty_handle.pid = 1234
+    mock_pty_handle.wait = AsyncMock(return_value=None)
+    mock_sbx.pty.create = AsyncMock(return_value=mock_pty_handle)
+    mock_sbx.pty.send_stdin = AsyncMock()
+
+    mock_settings = MagicMock(
+        e2b_api_key="e2b-test",
+        github_token="ghp_test",
+        github_repo="owner/repo",
+        minimax_api_key="mm-test",
+        grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
+    )
+
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.AsyncSandbox") as mock_cls:
+            mock_cls.create = AsyncMock(return_value=mock_sbx)
+            await grind_subtask_e2b(state, subtask, meshwiki_client)
+
+    create_kwargs = mock_cls.create.await_args.kwargs
+    envs = create_kwargs.get("envs") or {}
+    assert (
+        envs.get("PYTHONPATH") == "/tmp/repo"
+    ), f"sandbox envs must include PYTHONPATH=/tmp/repo; got envs={envs!r}"
+
+
+@pytest.mark.asyncio
+async def test_grind_subtask_e2b_kilo_cmd_exports_pythonpath() -> None:
+    """Acceptance criterion: the kilo command prefix must export
+    PYTHONPATH=/tmp/repo so any `python -c "import molly.playbook"` smoke
+    check the agent runs in the PTY shell sees the clone-root modules."""
+    state = _make_state()
+    subtask = _make_subtask()
+    meshwiki_client = AsyncMock()
+    meshwiki_client.get_page = AsyncMock(return_value={"content": "# Task spec"})
+    meshwiki_client.transition_task = AsyncMock(return_value={})
+
+    mock_sbx = AsyncMock()
+    mock_sbx.kill = AsyncMock()
+    mock_sbx.commands.run = AsyncMock(
+        side_effect=lambda cmd, **kwargs: AsyncMock(exit_code=0, stdout="", stderr="")
+    )
+    mock_sbx.files.write = AsyncMock()
+    mock_pty_handle = AsyncMock()
+    mock_pty_handle.pid = 1234
+    mock_pty_handle.wait = AsyncMock(return_value=None)
+    mock_sbx.pty.create = AsyncMock(return_value=mock_pty_handle)
+    mock_sbx.pty.send_stdin = AsyncMock()
+
+    mock_settings = MagicMock(
+        e2b_api_key="e2b-test",
+        github_token="ghp_test",
+        github_repo="owner/repo",
+        minimax_api_key="mm-test",
+        grinder_model="MiniMax-M2.7",
+        terminal_log_max_chars=10000,
+        dry_run=False,
+    )
+
+    with patch("factory.agents.grinder_agent.get_settings", return_value=mock_settings):
+        with patch("e2b_code_interpreter.AsyncSandbox") as mock_cls:
+            mock_cls.create = AsyncMock(return_value=mock_sbx)
+            await grind_subtask_e2b(state, subtask, meshwiki_client)
+
+    send_stdin = mock_sbx.pty.send_stdin
+    send_stdin.assert_called_once()
+    cmd_bytes = send_stdin.await_args.args[1]
+    cmd = cmd_bytes.decode() if isinstance(cmd_bytes, bytes) else cmd_bytes
+    assert (
+        "export PYTHONPATH=/tmp/repo" in cmd
+    ), f"kilo command prefix must export PYTHONPATH=/tmp/repo; got cmd={cmd!r}"
+
+
+def test_build_grinder_task_prompt_mentions_cryptography_and_pythonpath() -> None:
+    """Acceptance criterion: the task prompt must note that `cryptography` is
+    pre-installed and PYTHONPATH is already exported, AND must mention the
+    correct Python invocation prefix (`python`, not `.venv/bin/python`)."""
+    sub = _make_prompt_subtask("0004-env-preinstalled")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+
+    assert (
+        "cryptography" in prompt
+    ), "task prompt must mention that cryptography is pre-installed"
+    assert (
+        "PYTHONPATH=/tmp/repo" in prompt
+    ), "task prompt must note the PYTHONPATH=/tmp/repo prefix"
+    assert "molly.playbook" in prompt, (
+        "task prompt must give a concrete example of a clone-root module "
+        "import that should now work without `pip install -e .`"
+    )
+    # The prompt must steer the agent away from `.venv/bin/python`.
+    assert ".venv/bin/python" in prompt, (
+        "task prompt must call out that .venv/bin/ is empty and the agent "
+        "should use the system `python` interpreter"
+    )
