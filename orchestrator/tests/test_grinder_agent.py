@@ -498,9 +498,7 @@ def test_scrub_secrets_redacts_token() -> None:
     from factory.agents.grinder_agent import _scrub_secrets
 
     token = "ghp_supersecrettoken123"
-    text = (
-        f"remote: https://x-access-token:{token}@github.com/owner/repo.git failed"
-    )
+    text = f"remote: https://x-access-token:{token}@github.com/owner/repo.git failed"
     scrubbed = _scrub_secrets(text, token)
     assert token not in scrubbed
     assert "***" in scrubbed
@@ -1117,6 +1115,44 @@ def test_is_markdown_only_playbook_diff_helper() -> None:
     assert not _is_markdown_only_playbook_diff(["playbooks/foo.txt"], "playbooks")
     # Bare .md with no playbook root known → still narrow (any markdown diff)
     assert _is_markdown_only_playbook_diff(["README.md"], None)
+
+
+def test_build_grinder_task_prompt_playbook_references_test_playbook_script() -> None:
+    """Acceptance #3: the markdown-only playbook branch of the grinder task
+    prompt must reference the documented ``scripts/test_playbook.sh``
+    wrapper (or its Makefile equivalent). Without this reference, agents
+    fall back to raw ``pytest -k `` invocations that deselect most of
+    the suite and trigger the very failure mode the script exists to
+    prevent.
+
+    The wrapper is invoked as ``./scripts/test_playbook.sh`` (with or
+    without a slug arg). The prompt must mention the path so a parser
+    can locate it, AND describe the per-test timeout / -k-narrowing
+    semantics so the agent understands WHY to prefer it.
+    """
+    sub = _make_prompt_subtask("0001-playbook-script-ref")
+    sub["files_touched"] = ["playbooks/referenced-script.md"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    # The wrapper path must appear (so an agent can invoke it).
+    assert "scripts/test_playbook.sh" in prompt
+    # The 60s timeout guarantee must be advertised so the agent trusts
+    # the wrapper as a known-good invocation.
+    assert "60s" in prompt or "60 s" in prompt or "60-second" in prompt.lower()
+    # And the `-k` narrowing behavior must be mentioned (so the agent
+    # knows the wrapper refuses to silently deselect the suite).
+    assert "-k" in prompt
+    # The raw pytest line must still be there as the lower-level escape
+    # hatch — the wrapper is the *preferred* form, not the only form.
+    assert "python -m pytest tests/test_playbook_loader.py" in prompt
 
 
 # ---------------------------------------------------------------------------
