@@ -8,6 +8,17 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "validate_playbooks.py"
 
+
+def _sections_body() -> str:
+    """The four required ``##`` sections, each with a line of prose."""
+    return (
+        "\n## Overview\n\nO.\n\n## Checks\n\nC.\n\n## Leaves\n\nL.\n\n"
+        "## References\n\n- https://example.com\n"
+    )
+
+
+_VALID_SECTIONS_BODY = _sections_body()
+
 _VALID_FM = (
     "---\n"
     "assignee: factory\n"
@@ -18,6 +29,22 @@ _VALID_FM = (
     "---\n\n"
     "# Body\n\n"
     "Prose goes here.\n"
+    "\n"
+    "## Overview\n"
+    "\n"
+    "Overview prose.\n"
+    "\n"
+    "## Checks\n"
+    "\n"
+    "Checks prose.\n"
+    "\n"
+    "## Leaves\n"
+    "\n"
+    "Leaves prose.\n"
+    "\n"
+    "## References\n"
+    "\n"
+    "- https://example.com/report\n"
 )
 
 _VALID_FM_WITH_CHECKS = (
@@ -33,7 +60,7 @@ _VALID_FM_WITH_CHECKS = (
     "    category: sqli\n"
     "    severity: high\n"
     "---\n\n"
-    "Body.\n"
+    "Body.\n" + _VALID_SECTIONS_BODY
 )
 
 _VALID_TARGET_SPECIFIC = (
@@ -44,7 +71,7 @@ _VALID_TARGET_SPECIFIC = (
     "scope: target-specific\n"
     "target: app.example.com\n"
     "---\n\n"
-    "Body.\n"
+    "Body.\n" + _VALID_SECTIONS_BODY
 )
 
 
@@ -261,10 +288,136 @@ def test_importable_module_exposes_validate_playbook(tmp_path: Path) -> None:
     bad = _write(
         tmp_path,
         "bad.md",
-        "---\nplaybook: x\nscope: generic\n---\n",
+        "---\nplaybook: x\nscope: generic\n---\n" + _VALID_SECTIONS_BODY,
     )
     assert mod.validate_playbook(good) == []
     errs = mod.validate_playbook(bad)
     assert errs
     assert any("name" in e for e in errs)
     assert any("leaf_type" in e for e in errs)
+
+
+def test_missing_required_body_section(tmp_path: Path) -> None:
+    """A playbook without `## Overview` reports a section error."""
+    fm = (
+        "---\n"
+        "playbook: x\n"
+        "name: X\n"
+        "leaf_type: y\n"
+        "scope: generic\n"
+        "---\n\n"
+        "## Checks\n\nC.\n\n## Leaves\n\nL.\n\n## References\n\n- https://example.com\n"
+    )
+    p = _write(tmp_path, "no-overview.md", fm)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(p)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+    assert "## Overview" in proc.stderr
+
+
+def test_all_missing_body_sections(tmp_path: Path) -> None:
+    """When every section is missing, each one is reported."""
+    fm = (
+        "---\n"
+        "playbook: x\n"
+        "name: X\n"
+        "leaf_type: y\n"
+        "scope: generic\n"
+        "---\n\n"
+        "Just prose, no headings.\n"
+    )
+    p = _write(tmp_path, "no-sections.md", fm)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(p)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+    for section in ("Overview", "Checks", "Leaves", "References"):
+        assert f"## {section}" in proc.stderr
+
+
+def test_section_heading_is_case_insensitive(tmp_path: Path) -> None:
+    """`## overview` (lowercase) satisfies the `Overview` requirement."""
+    fm = (
+        "---\n"
+        "playbook: x\n"
+        "name: X\n"
+        "leaf_type: y\n"
+        "scope: generic\n"
+        "---\n\n"
+        "## overview\n\nO.\n\n## checks\n\nC.\n\n## leaves\n\nL.\n\n## references\n\n- https://example.com\n"
+    )
+    p = _write(tmp_path, "lower-case.md", fm)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(p)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_h3_heading_does_not_satisfy_h2_requirement(tmp_path: Path) -> None:
+    """A `### Overview` sub-heading should not count as `## Overview`."""
+    fm = (
+        "---\n"
+        "playbook: x\n"
+        "name: X\n"
+        "leaf_type: y\n"
+        "scope: generic\n"
+        "---\n\n"
+        "### Overview\n\nO.\n\n## Checks\n\nC.\n\n## Leaves\n\nL.\n\n## References\n\n- https://example.com\n"
+    )
+    p = _write(tmp_path, "h3-only.md", fm)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(p)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+    assert "## Overview" in proc.stderr
+
+
+def test_section_validation_runs_even_when_frontmatter_alone_is_valid(
+    tmp_path: Path,
+) -> None:
+    """Valid FM + missing body section fails (catches the 'ship the header
+    only' grinder mistake)."""
+    p = _write(
+        tmp_path,
+        "fm-only.md",
+        "---\nplaybook: x\nname: X\nleaf_type: y\nscope: generic\n---\n\n"
+        "Just prose, no headings.\n",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(p)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+    assert "## Overview" in proc.stderr
+
+
+def test_directory_scan_reports_per_file_section_errors(tmp_path: Path) -> None:
+    """A directory with one valid + one section-invalid file returns 1
+    and points at the offender."""
+    sub = tmp_path / "playbooks"
+    sub.mkdir()
+    _write(sub, "good.md", _VALID_FM)
+    bad = (
+        "---\n"
+        "playbook: x\nname: X\nleaf_type: y\nscope: generic\n"
+        "---\n\nNo sections here.\n"
+    )
+    _write(sub, "bad.md", bad)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(sub)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+    assert "OK" in proc.stdout
+    assert "## Overview" in proc.stderr
