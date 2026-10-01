@@ -1,0 +1,17 @@
+# Bootstrap test-time dependencies installed into the E2B sandbox
+# before Kilo runs. Kept tiny on purpose: only packages that are NOT
+# declared in pyproject.toml and that the agent routinely needs at
+# collection / run time.
+#
+# Pin minimum versions to match the rest of the repo (pyproject.toml
+# uses `>=X.Y` style — do not pin exact versions here so that
+# upstream security fixes flow through automatically).
+#
+# Why a separate file?
+# --------------------
+# The cloned armory / molly repos do NOT ship a pyproject.toml, so
+# `pip install -e .` fails in those sub-tasks. Instead, bootstrap
+# runs `pip install -r bootstrap/requirements.txt` so test-time
+# imports (`cryptography`, etc.) resolve cleanly without a full
+# editable install.
+cryptography>=42.0

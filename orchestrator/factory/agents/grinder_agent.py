@@ -1210,13 +1210,18 @@ async def grind_subtask_e2b(
                 + _scrub_secrets(result.stderr or "", settings.github_token)
             )
 
-        # Pre-install `cryptography` so test fixtures and molly-armory contract
-        # tests that depend on it don't waste a grinder iteration retrying
-        # `pip install cryptography` (and so we never have to fall back to
-        # `pip install -e .`, which fails on the cloned repo because the
-        # armory/molly playbook repos don't ship a pyproject.toml).
+        # Pre-install bootstrap test-time dependencies (`cryptography`, ...)
+        # from `bootstrap/requirements.txt` so test fixtures and molly-armory
+        # contract tests that depend on them don't waste a grinder iteration
+        # retrying `pip install cryptography` (and so we never have to fall
+        # back to `pip install -e .`, which fails on the cloned repo because
+        # the armory/molly playbook repos don't ship a pyproject.toml).
+        #
+        # The requirements file is fetched from the just-cloned repo so it
+        # stays in sync with whatever the agent team commits. See
+        # `bootstrap/requirements.txt` for the package list.
         await sbx.commands.run(
-            "pip install cryptography -q --no-cache-dir",
+            "pip install -r /tmp/repo/bootstrap/requirements.txt -q --no-cache-dir",
             timeout=300,
             on_stdout=_on_stdout,
             on_stderr=_on_stderr,
