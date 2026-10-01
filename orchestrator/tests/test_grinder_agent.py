@@ -1536,3 +1536,221 @@ def test_build_grinder_task_prompt_mentions_cryptography_and_pythonpath() -> Non
         "task prompt must call out that .venv/bin/ is empty and the agent "
         "should use the system `python` interpreter"
     )
+
+
+def test_build_grinder_task_prompt_meshwiki_autofix_python_files_only() -> None:
+    """Acceptance criterion #1 (MeshWiki path) — the autofix step in the
+    MeshWiki grinder task prompt must explicitly state `.py` files only and
+    name the exact target paths (`src/` and `orchestrator/`), so the agent
+    does not invoke black/isort/ruff on shell scripts, Markdown, or YAML.
+
+    Regression guard for Task_0006: the agent ran black/isort/ruff on
+    `scripts/test_playbook.sh` (a shell script), causing two black failures
+    before realizing the mistake. The prompt must name the exact paths
+    so the agent cannot invent its own (Task_0010 acceptance #2)."""
+    sub = _make_prompt_subtask("0001-meshwiki-py-only")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+
+    # Acceptance #1: explicit "Python files only" clause in the autofix step.
+    assert (
+        "Python files only" in prompt
+    ), "MeshWiki autofix step must include an explicit 'Python files only' clause"
+    # Acceptance #1 (negative): the prompt must forbid passing .sh/.md/.yml
+    # files to black/isort/ruff — black parses whatever it's pointed at and
+    # fails noisily on non-Python files.
+    for ext in (".sh", ".md", ".yml"):
+        assert ext in prompt, (
+            f"MeshWiki autofix step must explicitly mention `{ext}` in its "
+            f"do-not-pass list so the agent knows to avoid it"
+        )
+    # Acceptance #2: the exact target paths (`src/` and `orchestrator/`)
+    # must be named in the autofix command, not left for the agent to infer.
+    assert "black src/ orchestrator/" in prompt, (
+        "MeshWiki autofix step must name both `src/` and `orchestrator/` "
+        "as the exact paths to pass to black"
+    )
+    assert "isort --profile black src/ orchestrator/" in prompt, (
+        "MeshWiki autofix step must name both `src/` and `orchestrator/` "
+        "as the exact paths to pass to isort"
+    )
+    assert "ruff check src/ orchestrator/" in prompt, (
+        "MeshWiki autofix step must name both `src/` and `orchestrator/` "
+        "as the exact paths to pass to ruff"
+    )
+    # Acceptance #3: no autofix command may glob `*.sh` / `*.md` / `*.yml`
+    # — the prompt must explicitly tell the agent to pass ONLY the two
+    # Python trees.
+    assert (
+        "*.sh" not in prompt or ".sh`" in prompt
+    ), "autofix command must not pass *.sh to black/isort/ruff"
+
+
+def test_build_grinder_task_prompt_armory_tool_autofix_python_files_only() -> None:
+    """Acceptance criterion #1 (non-MeshWiki tool path) — the armory `tool`
+    task prompt must also gate the autofix step on `.py` files only and
+    name the exact lint target glob (e.g. `molly/tools/`), so the agent
+    doesn't widen the lint scope to playbook Markdown files."""
+    sub = _make_prompt_subtask("0001-tool-py-only")
+    sub["files_touched"] = ["molly/tools/example.py"]
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root="molly/tools",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Acceptance #1: "Python files only" clause.
+    assert (
+        "Python files only" in prompt
+    ), "tool-armory autofix step must include an explicit 'Python files only' clause"
+    # Acceptance #1 (negative): the prompt must forbid passing .sh/.md/.yml
+    # files to the Python linters.
+    for ext in (".sh", ".md", ".yml"):
+        assert ext in prompt, (
+            f"tool-armory autofix step must explicitly mention `{ext}` in its "
+            f"do-not-pass list"
+        )
+    # Acceptance #2: the exact target glob (`molly/tools/`) must be named
+    # in the lint command, not left for the agent to infer.
+    assert "ruff check --fix molly/tools" in prompt
+    assert "black molly/tools" in prompt
+    assert "isort --profile black molly/tools" in prompt
+    # Acceptance #3: the lint must remain gated on `git diff --name-only`
+    # so the agent does NOT run black/isort/ruff when the diff is md-only.
+    assert "git diff --name-only" in prompt
+    assert (
+        "\\.py$" in prompt
+    ), "tool-armory autofix step must check the diff for `.py` files"
+    # The exact SKIP phrasing must be preserved so existing tests stay green.
+    assert "SKIP `ruff check`" in prompt
+
+
+def test_build_grinder_task_prompt_armory_default_autofix_names_lint_target() -> None:
+    """Acceptance criterion #2 (non-MeshWiki default path) — when a non-MeshWiki
+    repo has no `task_repo_root` set, the autofix step must still name an
+    explicit lint target glob (defaulting to `.`) rather than relying on the
+    agent to infer it."""
+    sub = _make_prompt_subtask("0001-armory-default-py-only")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="tool",
+        task_repo_root=None,
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+
+    # Acceptance #1: explicit Python-files-only clause.
+    assert "Python files only" in prompt
+    # Acceptance #2: the default lint target glob (`.`) must be named
+    # explicitly in the lint command — never left to inference.
+    assert "ruff check --fix ." in prompt
+    assert "black ." in prompt
+    assert "isort --profile black ." in prompt
+    # Acceptance #3: forbidden extensions must be enumerated.
+    for ext in (".sh", ".md", ".yml"):
+        assert ext in prompt, (
+            f"default-armory autofix step must explicitly mention `{ext}` "
+            f"in its do-not-pass list"
+        )
+
+
+def test_build_grinder_task_prompt_autofix_forbids_shell_md_yml_globs() -> None:
+    """Acceptance criterion #3 — across ALL artifact branches, no autofix
+    command may pass a `.sh`, `.md`, or `.yml` path to black/isort/ruff.
+    The linters do parse whatever they're handed and produce spurious
+    `Cannot parse: 1:3: ---` / `No Python files found` errors on non-Python
+    files, which the Task_0006 grinder burned two iterations recovering
+    from. We sweep the relevant branches and assert the autofix command
+    line itself never contains those extensions."""
+    branches = [
+        # MeshWiki default (artifact_type=None, is_meshwiki=True)
+        dict(
+            label="meshwiki",
+            kwargs=dict(
+                artifact_type=None,
+                task_repo_root=None,
+                is_meshwiki=True,
+                files_touched=None,
+            ),
+        ),
+        # Armory tool with explicit root
+        dict(
+            label="armory-tool",
+            kwargs=dict(
+                artifact_type="tool",
+                task_repo_root="molly/tools",
+                is_meshwiki=False,
+                files_touched=["molly/tools/example.py"],
+            ),
+        ),
+        # Armory tool with no root (default `.`)
+        dict(
+            label="armory-tool-no-root",
+            kwargs=dict(
+                artifact_type="tool",
+                task_repo_root=None,
+                is_meshwiki=False,
+                files_touched=["molly/tools/example.py"],
+            ),
+        ),
+    ]
+
+    for branch in branches:
+        sub = _make_prompt_subtask(f"py-only-{branch['label']}")
+        sub["files_touched"] = branch["kwargs"].pop("files_touched")
+        prompt = build_grinder_task_prompt(
+            subtask=sub,
+            page_content="task body",
+            review_feedback="",
+            is_rework=False,
+            artifact_type=branch["kwargs"]["artifact_type"],
+            task_repo_root=branch["kwargs"]["task_repo_root"],
+            is_meshwiki=branch["kwargs"]["is_meshwiki"],
+            base_branch="staging",
+        )
+
+        # The autofix command itself (the line containing `black` / `isort`
+        # / `ruff check`/`ruff --fix`) must not contain a `.sh`/`.md`/`.yml`
+        # suffix as an argument — the agent must not pass those paths.
+        for cmd in re.findall(
+            r"(?:^|\n)\s*(?:black|isort|ruff[^\n]*) [^\n]*",
+            prompt,
+        ):
+            # Each token after the linter name must not end in a forbidden
+            # extension (the grep'd `git diff ...` line is excluded because
+            # it does not invoke a linter).
+            for tok in cmd.split():
+                if tok in {"&&", "||", "|", ";", "#"}:
+                    continue
+                # Skip linter flags like `--fix`, `--check`, `--profile`, `black`.
+                if tok in {
+                    "black",
+                    "isort",
+                    "ruff",
+                    "--fix",
+                    "--check",
+                    "--profile",
+                    "check",
+                }:
+                    continue
+                assert not re.search(r"\.(sh|md|yml|yaml)$", tok), (
+                    f"[{branch['label']}] autofix command line passes a "
+                    f"non-Python path `{tok}` to a Python linter. "
+                    f"Full command: {cmd!r}"
+                )
