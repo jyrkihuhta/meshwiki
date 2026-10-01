@@ -1908,3 +1908,149 @@ def test_build_grinder_task_prompt_autofix_forbids_shell_md_yml_globs() -> None:
                     f"non-Python path `{tok}` to a Python linter. "
                     f"Full command: {cmd!r}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Common Mistakes to Avoid footer (Task_0012)
+# ---------------------------------------------------------------------------
+
+
+def test_common_mistakes_footer_lists_all_four_rules() -> None:
+    """Acceptance criterion: the footer lists no `pip install -e .`, no
+    formatters on non-Python files, no duplicate test runs, and points at
+    `scripts/validate_playbooks.py`."""
+    from factory.armory_prompts import COMMON_MISTAKES_FOOTER
+
+    assert (
+        "pip install -e ." in COMMON_MISTAKES_FOOTER
+    ), "footer must forbid `pip install -e .`"
+    assert (
+        "ruff check" in COMMON_MISTAKES_FOOTER
+        and "black --check" in COMMON_MISTAKES_FOOTER
+    ), "footer must forbid running python formatters on non-python files"
+    assert (
+        "re-run" in COMMON_MISTAKES_FOOTER.lower()
+        or "rerun" in COMMON_MISTAKES_FOOTER.lower()
+    ), "footer must forbid duplicate test runs"
+    assert (
+        "scripts/validate_playbooks.py" in COMMON_MISTAKES_FOOTER
+    ), "footer must point at scripts/validate_playbooks.py for YAML validation"
+
+
+def test_get_common_mistakes_footer_returns_string() -> None:
+    """The accessor must return a non-empty string usable as a prompt suffix."""
+    from factory.armory_prompts import get_common_mistakes_footer
+
+    footer = get_common_mistakes_footer()
+    assert isinstance(footer, str)
+    assert footer.strip(), "footer must contain substantive content"
+    assert "Common Mistakes to Avoid" in footer
+
+
+def test_build_grinder_task_prompt_appends_common_mistakes_footer_fresh_armory() -> (
+    None
+):
+    """A fresh armory (playbook) dispatch must include the standardized
+    footer via the helper — not as a copy-pasted block in the template."""
+    from factory.armory_prompts import COMMON_MISTAKES_FOOTER
+
+    sub = _make_prompt_subtask("0012-fresh-armory")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "Common Mistakes to Avoid" in prompt
+    assert "scripts/validate_playbooks.py" in prompt
+    assert "pip install -e ." in prompt
+    assert COMMON_MISTAKES_FOOTER in prompt, (
+        "rendered prompt must include the full helper output verbatim — "
+        "indicates the template references the helper, not a copy-pasted literal"
+    )
+
+
+def test_build_grinder_task_prompt_appends_common_mistakes_footer_rework_armory() -> (
+    None
+):
+    """A rework armory dispatch must also carry the footer — reworks are
+    the path where stale, copy-pasted rules tend to drift apart from
+    fresh-run rules."""
+    sub = _make_prompt_subtask("0012-rework-armory")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="Schema violation: fix mode.",
+        is_rework=True,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert "Common Mistakes to Avoid" in prompt
+    assert "scripts/validate_playbooks.py" in prompt
+
+
+def test_build_grinder_task_prompt_appends_common_mistakes_footer_meshwiki() -> None:
+    """MeshWiki code tasks (artifact_type=None) must still get the footer —
+    the rules about `pip install -e .` and formatter-on-non-python apply
+    there as well."""
+    sub = _make_prompt_subtask("0012-meshwiki")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type=None,
+        task_repo_root=None,
+        is_meshwiki=True,
+        base_branch="staging",
+    )
+    assert "Common Mistakes to Avoid" in prompt
+    assert "pip install -e ." in prompt
+
+
+def test_build_grinder_task_prompt_footer_appears_exactly_once() -> None:
+    """The footer must not be concatenated twice (e.g. once in the armory
+    protocol and once at the bottom). Single occurrence guarantees the
+    single-source-of-truth invariant."""
+    sub = _make_prompt_subtask("0012-no-dup-footer")
+    prompt = build_grinder_task_prompt(
+        subtask=sub,
+        page_content="task body",
+        review_feedback="",
+        is_rework=False,
+        artifact_type="playbook",
+        task_repo_root="playbooks",
+        is_meshwiki=False,
+        base_branch="staging",
+    )
+    assert prompt.count("Common Mistakes to Avoid") == 1, (
+        f"footer heading must appear exactly once; got "
+        f"{prompt.count('Common Mistakes to Avoid')}"
+    )
+
+
+def test_grinder_agent_imports_footer_from_helper_not_literal() -> None:
+    """Static guard: ``grinder_agent.py`` must reference the footer via
+    the helper (template inheritance), not by redefining the heading or
+    duplicating rule text inline."""
+    src_path = (
+        Path(__file__).resolve().parent.parent
+        / "factory"
+        / "agents"
+        / "grinder_agent.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    assert "get_common_mistakes_footer" in src, (
+        "grinder_agent.py must import the footer helper to ensure template "
+        "inheritance (single source of truth)"
+    )
+    assert "## Common Mistakes to Avoid" not in src, (
+        "grinder_agent.py must not redefine the footer heading; it should "
+        "delegate to the helper so edits propagate everywhere"
+    )

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 
-from ..armory_prompts import get_armory_prompt
+from ..armory_prompts import get_armory_prompt, get_common_mistakes_footer
 from ..config import get_settings
 from ..cost import sandbox_time_to_usd, tokens_to_usd
 from ..state import FactoryState, SubTask
@@ -1010,6 +1010,7 @@ def build_grinder_task_prompt(
         f"{step9_note if step9_verb == 'Create a PR' else ''}"
         f"   The PR title MUST start with '[Factory] ' so it is clearly identified as automated.\n"
         f"10. Print the PR URL on the last line of your output"
+        f"{get_common_mistakes_footer()}"
     )
 
 
