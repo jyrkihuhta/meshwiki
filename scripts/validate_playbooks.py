@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Validate YAML frontmatter in Molly playbook ``.md`` files.
+"""Validate YAML frontmatter + body sections in Molly playbook ``.md`` files.
 
 Playbooks are Markdown files with a YAML frontmatter block delimited by
-``---`` markers. This script validates the frontmatter contract that
-``orchestrator/factory/nodes/validate_armory.py`` checks on PR diffs, but
-runs locally on disk so a grinder agent can verify a freshly written
-playbook before opening a PR — without waiting for CI.
+``---`` markers followed by prose with required ``## Overview``, ``## Checks``,
+``## Leaves``, and ``## References`` sections. This script validates the
+frontmatter contract that ``orchestrator/factory/nodes/validate_armory.py``
+checks on PR diffs, plus the body sections that the CI gate doesn't currently
+inspect, and runs locally on disk so a grinder agent can verify a freshly
+written playbook before opening a PR — without waiting for CI.
 
 Usage:
     python scripts/validate_playbooks.py <file.md> [<file.md> ...]
     python scripts/validate_playbooks.py playbooks/      # all *.md under dir
 
 Exit codes:
-    0  every file passed (frontmatter is valid YAML and has required keys)
+    0  every file passed (frontmatter is valid YAML and has required keys,
+       and all required body sections are present)
     1  one or more files failed validation (errors printed to stderr)
     2  usage error (no files, bad path)
 """
@@ -34,6 +37,8 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
     {"critical", "high", "medium", "low", "info", "unknown"}
 )
 _CHECK_REQUIRED_KEYS: tuple[str, ...] = ("id", "name", "mode", "category", "severity")
+_REQUIRED_SECTIONS: tuple[str, ...] = ("Overview", "Checks", "Leaves", "References")
+_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
 
 
@@ -68,6 +73,23 @@ def _load_frontmatter(path: Path) -> tuple[dict | None, str | None]:
     if not isinstance(parsed, dict):
         return None, f"frontmatter must be a YAML mapping, got {type(parsed).__name__}"
     return parsed, None
+
+
+def _validate_sections(filename: str, body: str) -> list[str]:
+    """Validate that all required ``## `` Markdown sections are present.
+
+    Returns a list of error strings — one per missing section. The check is
+    case-insensitive and ignores extra leading ``#`` characters (so ``###``
+    counts as a sub-heading and does NOT satisfy an ``## Overview``
+    requirement, matching how a Markdown reader would render the TOC).
+    """
+    headings = {match.strip() for match in _SECTION_HEADING_RE.findall(body)}
+    headings_lower = {h.lower() for h in headings}
+    return [
+        f"`{filename}`: missing required body section `## {name}`"
+        for name in _REQUIRED_SECTIONS
+        if name.lower() not in headings_lower
+    ]
 
 
 def _validate_checks(filename: str, checks: object) -> list[str]:
@@ -136,6 +158,10 @@ def validate_playbook(path: Path) -> list[str]:
 
     if "checks" in fm:
         errors.extend(_validate_checks(filename, fm["checks"]))
+
+    text = path.read_text(encoding="utf-8")
+    body = _FRONTMATTER_RE.sub("", text, count=1)
+    errors.extend(_validate_sections(filename, body))
 
     return errors
 
