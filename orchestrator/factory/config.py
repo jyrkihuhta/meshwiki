@@ -57,9 +57,7 @@ class Settings(BaseSettings):
     pm_decompose_model: str = (
         "MiniMax-M3"  # FACTORY_PM_DECOMPOSE_MODEL — task decomposition
     )
-    pm_review_model: str = (
-        "MiniMax-M3"  # FACTORY_PM_REVIEW_MODEL — full review model
-    )
+    pm_review_model: str = "MiniMax-M3"  # FACTORY_PM_REVIEW_MODEL — full review model
     pm_triage_model: str = (
         "MiniMax-M3"  # FACTORY_PM_TRIAGE_MODEL — fast triage; empty = skip triage
     )
@@ -145,9 +143,7 @@ class Settings(BaseSettings):
     insight_interval_seconds: int = (
         604800  # FACTORY_INSIGHT_INTERVAL_SECONDS — weekly by default
     )
-    insight_model: str = (
-        "MiniMax-M3"  # FACTORY_INSIGHT_MODEL — LLM for synthesis
-    )
+    insight_model: str = "MiniMax-M3"  # FACTORY_INSIGHT_MODEL — LLM for synthesis
     class_gap_researcher_enabled: bool = (
         False  # FACTORY_CLASS_GAP_RESEARCHER_ENABLED — enable the gap-research bot
     )
@@ -166,6 +162,27 @@ class Settings(BaseSettings):
         # playbook buys nothing (no real proprietary API/quirk to exploit); leave
         # off there. Flip on for a future production deployment against real
         # bug-bounty targets, where target-specific quirks are worth tracking.
+    )
+    # Armory-research consumer bot. Gap analysis lives in Molly's
+    # molly.armory.research module (one taxonomy, one coverage model); this bot
+    # only turns its findings into factory task pages. Supersedes the
+    # class-gap-researcher once enabled — keep both off together during cutover.
+    armory_research_enabled: bool = (
+        False  # FACTORY_ARMORY_RESEARCH_ENABLED — enable the findings-consumer bot
+    )
+    armory_research_interval_seconds: int = (
+        86400  # FACTORY_ARMORY_RESEARCH_INTERVAL_SECONDS — daily by default
+    )
+    armory_research_sources: str = (
+        "h1,llm-brainstorm"  # FACTORY_ARMORY_RESEARCH_SOURCES — adapters to run
+    )
+    armory_research_max_tasks_per_run: int = (
+        5  # FACTORY_ARMORY_RESEARCH_MAX_TASKS_PER_RUN — cap task pages per tick
+    )
+    armory_research_cmd: str = (
+        # Shell-split command that emits a JSON array of findings on stdout.
+        # Overridable so the pull transport can change without code edits.
+        "python -m molly.armory.research"  # FACTORY_ARMORY_RESEARCH_CMD
     )
     daily_budget_usd: float = (
         0.0  # FACTORY_DAILY_BUDGET_USD — max USD to spend per calendar day (0 = disabled)

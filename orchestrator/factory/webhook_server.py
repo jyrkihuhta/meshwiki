@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from .bots.armory_research import ArmoryResearchBot
 from .bots.bookkeeper import BookkeeperBot
 from .bots.ci_fixer import CIFixerBot
 from .bots.class_gap_researcher import ClassGapResearcherBot
@@ -208,8 +209,8 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
                 # the bookkeeper's 2h stale window. For `review` tasks we
                 # leave the page alone — a PR is live and stale-pr / ci-fixer
                 # bots own that lifecycle.
-                current_status = (
-                    (task.get("metadata") or {}).get("status") or task.get("status")
+                current_status = (task.get("metadata") or {}).get("status") or task.get(
+                    "status"
                 )
                 if current_status == "in_progress":
                     logger.info(
@@ -285,8 +286,7 @@ async def _drain_graph_tasks(timeout_seconds: float) -> None:
         return
 
     logger.info(
-        "factory: shutdown — draining %d in-flight graph task(s) "
-        "with timeout=%.1fs",
+        "factory: shutdown — draining %d in-flight graph task(s) " "with timeout=%.1fs",
         len(pending),
         timeout_seconds,
     )
@@ -357,6 +357,13 @@ async def lifespan(app: FastAPI):
             "factory: class-gap-researcher bot enabled (interval=%ds, model=%s)",
             settings.class_gap_researcher_interval_seconds,
             settings.class_gap_researcher_model,
+        )
+    if settings.armory_research_enabled:
+        bot_registry.register(ArmoryResearchBot())
+        logger.info(
+            "factory: armory-research bot enabled (interval=%ds, sources=%s)",
+            settings.armory_research_interval_seconds,
+            settings.armory_research_sources,
         )
     if settings.purgatory_enabled:
         bot_registry.register(PurgatoryBot())
@@ -643,7 +650,10 @@ async def tasks(
         settings.meshwiki_url, settings.meshwiki_api_key
     ) as client:
         items = await client.list_tasks(
-            status=status, assignee=assignee, repo=repo, parent_task=parent_task,
+            status=status,
+            assignee=assignee,
+            repo=repo,
+            parent_task=parent_task,
         )
 
     by_status: dict[str, int] = {}
