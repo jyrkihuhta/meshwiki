@@ -310,6 +310,8 @@ class ArmoryResearchBot(BaseBot):
                 f"{err.decode('utf-8', 'replace')[:300]}"
             )
         data = json.loads(out.decode("utf-8"))
-        if not isinstance(data, list):
-            raise RuntimeError("research module did not emit a JSON array")
-        return data
+        # Frozen contract: a JSON object {"findings": [...]} (an optional
+        # sibling "unmapped" array is triage-only and ignored here).
+        if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+            raise RuntimeError('research module did not emit {"findings": [...]}')
+        return data["findings"]
