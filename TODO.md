@@ -459,7 +459,7 @@ the rest come from reading the code. Fix HIGH first.
 
 ### HIGH
 
-- [ ] **H1 · Data loss: page names containing a dot collide** — **verified**.
+- [x] **H1 · Data loss: page names containing a dot collide** — **verified**.
   `FileStorage._get_path` builds the filename with `.with_suffix(".md")`, which
   replaces everything after the last dot: `Release 1.2` → `Release_1.md`,
   `v2.0 Notes` → `v2.md`, `config.yaml` → `config.md`. Saving `Release 1.2`
@@ -468,7 +468,8 @@ the rest come from reading the code. Fix HIGH first.
   `_path_to_name` symmetric; add a one-off check for existing truncated files
   and collisions before switching; regression tests for dotted names.
   (`core/storage.py:_get_path`)
-- [ ] **H2 · Stored XSS: rendered Markdown isn't sanitized** — **verified**.
+  ✅ **Fixed in #223** — `.md` is appended instead of `with_suffix`; no existing dotted page files on prod/staging, so no migration.
+- [x] **H2 · Stored XSS: rendered Markdown isn't sanitized** — **verified**.
   Raw HTML (`<script>`, `<img onerror=…>`) passes through `parse_wiki_content`
   and is emitted with `| safe` (`page/view.html`, `page/revision.html`,
   `partials/preview.html`, `partials/page_content_fragment.html`); the CSP allows
@@ -481,20 +482,23 @@ the rest come from reading the code. Fix HIGH first.
   Markdown output and the macro HTML; then move inline scripts (theme bootstrap
   in `base.html`, task-terminal JS emitted by the parser) to static files or
   nonces and drop `'unsafe-inline'` from `script-src`.
-- [ ] **H3 · XSS in `/api/autocomplete`** — **verified** (page names may contain
+  ✅ **Fixed** — rendered HTML is allowlist-sanitized (`core/sanitize.py`, `nh3`) as the last Markdown postprocessor; all inline script/handlers moved to `static/js`; CSP `script-src` no longer has `'unsafe-inline'`. See "Found while fixing H2" below.
+- [x] **H3 · XSS in `/api/autocomplete`** — **verified** (page names may contain
   `<`, `>` and `"`). `main.py:api_autocomplete` interpolates names unescaped into
   `data-value="{name}">{name}`, so a page with a crafted name runs script in
   every editor's `[[` dropdown.
   *Fix:* `html_escape(name, quote=True)` for the attribute and the text; consider
   restricting the page-name charset in `_validate_page_name`.
+  ✅ **Fixed in #223** — names are HTML-escaped in the attribute and the text.
 
 ### MEDIUM
 
-- [ ] **M1 · `/ws/factory` WebSocket is unauthenticated.** `AuthMiddleware`
+- [x] **M1 · `/ws/factory` WebSocket is unauthenticated.** `AuthMiddleware`
   exempts all `/ws/` paths ("WebSockets do their own auth"); `/ws/graph` and
   `/ws/terminal` check the session, but `ws_factory` only checks
   `factory_enabled`, so anyone can read the live factory event stream.
   *Fix:* apply the same `auth_enabled` + session check as `ws_graph`.
+  ✅ **Fixed in #223** — `/ws/factory` applies the same session check as `/ws/graph`.
 - [ ] **M2 · Login lockout is global behind Caddy.** The rate limiter keys on
   `request.client.host`, and uvicorn runs without `--proxy-headers`, so every
   client appears as Caddy's IP: five bad logins from anyone lock **everyone** out
@@ -533,6 +537,45 @@ the rest come from reading the code. Fix HIGH first.
   synchronous inside async paths.
 - [ ] **L6 · `CalloutExtension()` is registered twice** in the parser's extension
   list; remove the duplicate.
+
+### Found while fixing H2
+
+Writing browser tests for H2 turned up four more injection points. All fixed in
+the same change, each with a regression test:
+
+- [x] **`/api/pages/{name}/preview` returned the page's raw source as HTML.** Every
+  wiki link fetches it on hover (`hx-get`) and swaps it into the page, so hovering
+  a link to a page containing `<img onerror=…>`/`<script>` ran it, bypassing any
+  render-time sanitizing. It now renders the existing `partials/hover_card.html`
+  with a plain-text excerpt (`core/excerpt.py`), autoescaped.
+- [x] **`hover_card.js` was a silent no-op** (it returned early because it ran in
+  `<head>` before the card existed), so the hover card never displayed. Rewritten
+  to look the card up per event and show it on `htmx:afterSettle` (htmx re-applies
+  the response's attributes during settle, which wiped an inline `display`).
+- [x] **`graph.js` search results built HTML from page names unescaped** (the
+  `data-name` attribute and the highlighted text). Both are escaped now.
+- [x] **`onsubmit="return confirm('… {{ page_name }} …')"` in three templates**
+  (`view`, `history`, `revision`): Jinja's `&#39;` decodes back to `'` before the JS
+  runs, so a page named `x');alert(1);('` broke out of the string. Replaced by
+  `data-confirm` + a delegated capture-phase handler in `behaviors.js`.
+
+Other changes that came with it: the staging deploy now waits for the web image to
+be published (staging runs app code from a mount but dependencies from the image,
+so a new dependency like `nh3` must not be deployed ahead of its image); the CSP
+gained `object-src 'none'; base-uri 'self'`; the CSP/sanitization E2E tests run in
+the pre-merge check on PRs into `main`.
+
+**Residual risks / follow-ups**
+- [ ] `data-*` hooks are allowlisted per tag but can't tell macro output from
+  hand-written HTML, so page authors can forge them (e.g. an editable table cell
+  pointing at another page's metadata). Needs a victim to double-click into the cell
+  and type; low impact. Closing it fully means marking trusted macro output.
+- [ ] `id` is allowed in content (needed for headings/footnotes), so DOM clobbering
+  of an element id is possible in principle; no current script looks up a
+  content-supplied id.
+- [ ] `style-src` still has `'unsafe-inline'` (templates use `style=`); removing it
+  is the next CSP step.
+- [ ] CSRF tokens (see M3) — still only `SameSite=lax`.
 
 ---
 

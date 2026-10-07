@@ -1,8 +1,28 @@
 """Unit tests for the <<TaskStatus>> macro."""
 
+from html.parser import HTMLParser
+from pathlib import Path
+
 import pytest
 
+import meshwiki
 from meshwiki.core.parser import _mermaid_diagram, parse_wiki_content
+
+STATIC_JS = Path(meshwiki.__file__).parent / "static" / "js"
+
+
+def _parse_elements(html: str) -> list[tuple[str, dict[str, str | None]]]:
+    """Return (tag, attributes) for every start tag in *html*."""
+    found: list[tuple[str, dict[str, str | None]]] = []
+
+    class _Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            found.append((tag, dict(attrs)))
+
+        handle_startendtag = handle_starttag
+
+    _Collector().feed(html)
+    return found
 
 
 def render(
@@ -250,20 +270,42 @@ class TestTerminalSection:
         assert "task-status-terminal" in html
         assert "task-terminal-body" in html
 
-    def test_websocket_url_in_script(self):
+    def test_terminal_page_name_in_data_attribute(self):
         html = render(
             "<<TaskStatus>>",
             page_name="factory/Task_001",
             metadata={"type": "task", "status": "in_progress"},
         )
-        assert "/ws/terminal/" in html
-        assert "factory/Task_001" in html
+        assert 'data-terminal-page="factory/Task_001"' in html
 
-    def test_xterm_constructor_in_script(self):
+    def test_terminal_emits_no_inline_script_or_handler(self):
+        # The sanitizer strips <script> and on*= handlers, and the CSP forbids
+        # them; the terminal's behaviour lives in static/js/task_terminal.js.
         html = render(
             "<<TaskStatus>>", metadata={"type": "task", "status": "in_progress"}
         )
-        assert "new Terminal(" in html
+        assert "<script" not in html
+        assert "onclick" not in html
+
+    def test_terminal_page_name_is_escaped(self):
+        html = render(
+            "<<TaskStatus>>",
+            page_name='x"><img src=x onerror=alert(1)>',
+            metadata={"type": "task", "status": "in_progress"},
+        )
+        # The hostile name must stay inert text inside the attribute value:
+        # no <img> element and no event-handler attribute on any element.
+        elements = _parse_elements(html)
+        assert all(tag != "img" for tag, _attrs in elements)
+        assert all(
+            not name.startswith("on") for _tag, attrs in elements for name in attrs
+        )
+
+    def test_task_terminal_js_streams_the_terminal_websocket(self):
+        js = (STATIC_JS / "task_terminal.js").read_text()
+        assert "/ws/terminal/" in js
+        assert "new window.Terminal(" in js
+        assert "data-terminal-page" in js
 
     def test_terminal_absent_for_draft(self):
         html = render("<<TaskStatus>>", metadata={"type": "task", "status": "draft"})

@@ -122,6 +122,12 @@
         return div.innerHTML;
     }
 
+    // Escape for use inside a double-quoted HTML attribute (escapeHtml leaves
+    // quotes alone, which would let a page name close the attribute).
+    function escapeAttr(text) {
+        return escapeHtml(String(text)).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
     function getThemeColor(varName, fallback) {
         return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || fallback;
     }
@@ -323,7 +329,7 @@
                     var highlighted = highlightMatch(n.id, query);
                     return (
                         '<div class="graph-search-result-item" data-name="' +
-                        n.id +
+                        escapeAttr(n.id) +
                         '" data-index="' +
                         i +
                         '">' +
@@ -349,13 +355,13 @@
         var lowerText = text.toLowerCase();
         var lowerQuery = query.toLowerCase();
         var idx = lowerText.indexOf(lowerQuery);
-        if (idx === -1) return text;
+        if (idx === -1) return escapeHtml(text);
         return (
-            text.slice(0, idx) +
+            escapeHtml(text.slice(0, idx)) +
             "<mark>" +
-            text.slice(idx, idx + query.length) +
+            escapeHtml(text.slice(idx, idx + query.length)) +
             "</mark>" +
-            text.slice(idx + query.length)
+            escapeHtml(text.slice(idx + query.length))
         );
     }
 

@@ -1,5 +1,8 @@
 """Unit tests for the NewPage macro."""
 
+from pathlib import Path
+
+import meshwiki
 from meshwiki.core.parser import (
     NEWPAGE_PATTERN,
     NewPageExtension,
@@ -7,6 +10,8 @@ from meshwiki.core.parser import (
     _render_newpage_macro,
     parse_wiki_content,
 )
+
+STATIC_JS = Path(meshwiki.__file__).parent / "static" / "js"
 
 
 class TestNewPagePattern:
@@ -57,7 +62,7 @@ class TestRenderNewPageMacro:
 
     def test_with_parent_page(self):
         html = _render_newpage_macro("MyTemplate", "New page", "Projects")
-        assert "/page/Projects/" in html
+        assert 'data-newpage-parent="Projects"' in html
 
     def test_default_button_when_empty(self):
         html = _render_newpage_macro("MyTemplate", "", None)
@@ -67,16 +72,27 @@ class TestRenderNewPageMacro:
         html = _render_newpage_macro("MyTemplate", "New page", None)
         assert 'placeholder="Page name"' in html
 
-    def test_onclick_navigates_correctly(self):
+    def test_markup_carries_data_hooks_not_inline_handler(self):
+        # The sanitizer strips on*= handlers and the CSP forbids inline script, so
+        # the macro only emits data-* hooks; behaviors.js does the navigation.
         html = _render_newpage_macro("MyTemplate", "New page", None)
-        assert "onclick=" in html
-        assert "/page/" in html
-        assert "template=MyTemplate" in html
+        assert "onclick" not in html
+        assert 'data-newpage-template="MyTemplate"' in html
+        assert "data-newpage-parent" not in html
 
-    def test_onclick_with_parent(self):
+    def test_markup_with_parent(self):
         html = _render_newpage_macro("MyTemplate", "Create", "Projects")
-        assert "/page/Projects/" in html
-        assert "template=MyTemplate" in html
+        assert 'data-newpage-template="MyTemplate"' in html
+        assert 'data-newpage-parent="Projects"' in html
+
+    def test_behaviors_js_navigates_to_editor(self):
+        js = (STATIC_JS / "behaviors.js").read_text()
+        assert ".new-page-button" in js
+        assert "data-newpage-template" in js
+        assert "data-newpage-parent" in js
+        assert "/edit" in js
+        assert "?template=" in js
+        assert "encodeURIComponent" in js
 
     def test_html_escaping(self):
         html = _render_newpage_macro('Template"X', 'Create "X"', None)
@@ -126,8 +142,11 @@ class TestNewPageInContent:
         assert "Create task" in html
 
     def test_with_parent_in_content(self):
+        # Survives the sanitizer: the data hooks are on its allowlist.
         html = parse_wiki_content('<<NewPage(MyTemplate, "Create", Projects)>>')
-        assert "/page/Projects/" in html
+        assert 'data-newpage-parent="Projects"' in html
+        assert 'data-newpage-template="MyTemplate"' in html
+        assert "onclick" not in html
 
     def test_multiple_macros(self):
         html = parse_wiki_content(

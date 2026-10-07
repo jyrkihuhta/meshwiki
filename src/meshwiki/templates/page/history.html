@@ -59,7 +59,7 @@
                         {% endif %}
                         <form method="post"
                               action="/page/{{ page_name.replace(' ', '_') }}/restore/{{ rev.revision }}"
-                              onsubmit="return confirm('Restore &quot;{{ page_name }}&quot; to revision {{ rev.revision }}?');"
+                              data-confirm="Restore &quot;{{ page_name }}&quot; to revision {{ rev.revision }}?"
                               style="display:inline">
                             <button type="submit" class="btn btn-small btn-primary">Restore</button>
                         </form>

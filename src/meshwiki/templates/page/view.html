@@ -28,7 +28,7 @@
                 <a href="/page/{{ page.name.replace(' ', '_') }}/edit" class="btn">Edit</a>
                 <a href="/page/{{ page.name.replace(' ', '_') }}/history" class="btn">History</a>
                 <form method="post" action="/page/{{ page.name.replace(' ', '_') }}/delete"
-                      onsubmit="return confirm('Delete &quot;{{ page.title }}&quot;? This cannot be undone.');"
+                      data-confirm="Delete &quot;{{ page.title }}&quot;? This cannot be undone."
                       style="display:inline">
                     <button type="submit" class="btn btn-danger">Delete</button>
                 </form>
@@ -38,6 +38,7 @@
 
     <div class="page-body">
         <div class="page-content" id="page-content"
+             data-page-name="{{ page.name }}"
              hx-get="/api/pages/{{ page.name.replace(' ', '_') }}/fragment"
              hx-trigger="metatable-refresh"
              hx-swap="innerHTML">
@@ -132,37 +133,5 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script>
-(function () {
-  var proto = location.protocol === "https:" ? "wss:" : "ws:";
-  // Store on window so base.html's htmx:beforeSwap handler can close it on navigation.
-  window._meshwikiWS = new WebSocket(proto + "//" + location.host + "/ws/graph");
-  var ws = window._meshwikiWS;
-  var debounce;
-
-  var currentPage = {{ page.name | tojson }};
-  ws.addEventListener("message", function (ev) {
-    try {
-      var msg = JSON.parse(ev.data);
-      if (msg.type === "page_updated" && msg.page === currentPage) {
-        // Debounce: wait 800ms after the last event before refreshing.
-        clearTimeout(debounce);
-        debounce = setTimeout(function () {
-          htmx.trigger(document.getElementById("page-content"), "metatable-refresh");
-        }, 800);
-      }
-    } catch (e) {}
-  });
-
-  // After HTMX swaps in new content, re-initialise Mermaid diagrams.
-  document.addEventListener("htmx:afterSwap", function (e) {
-    if (e.target && e.target.id === "page-content") {
-      if (typeof mermaid !== "undefined") {
-        var nodes = e.target.querySelectorAll(".mermaid:not([data-processed])");
-        if (nodes.length) mermaid.run({ nodes: nodes });
-      }
-    }
-  });
-})();
-</script>
+<script src="/static/js/page_live.js"></script>
 {% endblock %}
