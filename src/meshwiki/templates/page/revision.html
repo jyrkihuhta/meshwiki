@@ -25,7 +25,7 @@
                 {% endif %}
                 <form method="post"
                       action="/page/{{ page_name.replace(' ', '_') }}/restore/{{ revision.revision }}"
-                      onsubmit="return confirm('Restore &quot;{{ page_name }}&quot; to this revision?');"
+                      data-confirm="Restore &quot;{{ page_name }}&quot; to this revision?"
                       style="display:inline">
                     <button type="submit" class="btn btn-primary">Restore this revision</button>
                 </form>
