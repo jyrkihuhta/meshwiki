@@ -118,8 +118,14 @@ class FileStorage(Storage):
         final path.  Raises ``ValueError`` if the resolved path escapes the
         data directory (defense-in-depth against path traversal).
         """
-        parts = [seg.replace(" ", "_") for seg in name.split("/")]
-        path = self.base_path.joinpath(*parts).with_suffix(".md")
+        parts = [seg.replace(" ", "_") for seg in name.split("/") if seg]
+        if not parts:
+            raise ValueError(f"Invalid page name: {name!r}")
+        # Append ".md" rather than using with_suffix(): with_suffix replaces
+        # everything after the last dot, so "Release 1.2" would map to
+        # Release_1.md and overwrite the page "Release 1".
+        parts[-1] = f"{parts[-1]}.md"
+        path = self.base_path.joinpath(*parts)
         # Defense-in-depth: ensure the resolved path stays inside base_path.
         try:
             path.resolve().relative_to(self.base_path.resolve())
