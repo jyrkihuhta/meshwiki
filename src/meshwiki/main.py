@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from html import escape as html_escape
 from pathlib import Path
 from typing import Callable
 
@@ -1072,8 +1073,11 @@ async def api_autocomplete(request: Request, q: str = ""):
         all_names = await storage.list_pages()
     q_lower = q.lower()
     matches = [p for p in all_names if q_lower in p.lower()][:10]
+    # Page names may contain <, > and quotes, so escape both the attribute and
+    # the text (the browser unescapes data-value, so inserted links are exact).
     items = "".join(
-        f'<li class="autocomplete-item" data-value="{name}">{name}</li>'
+        f'<li class="autocomplete-item" data-value="{html_escape(name, quote=True)}">'
+        f"{html_escape(name)}</li>"
         for name in matches
     )
     return HTMLResponse(f'<ul class="autocomplete-list">{items}</ul>' if items else "")
@@ -1202,6 +1206,13 @@ async def ws_factory(websocket: WebSocket):
     if not settings.factory_enabled:
         await websocket.close(code=1008)
         return
+    # AuthMiddleware exempts /ws/ paths, so each WebSocket checks the session
+    # itself (same as ws_graph and ws_terminal).
+    if settings.auth_enabled:
+        session = websocket.scope.get("session", {})
+        if not session.get("authenticated"):
+            await websocket.close(code=1008)
+            return
     from meshwiki.core.factory_ws_manager import factory_ws_manager
 
     await websocket.accept()

@@ -97,6 +97,18 @@ class TestAutocompleteEndpoint:
         assert "TestPage" in resp.text
 
     @pytest.mark.asyncio
+    async def test_autocomplete_escapes_html_in_names(self, client):
+        # Page names may contain <, > and quotes; they must not become markup.
+        await meshwiki.main.storage.save_page(
+            'Evil "<img src=x onerror=alert(1)>', "content"
+        )
+        resp = await client.get("/api/autocomplete?q=Evil")
+        assert resp.status_code == 200
+        assert "<img" not in resp.text
+        assert "&lt;img" in resp.text
+        assert 'data-value="Evil &quot;&lt;img' in resp.text
+
+    @pytest.mark.asyncio
     async def test_autocomplete_max_10(self, client):
         for i in range(15):
             await meshwiki.main.storage.save_page(f"Page{i:02d}", "content")

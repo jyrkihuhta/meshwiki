@@ -182,3 +182,79 @@ def test_ws_terminal_authenticated_accepted(sync_auth_client):
                 ws.receive_text()
         except Exception:
             pass  # server-side close or disconnect is expected
+
+
+# ── /ws/factory requires a session when auth is enabled ───────────────────────
+
+
+@pytest.fixture
+def factory_auth_settings(tmp_path):
+    """Auth enabled AND factory enabled, so /ws/factory reaches its auth check."""
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        data_dir=tmp_path,
+        auth_enabled=True,
+        auth_password="correct-horse",
+        session_secret="test-secret-key-32-chars-minimum!",
+        graph_watch=False,
+        factory_enabled=True,
+    )
+    importlib.reload(meshwiki.main)
+    yield cfg.settings
+    cfg.settings = original
+    importlib.reload(meshwiki.main)
+
+
+@pytest.fixture
+def sync_factory_auth_client(factory_auth_settings, monkeypatch):
+    from meshwiki.core.graph import init_engine, shutdown_engine
+    from meshwiki.core.webhooks import dispatcher
+
+    # factory_enabled makes the lifespan start the module-level webhook
+    # dispatcher, whose queue binds to the first event loop that uses it; each
+    # TestClient runs its own loop. These tests don't exercise webhooks.
+    async def _noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(dispatcher, "start", _noop)
+    monkeypatch.setattr(dispatcher, "stop", _noop)
+
+    init_engine(factory_auth_settings.data_dir, watch=False)
+    with TestClient(meshwiki.main.app, raise_server_exceptions=False) as c:
+        yield c
+    shutdown_engine()
+
+
+def test_ws_factory_unauthenticated_rejected(sync_factory_auth_client):
+    """Without a session, /ws/factory closes with 1008 before accepting."""
+    with pytest.raises(Exception):
+        with sync_factory_auth_client.websocket_connect("/ws/factory"):
+            pass  # should not reach here
+
+
+def test_ws_factory_authenticated_accepted(sync_factory_auth_client, monkeypatch):
+    """A logged-in client is accepted and receives factory events."""
+    from starlette.websockets import WebSocketDisconnect
+
+    from meshwiki.core import factory_ws_manager as fwm
+
+    class _OneShotQueue:
+        """Deliver one event, then end the handler's loop cleanly."""
+
+        def __init__(self):
+            self._sent = False
+
+        async def get(self):
+            if self._sent:
+                raise WebSocketDisconnect()
+            self._sent = True
+            return {"type": "ping"}
+
+    monkeypatch.setattr(fwm.factory_ws_manager, "connect", lambda: (0, _OneShotQueue()))
+    monkeypatch.setattr(fwm.factory_ws_manager, "disconnect", lambda _cid: None)
+
+    resp = sync_factory_auth_client.post("/login", data={"password": "correct-horse"})
+    assert resp.status_code in (200, 302)
+
+    with sync_factory_auth_client.websocket_connect("/ws/factory") as ws:
+        assert ws.receive_json() == {"type": "ping"}

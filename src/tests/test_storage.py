@@ -367,3 +367,26 @@ async def test_get_pages_skips_missing(storage):
 @pytest.mark.asyncio
 async def test_get_pages_empty(storage):
     assert await storage.get_pages([]) == []
+
+
+# ── Dotted page names (regression: with_suffix truncation) ────────────────────
+
+
+def test_get_path_keeps_dots(storage, tmp_path):
+    assert storage._get_path("v2.0 Notes") == tmp_path / "v2.0_Notes.md"
+    assert storage._get_path("config.yaml") == tmp_path / "config.yaml.md"
+    assert storage._get_path("Release 1.2") == tmp_path / "Release_1.2.md"
+
+
+@pytest.mark.asyncio
+async def test_dotted_page_names_do_not_collide(storage):
+    await storage.save_page("Release 1", "# one")
+    await storage.save_page("Release 1.2", "# one-two")
+    assert (await storage.get_page("Release 1")).content.strip() == "# one"
+    assert (await storage.get_page("Release 1.2")).content.strip() == "# one-two"
+
+
+@pytest.mark.asyncio
+async def test_dotted_name_round_trips_through_listing(storage):
+    await storage.save_page("v2.0 Notes", "x")
+    assert "v2.0 Notes" in await storage.list_pages()
