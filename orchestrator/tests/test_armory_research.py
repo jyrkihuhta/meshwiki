@@ -269,8 +269,11 @@ class _FakeProc:
 
 
 @pytest.mark.asyncio
-async def test_fetch_findings_parses_json_array(monkeypatch):
-    payload = json.dumps([_finding()]).encode()
+async def test_fetch_findings_parses_findings_object(monkeypatch):
+    # Frozen contract: {"findings": [...]} (sibling "unmapped" ignored).
+    payload = json.dumps(
+        {"findings": [_finding()], "unmapped": [{"ignored": True}]}
+    ).encode()
 
     async def _fake_exec(*argv, **kw):
         # The agreed CLI contract: our flags are appended.
@@ -281,6 +284,18 @@ async def test_fetch_findings_parses_json_array(monkeypatch):
     bot = ArmoryResearchBot()
     out = await bot._fetch_findings()
     assert out == [_finding()]
+
+
+@pytest.mark.asyncio
+async def test_fetch_findings_rejects_bare_array(monkeypatch):
+    # A bare array is NOT the frozen contract and must be rejected.
+    async def _fake_exec(*argv, **kw):
+        return _FakeProc(stdout=json.dumps([_finding()]).encode(), returncode=0)
+
+    monkeypatch.setattr(armory_research.asyncio, "create_subprocess_exec", _fake_exec)
+    bot = ArmoryResearchBot()
+    with pytest.raises(RuntimeError, match="findings"):
+        await bot._fetch_findings()
 
 
 @pytest.mark.asyncio
