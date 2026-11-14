@@ -10,10 +10,16 @@ were held back by the concurrency cap or by file-conflict serialization.
 Rounds are identified by the LangGraph superstep in which a grinder ran, read
 from the runnable config inside the mocked grinder, so the assertions do not
 depend on asyncio scheduling order.
+
+The last sections cover what happens around a run rather than inside one: an
+orchestrator restart while grinders are in flight (startup recovery must
+resume the checkpoint, not discard it) and a webhook that re-enters a thread
+from START.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -24,6 +30,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.config import get_config
 
+from factory import webhook_server
 from factory.graph import build_graph
 from factory.state import FactoryState, SubTask
 
@@ -116,6 +123,11 @@ class FakeFactory:
     Set ``graph`` and ``config`` after construction to make each grinder call
     read the latest checkpoint and record the ``active_grinders`` it finds.
 
+    Add ``(subtask_id, attempt)`` pairs to ``hang`` to make those grinder calls
+    block until the run is cancelled — a sandbox still working when the
+    orchestrator stops.  Blocked calls are listed in ``hung`` and are not
+    counted in ``grind_calls``.
+
     Args:
         reviews: Per-subtask list of PM decisions, consumed in order.  A subtask
             with no (remaining) entry is approved.
@@ -140,12 +152,17 @@ class FakeFactory:
         self.active_seen: list[list[str]] = []
         self.events: list[str] = []
         self.pr_numbers: dict[str, list[int]] = defaultdict(list)
+        self.hang: set[tuple[str, int]] = set()
+        self.hung: list[str] = []
         self._pr_number = 100
 
     async def grind_subtask(
         self, state: FactoryState, subtask: SubTask, meshwiki_client: Any
     ) -> dict:
         """Mocked ``grind_subtask``: record the call and return the outcome."""
+        if (subtask["id"], subtask["attempt"]) in self.hang:
+            self.hung.append(subtask["id"])
+            await asyncio.Event().wait()  # never set: ends when the run is cancelled
         step = get_config()["metadata"]["langgraph_step"]
         self.grind_calls.append((subtask["id"], subtask["attempt"]))
         self.grind_steps[step].append(subtask["id"])
@@ -675,3 +692,346 @@ async def test_human_rejection_returns_to_the_human_gate() -> None:
     assert _statuses(final_state) == {"sub-1": "merged", "sub-2": "merged"}
     assert len(fake.grind_calls) == 2  # nothing was ground again
     assert len(_done_transitions(fake)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator restart while grinders are in flight
+# ---------------------------------------------------------------------------
+
+
+class _StartupWiki:
+    """MeshWikiClient stand-in for ``_resume_interrupted_tasks``.
+
+    Reports the parent task as an ``in_progress`` factory task, which is what
+    the wiki holds for a task whose graph run was cut short.
+    """
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> _StartupWiki:
+        return self
+
+    async def __aenter__(self) -> _StartupWiki:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+    async def list_tasks(self, status: str | None = None, **_kwargs: Any) -> list[dict]:
+        if status != "in_progress":
+            return []
+        return [{"name": PARENT, "metadata": {"status": status, "assignee": "factory"}}]
+
+
+async def _kill_run_mid_grind(
+    graph: Any,
+    state: FactoryState,
+    config: dict,
+    fake: FakeFactory,
+    *,
+    pending_grinds: int | None = None,
+) -> Any:
+    """Start a run, stop the orchestrator while grinders hang, return the snapshot.
+
+    Waits until every grinder in ``fake.hang`` is blocked and — when
+    *pending_grinds* is given — until the checkpoint shows exactly that many
+    ``grind`` tasks without a saved result, then cancels the run the way
+    ``_drain_graph_tasks`` does on shutdown.  ``fake.hang`` is cleared so the
+    grinders work again after the "restart".
+    """
+    expected = len(fake.hang)
+    run = asyncio.create_task(graph.ainvoke(state, config=config))
+
+    async def _grinders_blocked() -> None:
+        while True:
+            assert not run.done(), "run ended before its grinders blocked"
+            if len(fake.hung) == expected:
+                snapshot = await graph.aget_state(config)
+                if pending_grinds is None or snapshot.next == (
+                    ("grind",) * pending_grinds
+                ):
+                    return
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(_grinders_blocked(), timeout=10)
+    finally:
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    fake.hang.clear()
+    return await graph.aget_state(config)
+
+
+async def _restart_orchestrator(graph: Any, saver: MemorySaver, config: dict) -> Any:
+    """Run the real startup recovery and wait for the resumed run to stop.
+
+    Calls ``webhook_server._resume_interrupted_tasks`` exactly as the lifespan
+    does (``_clear_stuck_grinders`` followed by ``ainvoke(None)`` in a
+    background task) and returns the snapshot the thread ends up at.
+    """
+    settings = MagicMock(meshwiki_url="http://wiki", meshwiki_api_key="key")
+    resumed: list[asyncio.Task] = []
+    spawn = webhook_server._spawn_graph_task
+
+    def _spawn_and_keep(*args: Any, **kwargs: Any) -> asyncio.Task:
+        task = spawn(*args, **kwargs)
+        resumed.append(task)
+        return task
+
+    with (
+        patch.object(webhook_server, "MeshWikiClient", _StartupWiki()),
+        patch.object(webhook_server, "_spawn_graph_task", _spawn_and_keep),
+    ):
+        await webhook_server._resume_interrupted_tasks(graph, saver, settings)
+    assert len(resumed) == 1, "startup recovery did not resume the thread"
+    await asyncio.gather(*resumed)
+    return await graph.aget_state(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 3])
+async def test_restart_mid_grind_resumes_the_round(count: int) -> None:
+    """A restart while the first round is grinding resumes and completes it.
+
+    The dispatched subtasks are ``pending`` and listed in ``active_grinders``
+    in the checkpoint — the normal mid-grind state.  Startup recovery must
+    leave that checkpoint alone so its pending ``grind`` tasks run again.
+    """
+    subtasks = [_make_subtask(i) for i in range(1, count + 1)]
+    ids = [s["id"] for s in subtasks]
+    fake = FakeFactory()
+    fake.hang = {(sid, 0) for sid in ids}
+    saver = MemorySaver()
+    graph = build_graph(saver)
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake):
+        snapshot = await _kill_run_mid_grind(
+            graph, _make_initial_state(subtasks), config, fake
+        )
+        assert snapshot.next == ("grind",) * count
+        assert snapshot.values["active_grinders"] == ids
+        assert _statuses(snapshot.values) == {sid: "pending" for sid in ids}
+
+        snapshot = await _restart_orchestrator(graph, saver, config)
+        assert snapshot.next == ("human_review_code",), _statuses(snapshot.values)
+        final_state = await _approve_and_finish(graph, config)
+
+    assert final_state["graph_status"] == "completed"
+    assert _statuses(final_state) == {sid: "merged" for sid in ids}
+    assert final_state["active_grinders"] == []
+    assert sorted(fake.grind_calls) == [(sid, 0) for sid in ids]
+    assert sorted(fake.review_calls) == ids
+    assert len(_done_transitions(fake)) == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_mid_grind_keeps_results_of_finished_siblings() -> None:
+    """A grinder that finished before the restart is not run a second time.
+
+    ``sub-1``'s result is saved with the checkpoint while ``sub-2`` is still
+    grinding.  After the restart only ``sub-2`` is ground; ``sub-1`` goes on to
+    review with the result it already had.
+    """
+    subtasks = [_make_subtask(1), _make_subtask(2)]
+    fake = FakeFactory()
+    fake.hang = {("sub-2", 0)}
+    saver = MemorySaver()
+    graph = build_graph(saver)
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake):
+        snapshot = await _kill_run_mid_grind(
+            graph, _make_initial_state(subtasks), config, fake, pending_grinds=1
+        )
+        assert fake.grind_calls == [("sub-1", 0)]
+        assert snapshot.values["active_grinders"] == ["sub-1", "sub-2"]
+
+        snapshot = await _restart_orchestrator(graph, saver, config)
+
+    assert snapshot.next == ("human_review_code",), _statuses(snapshot.values)
+    assert _statuses(snapshot.values) == {"sub-1": "merged", "sub-2": "merged"}
+    assert snapshot.values["active_grinders"] == []
+    assert sorted(fake.grind_calls) == [("sub-1", 0), ("sub-2", 0)]
+    assert fake.pr_numbers["sub-1"] == [snapshot.values["subtasks"][0]["pr_number"]]
+    assert sorted(fake.review_calls) == ["sub-1", "sub-2"]
+
+
+@pytest.mark.asyncio
+async def test_restart_during_a_later_round_resumes_it() -> None:
+    """A restart while a deferred subtask is grinding does not strand it.
+
+    With a cap of 1, ``sub-1`` is ground, reviewed and merged in round one and
+    ``sub-2`` is dispatched from the join.  The restart hits round two.
+    """
+    subtasks = [_make_subtask(1), _make_subtask(2)]
+    fake = FakeFactory()
+    fake.hang = {("sub-2", 0)}
+    saver = MemorySaver()
+    graph = build_graph(saver)
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake, cap=1):
+        snapshot = await _kill_run_mid_grind(
+            graph, _make_initial_state(subtasks), config, fake
+        )
+        assert snapshot.next == ("grind",)
+        assert snapshot.values["active_grinders"] == ["sub-2"]
+        assert _statuses(snapshot.values) == {"sub-1": "merged", "sub-2": "pending"}
+
+        snapshot = await _restart_orchestrator(graph, saver, config)
+
+    assert snapshot.next == ("human_review_code",), _statuses(snapshot.values)
+    assert _statuses(snapshot.values) == {"sub-1": "merged", "sub-2": "merged"}
+    assert snapshot.values["active_grinders"] == []
+    assert fake.grind_calls == [("sub-1", 0), ("sub-2", 0)]
+    assert fake.review_calls == ["sub-1", "sub-2"]
+
+
+@pytest.mark.asyncio
+async def test_restart_during_a_rework_grind_resumes_it() -> None:
+    """A restart while a subtask is being re-ground after PM feedback resumes it.
+
+    The subtask is ``changes_requested`` and listed in ``active_grinders`` in
+    the checkpoint; it must be re-ground once, on its second attempt.
+    """
+    subtasks = [_make_subtask(1), _make_subtask(2)]
+    fake = FakeFactory(reviews={"sub-2": ["changes_requested"]})
+    fake.hang = {("sub-2", 1)}
+    saver = MemorySaver()
+    graph = build_graph(saver)
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake):
+        snapshot = await _kill_run_mid_grind(
+            graph, _make_initial_state(subtasks), config, fake
+        )
+        assert snapshot.next == ("grind",)
+        assert snapshot.values["active_grinders"] == ["sub-2"]
+        assert _statuses(snapshot.values) == {
+            "sub-1": "merged",
+            "sub-2": "changes_requested",
+        }
+
+        snapshot = await _restart_orchestrator(graph, saver, config)
+
+    assert snapshot.next == ("human_review_code",), _statuses(snapshot.values)
+    assert _statuses(snapshot.values) == {"sub-1": "merged", "sub-2": "merged"}
+    assert snapshot.values["active_grinders"] == []
+    assert sorted(fake.grind_calls) == [("sub-1", 0), ("sub-2", 0), ("sub-2", 1)]
+    assert fake.review_calls.count("sub-2") == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_repairs_an_idle_thread_with_a_stale_grinder() -> None:
+    """An idle thread that still lists a waiting subtask as in flight is repaired.
+
+    Checkpoints written before ``active_grinders`` was tracked at dispatch
+    could end like this: nothing pending, the subtask waiting for a grinder,
+    its ID left in ``active_grinders``.  Startup recovery removes the stale ID
+    through the join, whose router dispatches the subtask again.
+    """
+    stalled = _make_initial_state(
+        [_make_subtask(1, status="merged", pr_number=7), _make_subtask(2)]
+    )
+    stalled["active_grinders"] = ["sub-1", "sub-2"]
+    fake = FakeFactory()
+    saver = MemorySaver()
+    graph = build_graph(saver)
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake):
+        # Write the stalled state as the last node of a finished run.
+        await graph.aupdate_state(config, stalled, as_node="finalize")
+        snapshot = await graph.aget_state(config)
+        assert snapshot.next == () and not snapshot.tasks
+
+        await webhook_server._clear_stuck_grinders(graph, config, PARENT)
+        snapshot = await graph.aget_state(config)
+        assert snapshot.next == ("assign_grinders",)
+        assert snapshot.values["active_grinders"] == ["sub-1"]
+
+        snapshot = await _restart_orchestrator(graph, saver, config)
+
+    assert snapshot.next == ("human_review_code",), _statuses(snapshot.values)
+    assert _statuses(snapshot.values) == {"sub-1": "merged", "sub-2": "merged"}
+    assert snapshot.values["active_grinders"] == []
+    assert fake.grind_calls == [("sub-2", 0)]
+
+
+@pytest.mark.asyncio
+async def test_restart_at_the_human_gate_leaves_bookkeeping_untouched() -> None:
+    """Startup recovery does not rewrite a thread parked at the human gate."""
+    subtasks = [_make_subtask(1), _make_subtask(2)]
+    fake = FakeFactory()
+    graph = build_graph(MemorySaver())
+    config = {"configurable": {"thread_id": PARENT}}
+
+    with _patched_world(fake):
+        before = await _run_until_human_review(
+            graph, _make_initial_state(subtasks), config
+        )
+        await webhook_server._clear_stuck_grinders(graph, config, PARENT)
+        after = await graph.aget_state(config)
+
+    assert before.next == after.next == ("human_review_code",)
+    assert after.config == before.config  # same checkpoint: nothing was written
+
+
+# ---------------------------------------------------------------------------
+# Webhook re-entry from START (TODO F3 — not fixed here, behaviour pinned)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auto_merge", "payload", "stops_at"),
+    [
+        (
+            True,
+            {"human_approval_response": "changes_requested", "human_feedback": "CI"},
+            (),
+        ),
+        (
+            False,
+            {"human_approval_response": "approve", "human_feedback": None},
+            ("human_review_code",),
+        ),
+    ],
+    ids=["task.rework-after-completion", "task.approved-at-human-gate"],
+)
+async def test_webhook_restart_from_start_grinds_again_and_lands(
+    auto_merge: bool, payload: dict, stops_at: tuple[str, ...]
+) -> None:
+    """Pin what a ``task.rework`` / ``task.approved`` webhook does today.
+
+    Both handlers call ``ainvoke`` with a partial state.  LangGraph treats that
+    as new input, so the thread starts again at ``task_intake`` (TODO F3),
+    which re-seeds the direct-grind subtask as ``pending``, attempt 0.  The
+    subtask is then ground and reviewed once more per delivery and the run
+    stops where it stopped before — it neither resumes past the human gate nor
+    leaves anything in ``active_grinders``.
+
+    Before ``active_grinders`` was cleaned up, the stale ID blocked this
+    dispatch and left the thread idle with a ``pending`` subtask; the next
+    orchestrator restart then cleared the ID and ground it anyway.  Fixing F3
+    (resume instead of restart) will change this test.
+    """
+    fake = FakeFactory()
+    fake.meshwiki.get_page.return_value["metadata"]["skip_decomposition"] = True
+    graph = build_graph(MemorySaver())
+    config = {"configurable": {"thread_id": PARENT}}
+    initial_state = webhook_server._build_initial_state(PARENT, PARENT, {})
+
+    with _patched_world(fake, auto_merge=auto_merge):
+        first = await _run_until_human_review(graph, initial_state, config)
+        assert first.next == stops_at
+        assert fake.grind_calls == [(PARENT, 0)]
+
+        for delivery in (2, 3):
+            await graph.ainvoke(payload, config=config)  # as receive_webhook does
+            snapshot = await graph.aget_state(config)
+            assert snapshot.next == stops_at
+            assert fake.grind_calls == [(PARENT, 0)] * delivery
+            assert len(fake.review_calls) == delivery
+            assert _statuses(snapshot.values) == {PARENT: "merged"}
+            assert snapshot.values["active_grinders"] == []

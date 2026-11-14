@@ -664,10 +664,24 @@ refer to that report. Items below are grouped work, in suggested order.
   `route_after_collect` decides wait / next round / escalate / post-review
   pipeline on the merged state; `active_grinders` takes add/remove updates and
   tracks the branches in flight; real-graph tests in
-  `orchestrator/tests/test_pipeline_fan_in.py`. Side effect to know about until
-  F3 is fixed: a `task.rework` / `task.approved` webhook still restarts the
-  graph at `task_intake`, and the re-seeded subtasks are now ground again (the
-  stale `active_grinders` entries used to block that silently).
+  `orchestrator/tests/test_pipeline_fan_in.py`. Startup recovery
+  (`_clear_stuck_grinders`) now leaves a thread alone while its checkpoint has
+  pending tasks — a `pending` subtask in `active_grinders` is the normal
+  mid-grind state and `ainvoke(None)` re-runs the interrupted grinders — and
+  only repairs idle threads, through the `collect` join.
+  Side effect to know about until F3 is fixed: a `task.rework` /
+  `task.approved` webhook still restarts the graph at `task_intake`, and for
+  direct-grind (`skip_decomposition`) tasks, and for pre-seeded subtask pages
+  that are still active, the re-seeded subtask is now ground and reviewed
+  again from attempt 0 on **every delivery** (new PR, previous PR reference
+  dropped from the state). Before,
+  the stale `active_grinders` entry blocked the dispatch and left the thread
+  idle with a `pending` subtask, which the next orchestrator restart then
+  re-ground once. `task.rework` is bounded by the CI fixer's
+  `ci_fix_attempts` cap; a `task.approved` for a task parked at
+  `human_review_code` (auto-merge off) re-grinds and parks at the gate again
+  on each delivery, so it can never finalise the task. Pinned by
+  `test_webhook_restart_from_start_grinds_again_and_lands`.
 
 ### MEDIUM — deploy and CI
 

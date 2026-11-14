@@ -128,8 +128,14 @@ def assign_grinders_node(state: FactoryState) -> Command[Literal["grind"]]:
     IDs to ``active_grinders`` and fans out one ``grind`` instance per subtask.
     Doing both from the node — a ``Command`` carrying the state update and the
     ``Send`` list — means the checkpoint written when this node finishes
-    already lists the grinders that are about to run, so the concurrency cap,
-    ``/status`` and crash recovery all see them while they are running.
+    already lists the grinders that are about to run, so the concurrency cap
+    and ``/status`` see them while they are running.
+
+    That checkpoint also holds the pending ``grind`` tasks.  If the
+    orchestrator restarts while they run, ``ainvoke(None)`` re-runs the ones
+    that had not finished; a ``pending`` subtask listed in ``active_grinders``
+    is therefore the normal mid-grind state, not a stuck one, and startup
+    recovery (``webhook_server._clear_stuck_grinders``) must not rewrite it.
 
     Args:
         state: Current FactoryState.
