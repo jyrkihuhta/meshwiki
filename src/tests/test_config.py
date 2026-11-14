@@ -159,9 +159,49 @@ class TestAuthStartupValidation:
             )
         message = str(exc.value)
         assert "MESHWIKI_SESSION_SECRET" in message
+        # pydantic's own echo of the input is what would carry the values; it
+        # is truncated, so checking for whole values alone proves nothing.
+        assert "input_value" not in message
+        assert "input_value" not in repr(exc.value)
         for value in (password, secret, api_key):
             assert value not in message
             assert value not in repr(exc.value)
+
+    def test_input_echo_is_disabled_in_validation_errors(self):
+        assert Settings.model_config.get("hide_input_in_errors") is True
+
+    @pytest.mark.parametrize(
+        "extra_env, tail_value",
+        [
+            ({}, "key-probe"),
+            ({"MESHWIKI_GITHUB_WEBHOOK_SECRET": "hook-probe"}, "hook-probe"),
+        ],
+    )
+    def test_startup_error_from_env_does_not_leak_secret_values(
+        self, extra_env, tail_value
+    ):
+        """A too-short secret from the environment must not be echoed.
+
+        pydantic would print the head and tail of its input, in field order.
+        The value that lands in that tail is short enough to be shown whole,
+        so this fails whenever the input echo is switched back on.
+        """
+        env = {
+            "MESHWIKI_AUTH_ENABLED": "true",
+            "MESHWIKI_AUTH_PASSWORD": "pw-probe",
+            "MESHWIKI_SESSION_SECRET": "key-probe",
+            **extra_env,
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with pytest.raises(ValidationError) as exc:
+                Settings(_env_file=None)
+        message = str(exc.value)
+        assert "MESHWIKI_SESSION_SECRET" in message
+        assert tail_value not in message
+        assert tail_value not in repr(exc.value)
+        assert "pw-probe" not in message
+        assert "key-probe" not in message
+        assert "input_value" not in message
 
     def test_blank_env_secret_is_rejected(self):
         """`MESHWIKI_SESSION_SECRET=` (as the examples used to ship) must not start."""
