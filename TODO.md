@@ -657,8 +657,14 @@ refer to that report. Items below are grouped work, in suggested order.
   422) and the field-update paths convert to the field's type; the tree
   builder, epic child list and date sorts tolerate any YAML type and mixed
   naive/aware timestamps; the PATCH route protects `uuid` and invalidates the
-  page cache [`wiki-routes-b-3`]. See "Frontmatter tolerance" in
-  `docs/domains/business-logic.md`. Not done from the suggested fixes:
+  page cache [`wiki-routes-b-3`]. Review follow-up: tagged scalars PyYAML
+  cannot build (`!!bool maybe`) no longer escape the loader; the JSON API sends
+  metadata through `json_safe_metadata()` so binary, self-referential and
+  `.nan`/`.inf` values cannot fail a listing; `/api/factory/tasks?status=` and
+  the factory-enabled editor save tolerate a list- or mapping-valued
+  `type`/`status`; writes that store a `<field>_invalid` key log it. See
+  "Frontmatter tolerance" in `docs/domains/business-logic.md`. Not done from
+  the suggested fixes:
   rejecting `uuid`/`created`/`modified` writes inside the storage layer (the
   route does it; `/api/v1` PATCH still may set them, now type-checked), and
   dropping the page-tree computation from `/login`.

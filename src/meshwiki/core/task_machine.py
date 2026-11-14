@@ -11,6 +11,8 @@ import time
 import weakref
 from typing import TYPE_CHECKING
 
+from meshwiki.core.models import json_safe_metadata
+
 if TYPE_CHECKING:
     from meshwiki.core.storage import FileStorage
 
@@ -144,7 +146,7 @@ async def transition_task(
             fields.update(extra_fields)
         updated = await storage.patch_frontmatter(page_name, fields)
         assert updated is not None
-        metadata_dict = updated.metadata.model_dump()
+        metadata_dict = json_safe_metadata(updated.metadata)
 
     # Emit webhook (lazy import to avoid circular dependency)
     from meshwiki.config import settings

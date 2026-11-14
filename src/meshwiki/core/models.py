@@ -1,5 +1,6 @@
 """Data models for MeshWiki."""
 
+import math
 from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
@@ -195,6 +196,58 @@ class PageMetadata(BaseModel):
         if isinstance(data, dict):
             data, _ = coerce_frontmatter(data)
         return data
+
+
+SELF_REFERENCE_TEXT = "<refers to itself>"
+
+
+def _json_safe(value: Any, parents: tuple[int, ...] = ()) -> Any:
+    """Replace the parts of a frontmatter value that no JSON encoder accepts."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    if not isinstance(value, (dict, list, tuple, set, frozenset)):
+        return value
+    if id(value) in parents:
+        return SELF_REFERENCE_TEXT
+    parents = (*parents, id(value))
+    if isinstance(value, dict):
+        return {
+            # Other key types (text, numbers, dates) are fine as they are.
+            (_json_safe(k) if isinstance(k, (float, bytes)) else k): _json_safe(
+                v, parents
+            )
+            for k, v in value.items()
+        }
+    items = [_json_safe(item, parents) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items.sort(key=str)
+    return items
+
+
+def json_safe_metadata(metadata: PageMetadata) -> dict[str, Any]:
+    """Return a page's metadata as a mapping that can always be sent as JSON.
+
+    Extra frontmatter fields hold whatever YAML produced, and some of that
+    cannot be encoded: binary data that is not UTF-8 (``!!binary``), a value
+    that contains itself (``x: &a [*a]``), ``.nan`` and ``.inf``. Left in a
+    response, one such page fails the whole listing it appears in. Those parts
+    are replaced with text; everything else is returned as ``model_dump()``
+    gives it. Use this instead of ``model_dump()`` wherever metadata leaves the
+    app as JSON. The values on the model, and so in the file, are not changed.
+
+    Args:
+        metadata: The metadata to convert. It is not modified.
+
+    Returns:
+        A new mapping with every declared field and every extra field.
+    """
+    # Read the fields directly: model_dump() copies the first level of a
+    # self-referential value before the cycle can be seen.
+    data = {name: getattr(metadata, name) for name in PageMetadata.model_fields}
+    data.update(metadata.model_extra or {})
+    return _json_safe(data)
 
 
 class Page(BaseModel):

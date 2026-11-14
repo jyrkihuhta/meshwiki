@@ -18,10 +18,12 @@ import yaml
 from structlog.testing import capture_logs
 
 from meshwiki.core.models import (
+    SELF_REFERENCE_TEXT,
     Page,
     PageMetadata,
     coerce_frontmatter,
     datetime_sort_key,
+    json_safe_metadata,
 )
 from meshwiki.core.parser import parse_wiki_content
 from meshwiki.core.storage import (
@@ -55,6 +57,29 @@ BAD_SHAPES: dict[str, tuple[str, str, Any]] = {
     "modified_list": ("modified: [1, 2]", "modified", None),
 }
 
+# Explicitly tagged scalars PyYAML cannot build. It raises KeyError, IndexError
+# and AttributeError for these, not YAMLError.
+TAGGED_SCALARS: dict[str, str] = {
+    "tagged_bool": "draft: !!bool maybe",
+    "tagged_int": 'x: !!int ""',
+    "tagged_float": 'x: !!float ""',
+    "tagged_timestamp": "x: !!timestamp foo",
+    "tagged_declared_field": "created: !!timestamp foo",
+}
+
+# Values YAML loads fine but that no JSON encoder accepts as they are.
+UNSERIALISABLE: dict[str, str] = {
+    "binary_extra": "x: !!binary gICA",
+    "binary_title": "title: !!binary gICA",
+    "binary_nested": "x: {k: [!!binary gICA]}",
+    "self_referential_list": "x: &a [*a]",
+    "self_referential_mapping": "x: &a {k: *a}",
+    "nan_extra": "x: .nan",
+    "inf_nested": "x: [.inf, {k: -.inf}]",
+    "nan_key": "x: {.nan: 1}",
+    "odd_set": "x: !!set {.nan, !!binary gICA}",
+}
+
 # Frontmatter that is valid for PageMetadata but used to break the sidebar tree
 # builder or the "recently modified" sorts.
 BAD_EXTRAS: dict[str, str] = {
@@ -70,6 +95,8 @@ BAD_EXTRAS: dict[str, str] = {
     "non_string_key": "1: one\ntitle: Keyed",
     "not_a_mapping": "- a\n- b",
     "recursive_alias": "tags: &a [*a]",
+    **TAGGED_SCALARS,
+    **UNSERIALISABLE,
 }
 
 HTML_ROUTES = [
@@ -165,6 +192,97 @@ class TestCoercion:
         assert raw == {"tags": "python", "created": "yesterday"}
 
 
+class TestJsonSafeMetadata:
+    def test_ordinary_metadata_is_the_same_as_model_dump(self) -> None:
+        meta = PageMetadata(
+            title="T",
+            tags=["a"],
+            created=datetime(2026, 1, 2, 3, 4, 5),
+            modified=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            status="planned",
+            priority=3,
+            ratio=1.5,
+            flag=True,
+            nothing=None,
+            due=datetime(2026, 11, 10).date(),
+            nested={"a": [1, {"b": "c"}], 2: "int key"},
+        )
+
+        assert json_safe_metadata(meta) == meta.model_dump()
+
+    def test_bytes_become_text(self) -> None:
+        meta = PageMetadata(x=b"hello", y=b"\x80\x80", z=[{"k": b"\xff"}])
+
+        data = json_safe_metadata(meta)
+
+        assert data["x"] == "hello"
+        assert data["y"] == "\ufffd\ufffd"
+        assert data["z"] == [{"k": "\ufffd"}]
+
+    def test_self_reference_becomes_a_placeholder(self) -> None:
+        loop: list[Any] = ["a"]
+        loop.append(loop)
+        ring: dict[str, Any] = {"name": "ring"}
+        ring["self"] = ring
+
+        data = json_safe_metadata(PageMetadata(x=loop, y=ring))
+
+        assert data["x"] == ["a", SELF_REFERENCE_TEXT]
+        assert data["y"] == {"name": "ring", "self": SELF_REFERENCE_TEXT}
+
+    def test_shared_value_that_is_not_a_cycle_is_kept(self) -> None:
+        shared = [1, 2]
+
+        data = json_safe_metadata(PageMetadata(a=shared, b=[shared, shared]))
+
+        assert data["a"] == [1, 2]
+        assert data["b"] == [[1, 2], [1, 2]]
+
+    def test_non_finite_numbers_become_text(self) -> None:
+        meta = PageMetadata(a=float("nan"), b=[float("inf")], c={float("-inf"): 1})
+
+        data = json_safe_metadata(meta)
+
+        assert data["a"] == "nan"
+        assert data["b"] == ["inf"]
+        assert data["c"] == {"-inf": 1}
+
+    def test_sets_become_sorted_lists(self) -> None:
+        data = json_safe_metadata(PageMetadata(x={"b", "a", b"c"}))
+
+        assert data["x"] == ["a", "b", "c"]
+
+    def test_stashed_invalid_values_are_covered(self) -> None:
+        meta = PageMetadata(title=b"\x80", created=float("nan"))
+
+        data = json_safe_metadata(meta)
+
+        assert data["title"] is None
+        assert data["title_invalid"] == "\ufffd"
+        assert data["created_invalid"] == "nan"
+
+    def test_the_model_keeps_its_values(self) -> None:
+        loop: list[Any] = []
+        loop.append(loop)
+        meta = PageMetadata(x=b"\x80", y=loop, z=float("inf"))
+
+        json_safe_metadata(meta)
+
+        assert meta.model_extra["x"] == b"\x80"
+        assert meta.model_extra["y"] is loop and loop[0] is loop
+        assert meta.model_extra["z"] == float("inf")
+
+    @pytest.mark.parametrize("shape", UNSERIALISABLE)
+    def test_result_is_strict_json(self, shape: str) -> None:
+        import json
+
+        frontmatter = yaml.safe_load(UNSERIALISABLE[shape])
+
+        data = json_safe_metadata(PageMetadata(**frontmatter))
+
+        json.dumps(data, allow_nan=False, default=str)
+
+
 class TestDatetimeSortKey:
     def test_orders_naive_and_aware_together(self) -> None:
         naive = datetime.now()
@@ -231,6 +349,21 @@ class TestStorageReadsBadFrontmatter:
         assert extras["created_invalid"] == "yesterday"
         assert page.title == "Bad"
 
+    @pytest.mark.parametrize("shape", TAGGED_SCALARS)
+    async def test_frontmatter_yaml_cannot_build_stays_in_the_body(
+        self, storage: FileStorage, tmp_path: Path, shape: str
+    ) -> None:
+        frontmatter = TAGGED_SCALARS[shape]
+        _write(tmp_path, "Bad.md", frontmatter)
+
+        page = await storage.get_page("Bad")
+
+        # Same reading as a YAML syntax error: no metadata, nothing dropped.
+        assert page is not None
+        assert page.metadata == PageMetadata()
+        assert frontmatter in page.content
+        assert page.content.rstrip().endswith("body")
+
     async def test_author_text_is_kept_not_the_yaml_interpretation(
         self, storage: FileStorage, tmp_path: Path
     ) -> None:
@@ -281,6 +414,37 @@ class TestStorageSkipsUnreadableFiles:
         warnings = [e for e in logs if e["log_level"] == "warning"]
         assert len(warnings) == 1
         assert warnings[0]["file"].endswith("Latin.md")
+
+    async def test_unforeseen_failure_in_one_file_does_not_fail_a_scan(
+        self, storage: FileStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await _seed_good_page(tmp_path)
+        _write(tmp_path, "Odd.md", "title: Odd")
+        read_page = storage._read_page
+
+        def flaky(name: str, path: Path) -> Page:
+            if name == "Odd":
+                raise KeyError("a failure nobody anticipated")
+            return read_page(name, path)
+
+        monkeypatch.setattr(storage, "_read_page", flaky)
+
+        with capture_logs() as logs:
+            listed = storage.list_pages_with_metadata_sync()
+            loaded = storage.get_pages_sync(["Odd", "Good"])
+            found = await storage.search_pages("body")
+            tagged = await storage.search_by_tag("python")
+
+        assert [p.name for p in listed] == ["Good"]
+        assert [p.name for p in loaded] == ["Good"]
+        assert [r["name"] for r in found] == ["Good"]
+        assert [p.name for p in tagged] == ["Good"]
+        skipped = [e for e in logs if e["event"] == "page_file_skipped"]
+        assert len(skipped) == 4
+        assert all(e["log_level"] == "warning" for e in skipped)
+        assert all(e["error_type"] == "KeyError" for e in skipped)
+        assert skipped[0]["file"].endswith("Odd.md")
+        assert skipped[1]["page"] == "Odd"
 
     async def test_direct_read_raises_a_specific_error(
         self, storage: FileStorage, tmp_path: Path
@@ -436,6 +600,90 @@ class TestRoundTrip:
         page = await storage.get_page("Page")
         assert page is not None
         assert page.metadata.created == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class TestSetAsideValuesAreLogged:
+    """A write that renames a key to ``<field>_invalid`` says so in the log."""
+
+    _FRONTMATTER = "created: yesterday\ntitle: [a, b]\ntags: python"
+
+    @staticmethod
+    def _set_aside(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [e for e in logs if e["event"] == "frontmatter_values_set_aside"]
+
+    async def test_reading_and_scanning_stay_quiet(
+        self, storage: FileStorage, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "Bad.md", self._FRONTMATTER)
+
+        with capture_logs() as logs:
+            storage.list_pages_with_metadata_sync()
+            await storage.search_pages("body")
+            await storage.get_page("Bad")
+
+        assert logs == []
+
+    async def test_field_update_logs_the_renamed_keys_once(
+        self, storage: FileStorage, tmp_path: Path
+    ) -> None:
+        path = _write(tmp_path, "Bad.md", self._FRONTMATTER)
+
+        with capture_logs() as logs:
+            await storage.update_frontmatter_field("Bad", "note", "x")
+
+        events = self._set_aside(logs)
+        assert len(events) == 1
+        assert events[0]["log_level"] == "warning"
+        assert events[0]["page"] == "Bad"
+        assert events[0]["file"].endswith("Bad.md")
+        problems = events[0]["problems"]
+        assert len(problems) == 2
+        assert any(p.startswith("created:") for p in problems)
+        assert any(p.startswith("title:") for p in problems)
+        data = _frontmatter_on_disk(path)
+        assert data["created_invalid"] == "yesterday"
+        assert data["title_invalid"] == ["a", "b"]
+        assert "created" not in data and "title" not in data
+
+        # The file no longer has anything to set aside.
+        with capture_logs() as logs:
+            await storage.update_frontmatter_field("Bad", "note", "y")
+        assert self._set_aside(logs) == []
+
+    async def test_patch_frontmatter_logs_too(
+        self, storage: FileStorage, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "Bad.md", self._FRONTMATTER)
+
+        with capture_logs() as logs:
+            await storage.patch_frontmatter("Bad", {"status": "planned"})
+
+        events = self._set_aside(logs)
+        assert len(events) == 1
+        assert events[0]["page"] == "Bad"
+
+    async def test_rejected_update_writes_and_logs_nothing(
+        self, storage: FileStorage, tmp_path: Path
+    ) -> None:
+        path = _write(tmp_path, "Bad.md", self._FRONTMATTER)
+        before = path.read_text(encoding="utf-8")
+
+        with capture_logs() as logs:
+            with pytest.raises(InvalidFrontmatterError):
+                await storage.update_frontmatter_field("Bad", "modified", "never")
+
+        assert self._set_aside(logs) == []
+        assert path.read_text(encoding="utf-8") == before
+
+    async def test_coercible_values_are_not_reported(
+        self, storage: FileStorage, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "Bad.md", "title: 2024\ntags: python\nchildren: A")
+
+        with capture_logs() as logs:
+            await storage.update_frontmatter_field("Bad", "note", "x")
+
+        assert self._set_aside(logs) == []
 
 
 class TestFieldUpdates:
@@ -925,6 +1173,23 @@ class TestSaveRouteValidation:
         assert resp.status_code == 200
         assert _frontmatter_on_disk(tmp_path / "New.md")[attr] == expected
 
+    @pytest.mark.parametrize("shape", TAGGED_SCALARS)
+    async def test_frontmatter_yaml_cannot_build_is_saved_as_body_text(
+        self, client, tmp_path: Path, shape: str
+    ) -> None:
+        frontmatter = TAGGED_SCALARS[shape]
+
+        resp = await client.post(
+            "/page/New", data={"content": f"---\n{frontmatter}\n---\n\nbody\n"}
+        )
+
+        # Treated like a YAML syntax error: kept as text, never a 500.
+        assert resp.status_code == 200
+        saved = (tmp_path / "New.md").read_text(encoding="utf-8")
+        assert saved.endswith(f"---\n{frontmatter}\n---\n\nbody\n")
+        assert (await client.get("/")).status_code == 200
+        assert (await client.get("/page/New")).status_code == 200
+
     async def test_htmx_save_with_unfixable_frontmatter_is_a_422(
         self, client, tmp_path: Path
     ) -> None:
@@ -943,6 +1208,7 @@ class TestSaveRouteValidation:
 # ---------------------------------------------------------------------------
 
 _AUTH = {"Authorization": "Bearer test-key-123"}
+_TASK = "type: task\nassignee: factory\nstatus: planned"
 
 
 @pytest.fixture
@@ -960,6 +1226,7 @@ async def factory_client(tmp_path: Path):
         data_dir=tmp_path,
         factory_enabled=True,
         factory_api_key="test-key-123",
+        factory_webhook_url="",
         graph_watch=False,
         auth_enabled=False,
     )
@@ -1050,3 +1317,162 @@ class TestJsonApi:
         )
         assert good.status_code == 200
         assert good.json()["metadata"]["children"] == ["A", "B"]
+
+    @pytest.mark.parametrize("shape", UNSERIALISABLE)
+    async def test_listings_survive_a_value_json_cannot_hold(
+        self, factory_client, tmp_path: Path, shape: str
+    ) -> None:
+        _write(tmp_path, "Good.md", _TASK)
+        _write(tmp_path, "Bad.md", f"{_TASK}\n{UNSERIALISABLE[shape]}")
+        urls = [
+            "/api/v1/pages",
+            "/api/v1/pages?status=planned",
+            "/api/v1/tasks",
+            "/api/v1/tasks?status=planned",
+            "/api/factory/tasks",
+            "/api/factory/tasks?status=planned",
+        ]
+
+        for url in urls:
+            resp = await factory_client.get(url, headers=_AUTH)
+            assert resp.status_code == 200, f"{url} -> {resp.status_code}"
+            assert {p["name"] for p in resp.json()} == {"Bad", "Good"}, url
+        single = await factory_client.get("/api/v1/pages/Bad", headers=_AUTH)
+        assert single.status_code == 200
+        assert single.json()["metadata"]["status"] == "planned"
+
+    async def test_agent_listing_survives_a_value_json_cannot_hold(
+        self, factory_client, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, "Good.md", "type: agent\nstatus: idle")
+        _write(tmp_path, "Bad.md", "type: agent\nstatus: idle\nx: !!binary gICA")
+
+        listed = await factory_client.get("/api/v1/agents", headers=_AUTH)
+        single = await factory_client.get("/api/v1/agents/Bad", headers=_AUTH)
+
+        assert listed.status_code == 200
+        assert {a["name"] for a in listed.json()} == {"Bad", "Good"}
+        assert single.status_code == 200
+        assert single.json()["metadata"]["x"] == "\ufffd\ufffd\ufffd"
+
+    async def test_json_shows_a_stand_in_and_the_file_keeps_the_value(
+        self, factory_client, tmp_path: Path
+    ) -> None:
+        path = _write(
+            tmp_path, "Bad.md", f"{_TASK}\nblob: !!binary gICA\ntags: &a [*a]"
+        )
+
+        resp = await factory_client.post(
+            "/api/v1/tasks/Bad/transition",
+            json={"status": "in_progress"},
+            headers=_AUTH,
+        )
+
+        assert resp.status_code == 200
+        metadata = resp.json()["metadata"]
+        assert metadata["status"] == "in_progress"
+        assert metadata["blob"] == "\ufffd\ufffd\ufffd"
+        assert metadata["tags"] == []
+        assert metadata["tags_invalid"] == [SELF_REFERENCE_TEXT]
+        on_disk = _frontmatter_on_disk(path)
+        assert on_disk["status"] == "in_progress"
+        assert on_disk["blob"] == b"\x80\x80\x80"
+        assert isinstance(on_disk["tags_invalid"], list)
+
+
+# ---------------------------------------------------------------------------
+# Factory routes with list- or mapping-valued ``type`` / ``status``
+# ---------------------------------------------------------------------------
+
+# id -> frontmatter of a task page whose type or status is not plain text
+ODD_TASKS: dict[str, str] = {
+    "status_list": "type: task\nassignee: factory\nstatus: [planned]",
+    "status_mapping": "type: task\nassignee: factory\nstatus: {a: 1}",
+    "status_nested_list": "type: task\nassignee: factory\nstatus: [[planned]]",
+    "type_list": "type: [task]\nassignee: factory\nstatus: planned",
+    "type_mapping": "type: {a: 1}\nassignee: factory\nstatus: planned",
+    "both_lists": "type: [task]\nassignee: factory\nstatus: [planned]",
+}
+
+
+class TestFactoryOddTypeAndStatus:
+    @pytest.mark.parametrize("shape", ODD_TASKS)
+    async def test_dashboard_task_filter_survives(
+        self, factory_client, tmp_path: Path, shape: str
+    ) -> None:
+        _write(tmp_path, "Good.md", _TASK)
+        _write(tmp_path, "Bad.md", ODD_TASKS[shape])
+
+        # factory.js fetches one status per dashboard column.
+        for status in ("planned", "in_progress", "done"):
+            resp = await factory_client.get(f"/api/factory/tasks?status={status}")
+            assert resp.status_code == 200, status
+            names = [t["name"] for t in resp.json()]
+            assert ("Good" in names) is (status == "planned")
+            # Not plain text, so it is in no column, as in /api/v1/tasks.
+            if "status_" in shape or shape == "both_lists":
+                assert "Bad" not in names
+        unfiltered = await factory_client.get("/api/factory/tasks")
+        assert unfiltered.status_code == 200
+        assert "Good" in [t["name"] for t in unfiltered.json()]
+        api = await factory_client.get("/api/v1/tasks?status=planned", headers=_AUTH)
+        assert api.status_code == 200
+
+    @pytest.mark.parametrize("shape", ODD_TASKS)
+    async def test_editor_can_repair_the_page(
+        self, factory_client, tmp_path: Path, shape: str
+    ) -> None:
+        path = _write(tmp_path, "Bad.md", ODD_TASKS[shape])
+
+        resp = await factory_client.post(
+            "/page/Bad", data={"content": f"---\n{_TASK}\n---\n\nfixed\n"}
+        )
+
+        assert resp.status_code == 302
+        data = _frontmatter_on_disk(path)
+        assert data["type"] == "task"
+        assert data["status"] == "planned"
+        assert path.read_text(encoding="utf-8").endswith("fixed\n")
+
+    @pytest.mark.parametrize("shape", ODD_TASKS)
+    async def test_editor_can_resave_the_page_unchanged(
+        self, factory_client, tmp_path: Path, shape: str
+    ) -> None:
+        path = _write(tmp_path, "Bad.md", ODD_TASKS[shape])
+        before = _frontmatter_on_disk(path)
+
+        resp = await factory_client.post(
+            "/page/Bad", data={"content": path.read_text(encoding="utf-8")}
+        )
+
+        assert resp.status_code == 302
+        after = _frontmatter_on_disk(path)
+        assert after["type"] == before["type"]
+        assert after["status"] == before["status"]
+
+    @pytest.mark.parametrize("shape", ["status_list", "type_list", "both_lists"])
+    async def test_status_change_still_goes_through_the_state_machine(
+        self, factory_client, tmp_path: Path, shape: str
+    ) -> None:
+        path = _write(tmp_path, "Bad.md", ODD_TASKS[shape])
+        before = path.read_text(encoding="utf-8")
+
+        refused = await factory_client.post(
+            "/page/Bad",
+            data={"content": "---\ntype: task\nstatus: done\n---\n\nbody\n"},
+        )
+
+        assert refused.status_code == 422
+        assert "Cannot transition from 'planned' to 'done'" in refused.json()["detail"]
+        assert path.read_text(encoding="utf-8") == before
+
+        allowed = await factory_client.post(
+            "/page/Bad",
+            data={
+                "content": "---\ntype: task\nassignee: factory\n"
+                "status: in_progress\n---\n\nbody\n"
+            },
+        )
+
+        assert allowed.status_code == 302
+        assert _frontmatter_on_disk(path)["status"] == "in_progress"

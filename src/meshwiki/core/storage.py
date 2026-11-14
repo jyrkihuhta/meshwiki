@@ -48,6 +48,22 @@ class InvalidFrontmatterError(ValueError):
         self.problems = problems
 
 
+# What loading frontmatter can raise. PyYAML reports most problems as YAMLError,
+# but its constructors let plain built-in exceptions through for a tagged scalar
+# they cannot build: ``!!bool maybe`` is a KeyError, ``!!int ""`` an IndexError,
+# ``!!timestamp foo`` an AttributeError, an out-of-range date a ValueError or
+# OverflowError. Deeply nested or self-referential YAML ends in RecursionError.
+_FRONTMATTER_ERRORS = (
+    yaml.YAMLError,
+    ValueError,
+    TypeError,
+    LookupError,
+    AttributeError,
+    ArithmeticError,
+    RecursionError,
+)
+
+
 def _is_text(value: Any) -> bool:
     """Return True if a YAML value is already text or a flat list of text."""
     if isinstance(value, list):
@@ -91,7 +107,7 @@ def _restore_source_text(frontmatter: dict[Any, Any], yaml_text: str) -> dict[An
         # BaseLoader builds only str, list and dict, so it is as safe as
         # safe_load.
         source = yaml.load(yaml_text, Loader=yaml.BaseLoader)  # noqa: S506
-    except yaml.YAMLError:
+    except _FRONTMATTER_ERRORS:
         return frontmatter
     if not isinstance(source, dict):
         return frontmatter
@@ -250,9 +266,10 @@ class FileStorage(Storage):
                 frontmatter, problems = coerce_frontmatter(frontmatter)
                 metadata = PageMetadata(**frontmatter)
                 return metadata, content[match.end() :], problems
-            except (yaml.YAMLError, TypeError, ValueError, RecursionError):
-                # Not usable as frontmatter (YAML syntax error, non-string
-                # keys, ...): keep the whole text as the page body.
+            except _FRONTMATTER_ERRORS:
+                # Not usable as frontmatter (YAML syntax error, a tagged value
+                # PyYAML cannot build, non-string keys, ...): keep the whole
+                # text as the page body.
                 pass
         return PageMetadata(), content, []
 
@@ -311,8 +328,17 @@ class FileStorage(Storage):
                 if not path.is_file():
                     continue
                 page = self._read_page(self._path_to_name(path), path)
-            except (PageFileError, OSError, ValueError) as exc:
-                log.warning("page_file_skipped", file=str(path), error=str(exc))
+            except Exception as exc:
+                # Deliberately broad: this is the one place that keeps a single
+                # file from failing every listing, so it must also hold for a
+                # failure nobody anticipated (a parser bug, say). The file is
+                # named in the log; only this page is left out.
+                log.warning(
+                    "page_file_skipped",
+                    file=str(path),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
                 continue
             yield page
 
@@ -499,8 +525,14 @@ class FileStorage(Storage):
                 if not path.is_file():
                     continue
                 pages.append(self._read_page(name, path))
-            except (PageFileError, OSError, ValueError) as exc:
-                log.warning("page_file_skipped", page=name, error=str(exc))
+            except Exception as exc:
+                # Broad for the same reason as in _scan_pages.
+                log.warning(
+                    "page_file_skipped",
+                    page=name,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
         return pages
 
     async def get_pages(self, names: list[str]) -> list[Page]:
@@ -571,13 +603,32 @@ class FileStorage(Storage):
             metadata.model_extra[field] = value
 
     def _write_frontmatter_update(
-        self, name: str, path: Path, metadata: PageMetadata, body: str, message: str
+        self,
+        name: str,
+        path: Path,
+        metadata: PageMetadata,
+        body: str,
+        message: str,
+        set_aside: list[str],
     ) -> Page:
-        """Stamp ``modified``, write the page back and record the revision."""
+        """Stamp ``modified``, write the page back and record the revision.
+
+        ``set_aside`` is the problem list from reading the file: each entry is a
+        declared field whose value could not be read as its type, which this
+        write stores under ``<field>_invalid``. That renames a key the caller
+        never asked to change, so it is logged with the page name.
+        """
         metadata.modified = datetime.now()
 
         raw = self._create_frontmatter(metadata) + body
         path.write_text(raw, encoding="utf-8")
+        if set_aside:
+            log.warning(
+                "frontmatter_values_set_aside",
+                page=name,
+                file=str(path),
+                problems=set_aside,
+            )
 
         if self._revisions is not None:
             self._revisions.record(
@@ -609,10 +660,10 @@ class FileStorage(Storage):
         if not path.is_file():
             return None
 
-        metadata, body = self._parse_frontmatter(self._read_file(name, path))
+        metadata, body, set_aside = self._load_frontmatter(self._read_file(name, path))
         self._set_field(metadata, field, value, remove=not value)
         return self._write_frontmatter_update(
-            name, path, metadata, body, f"Updated {field}"
+            name, path, metadata, body, f"Updated {field}", set_aside
         )
 
     async def patch_frontmatter(
@@ -633,11 +684,11 @@ class FileStorage(Storage):
         if not path.is_file():
             return None
 
-        metadata, body = self._parse_frontmatter(self._read_file(name, path))
+        metadata, body, set_aside = self._load_frontmatter(self._read_file(name, path))
         for field, value in fields.items():
             self._set_field(metadata, field, value, remove=value is None)
         return self._write_frontmatter_update(
-            name, path, metadata, body, f"Updated {', '.join(fields)}"
+            name, path, metadata, body, f"Updated {', '.join(fields)}", set_aside
         )
 
     async def rename_page(self, old_name: str, new_name: str) -> "Page | None":

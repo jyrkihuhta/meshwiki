@@ -94,21 +94,35 @@ fails because of what a file contains:
   one-item list, list items become text, nested lists are flattened.
 - **A value with no sensible reading** (`created: yesterday`, `title: [a, b]`,
   `tags: {a: 1}`) leaves the field at its default and is kept under
-  `<field>_invalid` in the extras, so nothing is lost on the next write.
+  `<field>_invalid` in the extras, so nothing is lost on the next write. The
+  write that first stores such a key (`update_frontmatter_field()`,
+  `patch_frontmatter()`) logs `frontmatter_values_set_aside` with the page name;
+  reading and scanning do not log it.
+- **Frontmatter YAML cannot load** (a syntax error, or a tagged scalar PyYAML
+  cannot build such as `draft: !!bool maybe`, for which it raises `KeyError`,
+  `IndexError` or `AttributeError` rather than `YAMLError`) is not frontmatter:
+  the whole text is the page body and the metadata is empty.
 - **Reading is lenient, writing is strict.** `save_page()` normalises coercible
   values (`tags: python` is written back as a list) but raises
   `InvalidFrontmatterError` (HTTP 422) for a value it would have to set aside.
   `update_frontmatter_field()` / `patch_frontmatter()` convert the new value to
   the field's type, so they cannot write a file the reader rejects.
 - **Unreadable files** (not UTF-8, permissions) are logged (`page_file_skipped`)
-  and skipped by every scan (listing, search, tags, sidebar). Addressed by name
-  they raise `PageFileError`, which the app answers with an explanatory 500;
-  the page can be deleted from the UI or overwritten through the API. A
-  directory named `*.md` is not a page.
+  and skipped by every scan (listing, search, tags, sidebar); the scan guard
+  catches any exception, so an unforeseen failure in one file costs that page
+  only. Addressed by name they raise `PageFileError`, which the app answers
+  with an explanatory 500; the page can be deleted from the UI or overwritten
+  through the API. A directory named `*.md` is not a page.
 - **Extras are unvalidated.** Code that reads an extra field across many pages
-  (sidebar tree, epic children) must not assume its type; see
-  `_frontmatter_text()` in `main.py`. Sort timestamps with
-  `datetime_sort_key()`: files may mix naive and timezone-aware datetimes.
+  (sidebar tree, epic children) must not assume its type, nor that it is
+  hashable (`status: [planned]` is a list: compare with `==`, do not look it up
+  in a set or dict); see `_frontmatter_text()` in `main.py`. Sort timestamps
+  with `datetime_sort_key()`: files may mix naive and timezone-aware datetimes.
+- **Metadata leaves the app as JSON through `json_safe_metadata()`**
+  (`core/models.py`), not `model_dump()`. YAML can produce values no JSON
+  encoder accepts (`!!binary` data that is not UTF-8, a value that contains
+  itself, `.nan`, `.inf`); one such page would fail the whole listing. They are
+  replaced with text in the response only; the file keeps the value.
 
 ### Parser Pipeline
 ```

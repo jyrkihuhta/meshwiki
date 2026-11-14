@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from meshwiki.api.auth import require_api_key
 from meshwiki.core.dependencies import get_storage
+from meshwiki.core.models import json_safe_metadata
 from meshwiki.core.storage import FileStorage
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -34,7 +35,7 @@ async def list_agents(
         results.append(
             {
                 "name": page.name,
-                "metadata": page.metadata.model_dump(),
+                "metadata": json_safe_metadata(page.metadata),
             }
         )
 
@@ -53,5 +54,5 @@ async def get_agent(
     return {
         "name": page.name,
         "content": page.content,
-        "metadata": page.metadata.model_dump(),
+        "metadata": json_safe_metadata(page.metadata),
     }

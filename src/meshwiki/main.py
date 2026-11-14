@@ -54,7 +54,7 @@ from meshwiki.core.metrics import (
     page_views_total,
     page_writes_total,
 )
-from meshwiki.core.models import Page, datetime_sort_key
+from meshwiki.core.models import Page, datetime_sort_key, json_safe_metadata
 from meshwiki.core.parser import (
     FRONTMATTER_PATTERN,
     parse_wiki_content,
@@ -998,15 +998,20 @@ async def save_page(request: Request, name: str, content: str = Form("")):
     if settings.factory_enabled:
         old_page = await storage.get_page(name)
         if old_page is not None:
+            # Extras are unvalidated: read them as text so a list- or
+            # mapping-valued ``type``/``status`` on disk cannot make the page
+            # unsaveable (and so unrepairable) through the editor.
             old_extras = old_page.metadata.model_extra or {}
-            old_status = old_extras.get("status")
-            old_type = old_extras.get("type")
+            old_status = _frontmatter_text(old_extras.get("status"))
+            old_type = _frontmatter_text(old_extras.get("type"))
             if old_status and old_type in {"task", "epic"}:
                 new_meta, new_body, problems = storage._load_frontmatter(content)
                 if problems:
                     # Checked here too: the content may be re-serialised below.
                     raise InvalidFrontmatterError(problems)
-                new_status = (new_meta.model_extra or {}).get("status")
+                new_status = _frontmatter_text(
+                    (new_meta.model_extra or {}).get("status")
+                )
                 if new_status and new_status != old_status:
                     allowed = TASK_TRANSITIONS.get(old_status, [])
                     if new_status not in allowed:
@@ -1263,7 +1268,6 @@ async def factory_tasks(
     The dashboard JS calls this instead of /api/v1/tasks directly so that
     the factory_api_key auth requirement doesn't block unauthenticated browsers.
     """
-    statuses_filter = {status} if status else None
     pages = await page_cache.get_pages_metadata()
     results = []
     for page in pages:
@@ -1272,9 +1276,13 @@ async def factory_tasks(
             continue
         if extra.get("assignee") != "factory":
             continue
-        if statuses_filter and extra.get("status") not in statuses_filter:
+        # ``!=`` rather than a set lookup: an extra field can hold a list or a
+        # mapping, which is unhashable. Same test as /api/v1/tasks.
+        if status and extra.get("status") != status:
             continue
-        results.append({"name": page.name, "metadata": page.metadata.model_dump()})
+        results.append(
+            {"name": page.name, "metadata": json_safe_metadata(page.metadata)}
+        )
     return results
 
 
