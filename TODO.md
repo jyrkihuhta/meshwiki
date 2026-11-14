@@ -25,8 +25,10 @@
 | F10 | **Factory v2: Live Visualization** — D3.js factory graph, `/factory/live`, WebSocket | ✅ Complete (command-center view open) |
 | F11 | **Factory v2: Stale PR Bot** — autonomous CI failure fixer | ✅ Complete |
 
-**Priority:** HIGH/MEDIUM findings from [Code review (2026-10-07)](#code-review-2026-10-07)
-(data loss + XSS first) → armory-research cutover → 11 → 12 → 13
+**Priority:** HIGH findings from [Deep review (2026-11)](#deep-review-2026-11)
+(auth startup checks, frontmatter tolerance) and its deploy/CI items → merge the
+H2 fix (#224) → remaining [Code review (2026-10-07)](#code-review-2026-10-07)
+items → factory graph fixes (F1–F3) → armory-research cutover → 11 → 12 → 13
 
 **~1,570 tests passing** (~785 web unit + 49 Playwright E2E + ~664 orchestrator + 70
 graph-core), CI pipeline active.
@@ -120,7 +122,7 @@ Staging factory is fully operational. Multiple successful grinder tasks merged.
 Fix correctness and reliability issues in the v1 orchestrator.
 
 **Cost & resource control (highest impact)**
-- [x] **F8.1** Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node`
+- [ ] **F8.1** Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node` — ⚠️ reopened: the cap exists but `active_grinders` is filled when a grinder *finishes* and is never cleared (see Deep review 2026-11, F1)
 - [x] **F8.2** Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
 
 **Correctness**
@@ -153,7 +155,7 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [x] Configurable PM model — `FACTORY_PM_DECOMPOSE_MODEL`, `FACTORY_PM_REVIEW_MODEL`, `FACTORY_PM_TRIAGE_MODEL` env vars
 - [x] Review feedback in rework — `subtask["review_feedback"]` appended to Kilo task prompt on rework iterations
 - [x] PM review token cost — diff capped at `FACTORY_PM_REVIEW_MAX_DIFF_LINES` (default 500), two-pass triage via `FACTORY_PM_TRIAGE_MODEL` (Haiku fast-path; escalates to Sonnet only when triage requests changes)
-- [x] Deferred subtask routing bug — `route_after_grinding` now loops back to `assign_grinders` when pending subtasks remain
+- [ ] Deferred subtask routing bug — `route_after_grinding` now loops back to `assign_grinders` when pending subtasks remain — ⚠️ reopened: the loop-back edge is gone again, deferred subtasks are never dispatched (see Deep review 2026-11, F1)
 - [x] Spurious `task.assigned` restart from subtask transitions — webhook_server checks `data["parent_task"]` and ignores `task.assigned` for subtask pages
 - [x] E2B sandbox disk optimisation — `git clone --depth 1` + `pip install --no-cache-dir` in grinder_agent.py
 - [x] Orchestrator dep install in grinder — `pip install -e '.[dev]'` added to bootstrap (GrinderBootstrap PR #126)
@@ -175,7 +177,7 @@ Real-time factory activity view using D3.js, same visual language as the wiki gr
 
 - [x] `core/factory_ws_manager.py` — push-based WebSocket manager + 500-entry activity ring buffer
 - [x] `core/task_machine.py` — broadcast task transitions to factory WS after webhook emit
-- [x] `GET /ws/factory` WebSocket endpoint — ⚠️ **currently unauthenticated**, see Code review 2026-10-07 (M1)
+- [x] `GET /ws/factory` WebSocket endpoint — session check added in #223 (M1)
 - [x] `GET /api/factory/graph` and `GET /api/factory/activity` REST endpoints
 - [x] `/factory/live` page: D3 force graph (task circles colored by status, agent diamonds, dashed parent edges), detail panel (slide-in right, terminal embed for in_progress), activity feed strip at bottom
 - [x] `base.html` — add conditional "Factory" nav link when `factory_enabled`
@@ -245,7 +247,7 @@ SQLite-backed revision tracking for every page save. Zero new dependencies (stdl
 - [x] `GET /page/{name}/history/{rev}` — read-only rendered past revision with restore button
 - [x] `POST /page/{name}/restore/{rev}` — restores content, records new revision
 - [x] `GET /page/{name}/diff/{a..b}` — unified diff view (also `diff/{n}` shorthand)
-- [x] JSON API: `GET /api/v1/pages/{name}/history[/{rev}]`
+- [ ] JSON API: `GET /api/v1/pages/{name}/history[/{rev}]` — ⚠️ reopened: unreachable, shadowed by the earlier `GET /pages/{name:path}` route (Deep review 2026-11)
 - [x] Config: `MESHWIKI_HISTORY_ENABLED` (default `true`)
 - [x] 60 new tests (28 unit + 13 storage + 19 integration)
 
@@ -392,14 +394,17 @@ still applied to `staging` were fixed in a separate pass; the items below are
 the deferred LOW findings and improvement ideas, grouped by theme.
 
 ### Correctness (LOW findings B10–B13)
-- **Decompose `planned→planned` + acceptance-criteria bug** — the PM decompose
-  path can emit a no-op `planned→planned` transition; and acceptance criteria
-  are derived from `files_touched` (an *estimate* filled in during
-  decomposition), so criteria can be wrong/empty when the estimate is off.
-  Derive acceptance criteria from the task spec, not the file estimate.
+- **Decompose `planned→planned` + acceptance-criteria bug** — ✅ no longer
+  applies (checked 2026-11): `decompose_node` does not transition subtasks, and
+  acceptance criteria come from the PM tool call. Leftovers: the docstring still
+  says it transitions subtasks, and the `skip_decomposition` path builds its
+  subtask with empty acceptance criteria.
 - **Branch name from page name → invalid git refs** — branch names built from
   wiki page names can produce refs git rejects (spaces, `..`, leading/trailing
   slashes, control chars, reserved sequences). Sanitize to a valid ref.
+  Narrower than described (2026-11): decomposed subtasks use uuid-based ids;
+  the page-name case remains for `skip_decomposition` and pre-seeded subtask
+  pages, where the id is also interpolated unquoted into sandbox shell commands.
 - **Rate limiter keys on proxy IP** — still open, severity raised: tracked as
   **M2** in Code review (2026-10-07) (it's a global login-lockout DoS, not just a
   shared bucket).
@@ -414,34 +419,46 @@ the deferred LOW findings and improvement ideas, grouped by theme.
   and the `/api/v1/tasks` batch load now run in an executor (#209, #210).
   Remaining: `get_page`, `save_page`, `search_by_tag`, `update_frontmatter_field`
   and `patch_frontmatter` still call synchronous `read_text()`/`write_text()`
-  inside `async def`; `search_by_tag` scans every page inline.
+  inside `async def`; `search_by_tag` scans every page inline. **Also
+  `search_pages`** (2026-11): the heaviest remaining path, it reads and parses
+  every page on the event loop for each search-box query; `<<Include>>`
+  rendering does the same per included page.
 - **PyO3 GIL** — the `GraphEngine` PyO3 methods hold the GIL for the whole call;
   wrap heavy graph operations (rebuild, query, metatable) in `py.allow_threads`
   so concurrent Python work isn't blocked.
 
 ### Factory F8 robustness
 - Enforce concurrency caps (parent tasks + sandboxes) at dispatch, not just in
-  status reporting.
-- Add real cost tracking (accumulate per-grinder token/sandbox cost into
-  `cost_usd` / `incremental_costs_usd`).
-- Use one shared `httpx.AsyncClient` per `MeshWikiClient` instead of a new client
-  per request.
+  status reporting. — implemented but the counter is wrong; see Deep review
+  2026-11, F1.
+- Add real cost tracking — 🔄 partly done (PM calls and sandbox time are
+  accumulated). Missing: model spend inside the E2B sandbox, PM spend in the
+  daily-budget gate, `cost_usd` for running/abandoned tasks, and persistence
+  across restarts (budget totals reset on every restart).
+- ✅ One shared `httpx.AsyncClient` per `MeshWikiClient` — done (F8.11).
 - URL-encode page names when building MeshWiki API URLs (hierarchical names with
-  slashes/spaces).
+  slashes/spaces). Worse than a 404 risk (2026-11): `?` or `#` in a name sends
+  the read-modify-write helpers to a *different* page.
 
 ### Build / dependency hygiene
 - No lockfiles and all deps pinned as `>=` — add lockfiles (pip-tools/uv,
-  `Cargo.lock` committed) for reproducible builds.
-- `config.py` hardcodes a `repo_root` default — make it explicit/required.
-- Remove dead `POSTGRES_DSN` config (no DB backend yet).
-- Reconcile the `FACTORY_PORT` mismatch between compose/env and the app default —
-  🔄 `staging.env.example` webhook URL fixed to `:8002` (#204); the app default
-  (8001) still differs from the staging port.
+  `Cargo.lock` committed) for reproducible builds. Also (2026-11):
+  `graph-core/.gitignore` ignores `Cargo.lock` (remove that first, then build
+  with `--locked`); base images, rustup and maturin are unpinned; the Dockerfile
+  comment claims a base-image digest that is not pinned.
+- ✅ `config.py` `repo_root` — no longer hardcoded (defaults to the working
+  directory).
+- `POSTGRES_DSN` — gone from the code; only a line in `deploy/vps/.env.example`
+  remains to delete.
+- ✅ `FACTORY_PORT` — consistent by design: app default 8001 is production, CI
+  writes 8002 for staging.
 
 ### CI / deploy
 - Gate deploy on `test-orchestrator` — ✅ staging deploy now requires
-  `test-orchestrator` success (or skipped when no orchestrator changes); confirm
-  the production `deploy` chain has the same gate.
+  `test-orchestrator` success (or skipped when no orchestrator changes).
+  **Production does not have the gate** (confirmed 2026-11): `deploy` accepts a
+  skipped `merge-orchestrator`, which is what a failed `test-orchestrator`
+  produces, so the wiki ships at the new commit with the old orchestrator image.
 - Orchestrator image is shipped as unversioned `:latest` with no rollback path —
   tag images and keep a rollback.
 - Most E2E tests never run in CI — 🔄 a smoke subset runs on PRs into `main`
@@ -558,6 +575,199 @@ such as repeatedly re-filing `other-generic.md`.
 - [ ] Cutover, sequenced with no double-tasking window: enable
   `FACTORY_ARMORY_RESEARCH_ENABLED`, retire `class_gap_researcher.py`'s domain
   logic, remove `h1_researcher`'s task-creation path
+
+---
+
+## Deep review (2026-11)
+
+Whole-`staging` review at `f59fde5` (wiki, factory, Rust engine, deploy/CI).
+316 findings held up after independent verification: 3 high, 120 medium, 180
+low, 13 info; many share a root cause. Full report:
+[`docs/reviews/2026-11-deep-review.md`](docs/reviews/2026-11-deep-review.md)
+(summary, themes, table of every finding) and
+[`…-details.md`](docs/reviews/2026-11-deep-review-details.md). IDs in brackets
+refer to that report. Items below are grouped work, in suggested order.
+
+### HIGH
+
+- [ ] **A1 · Auth fails open on missing or default secrets** — reproduced. With
+  auth on: an unset password accepts an empty login; an unset or blank
+  `MESHWIKI_SESSION_SECRET` makes the session cookie forgeable (full write
+  access). The env examples ship the secret blank, and the staging deploy copies
+  `staging.env.example` into place when `staging.env` is missing.
+  *Fix:* refuse to start with auth on unless password and secret are set,
+  non-default and long enough; reject empty passwords at `/login`; stop CI
+  installing the example file. **First: check the secrets on the VPS.**
+  [`wiki-routes-a-3`, `deploy-vps-1`]
+- [ ] **A2 · One badly typed frontmatter field takes the wiki down** —
+  reproduced. `title: 2024`, `tags: python`, `children: A` or a non-UTF-8 file
+  raises an unhandled validation error in every page scan; listings, search,
+  sidebar and then every HTML route return 500. Inline MetaTable editing
+  (`PATCH /api/page/{name}/metadata`) can write such a value.
+  *Fix:* catch `ValidationError` in `_parse_frontmatter` and degrade; guard each
+  file in the scan loops; validate in the PATCH endpoint; tolerate non-string
+  `parent_task` in the tree builder.
+  [`wiki-storage-1`, `-2`, `wiki-routes-b-1`, `wiki-routes-a-1`, `-7`]
+- [ ] **F1 · Factory cannot complete a task with 2+ subtasks** — reproduced
+  (rated high by one check, medium by another: factory-only). Parallel
+  `pm_review` branches each see siblings as unfinished and end the run; deferred
+  subtasks are never dispatched (no edge back to `assign_grinders`);
+  `active_grinders` only grows.
+  *Fix:* one join node after `pm_review` deciding finalise / wait /
+  re-dispatch; restore the loop-back; real-graph tests with 2+ subtasks.
+  [`factory-tests-1`, `factory-graph-nodes-1`, `-2`, `-3`]
+
+### MEDIUM — deploy and CI
+
+- [ ] **C1** Production `deploy` job switches the staging checkout to `main`
+  (regression of `daf7828`, on both branches). [`ci-workflows-2`]
+- [ ] **C2** Staging pushes overwrite production's compose file and Caddyfile
+  and reload the shared Caddy. [`ci-workflows-6`]
+- [ ] **C3** Production rollback is unreachable when the new container is
+  unhealthy; it also runs `up -d` on every service and leaves `.env` on the
+  failed version. [`ci-workflows-1`, `deploy-vps-8`]
+- [ ] **C4** Pin third-party actions to commit SHAs (one is on `@master`).
+  [`ci-workflows-8`]
+- [ ] **C5** Staging healthcheck never resets its failure counter after a kill:
+  a slow start becomes a kill loop. [`deploy-vps-2`]
+- [ ] **C6** Backups: `backup.sh` tars a live WAL-mode SQLite DB and is not
+  installed where cron expects it; runbook commands and restore steps are wrong.
+  [`deploy-vps-3`, `cross-architecture-docs-8`]
+- [ ] **C7** Request-size limits: no body cap in Caddy, uvicorn or the app;
+  public API routes parse the body before the API-key check. *Not verified*
+  (from the completeness critic).
+- [ ] **C8** `orchestrator/e2b.Dockerfile` passes the GitHub token as a build
+  arg used in `RUN` (recorded in image history). *Not verified.*
+
+### MEDIUM — wiki
+
+- [ ] **W1** Task state machine side doors: inline metadata edit, two-step save
+  and revision restore change `status` unchecked. [`wiki-routes-b-2`,
+  `wiki-routes-a-6`]
+- [ ] **W2** No conflict detection on save; a stale editor tab overwrites bot
+  updates and can fire transitions. Add a base-revision token.
+  [`wiki-routes-b-6`, `wiki-frontend-8`]
+- [ ] **W3** Page cache goes stale: PATCH and other write paths skip
+  invalidation; invalidations during a scan are lost; 60 s dedup drops the
+  second update. [`wiki-routes-b-3`, `wiki-storage-4`, `-5`, `wiki-api-core-10`]
+- [ ] **W4** Rename onto an existing page overwrites it, then 500s.
+  [`wiki-storage-3`]
+- [ ] **W5** Page writes are not atomic or ordered with the revision insert.
+  [`wiki-storage-8`]
+- [ ] **W6** Revision store grows without bound (no-op saves, bot patches);
+  add dedup and retention. [`wiki-storage-9`, `factory-bots-5`]
+- [ ] **W7** Page names: canonicalise before history/restore/delete; URL-encode
+  names and tags in templates and redirects (`#`/`?` redirect writes).
+  [`wiki-routes-a-5`, `wiki-routes-b-7`, `wiki-frontend-4`]
+- [ ] **W8** Unbounded Prometheus label series from unauthenticated requests.
+  [`wiki-routes-a-4`, `wiki-api-core-7`]
+- [ ] **W9** Parser limits: Include expansion budget; quadratic macro regexes
+  (9–13 s on a 50 KB page); macros that raise on author input.
+  [`wiki-parser-1`, `-3`, `-6`]
+- [ ] **W10** Terminal sessions never freed, no size cap; outbound webhook
+  dispatcher loses events and stalls on one dead endpoint.
+  [`wiki-api-core-8`, `-11`]
+- [ ] **W11** `hx-boost` breakage: `/search` navigation, save result and toast,
+  unsaved-changes guard, live-update WebSocket, scripts stacking up on each
+  navigation. [`wiki-frontend-1`, `-2`, `-3`, `-5`, `-6`]
+- [ ] **W12** Share one render path between `view_page`, the fragment route and
+  the HTMX save branch. [`wiki-routes-b-15`]
+
+### MEDIUM — Rust graph engine
+
+- [ ] **R1** Stub nodes are stamped "now", so the watcher's mtime short-circuit
+  skips newly created or renamed pages — reproduced. [`rust-bindings-1`]
+- [ ] **R2** Engine names keep underscores, link targets keep spaces: links to
+  multi-word pages attach to stubs. [`rust-graph-2`]
+- [ ] **R3** Deleting a page drops incoming edges; backlinks stay lost until
+  restart. [`rust-graph-1`]
+- [ ] **R4** Regex filter recompiled per page under the GIL and graph lock —
+  reproduced. [`rust-bindings-2`]
+- [ ] **R5** Watcher errors swallowed; `start_watching()` reports success after
+  the thread exits. [`rust-bindings-6`]
+- [ ] **R6** Rust unit tests cannot link and never run in CI (68 tests).
+  [`rust-graph-6`]
+
+### MEDIUM — factory
+
+- [ ] **F2** Failed PM review / failed subtask counts as approval; subtask
+  recorded `merged` when the PR was not merged — both reproduced.
+  [`factory-graph-nodes-6`, `-7`]
+- [ ] **F3** Human approval and rework restart the graph at `task_intake`
+  instead of resuming — reproduced. [`factory-graph-nodes-8`,
+  `factory-server-1`]
+- [ ] **F4** Restart pushes tasks waiting for human review through as rejected
+  and auto-fails in-progress subtask pages. [`factory-server-2`, `-3`]
+- [ ] **F5** Escalation always abandons; PM-diagnose retry never re-runs the
+  grinder. [`factory-graph-nodes-4`, `-5`]
+- [ ] **F6** Stale state across runs on one thread; human rejection re-reviews
+  an arbitrary subtask; empty dispatch ends silently; partial decompositions
+  finalised as complete. [`factory-graph-nodes-9`, `-11`, `-12`, `-13`]
+- [ ] **F7** Contract: transition `extra_fields` sent flattened and dropped
+  (reproduced); GitHub merge webhook can never match a task; bookkeeper queries
+  a status that does not exist. [`cross-trust-boundaries-1`, `-4`,
+  `factory-bots-1`]
+- [ ] **F8** Replace GET-then-PUT page updates (client, heartbeat, bots) with a
+  patch/append endpoint; the heartbeat can revert transitions.
+  [`cross-trust-boundaries-5`, `factory-bots-4`]
+- [ ] **F9** PM-chosen subtask page names are written with an overwriting PUT;
+  bots create slash-named pages the UI rejects. [`cross-trust-boundaries-8`,
+  `cross-architecture-docs-2`]
+- [ ] **F10** Build task-page frontmatter with a YAML serializer, not string
+  interpolation (newlines in external text inject keys).
+  [`factory-armory-2`, `factory-bots-7`]
+- [ ] **F11** Scrub the MiniMax/Kilo key from terminal stream and logs;
+  validate the scraped PR URL belongs to this task. [`factory-grinder-1`, `-2`]
+- [ ] **F12** Triage can approve and auto-merge from the first 500 diff lines.
+  [`factory-pm-1`]
+- [ ] **F13** Local grinder executor is not a security boundary (`.git` writes,
+  `run_tests`): remove or gate as dev-only. [`factory-grinder-4`]
+- [ ] **F14** Grinder rework fails on the shallow clone; bootstrap errors skip
+  the clone check; 25k-char logs appended per attempt. [`factory-grinder-3`,
+  `-5`, `-6`]
+- [ ] **F15** PM default path: no retry, 60 s timeout, no second provider; no
+  decision → subtask fails; `github_read_file` cannot work in decomposition.
+  [`factory-pm-6`, `-8`, `-9`]
+- [ ] **F16** Armory validator passes files it cannot see; forbidden-import
+  gate bypassable. [`factory-armory-3`, `-4`]
+- [ ] **F17** Research dedup: class-gap generic suggestions; armory-research cap
+  applied before the existing-page skip; survey truncates at 1,000 playbooks.
+  [`factory-armory-1`, `-5`, `-7`]
+- [ ] **F18** Bots: heartbeat rule fails healthy tasks; all bots re-run on every
+  restart; one leaked asyncio task per tick; CI-fixer comment spam.
+  [`factory-bots-2`, `-6`, `-9`, `-10`]
+- [ ] **F19** `scripts/abandon_dropped_target_tasks.py` blocks every open
+  playbook task on an empty upstream list. [`deploy-vps-9`]
+- [ ] **F20** Tests: multi-subtask and resume through the real graph; triage and
+  default-provider paths; budget wiring; a wiki↔orchestrator contract test.
+  [`factory-graph-nodes-17`, `factory-tests-8`, `-10`]
+
+### Follow-ups to PR #224
+
+- [ ] Staging deploy still accepts a skipped image `merge` (new code on an old
+  image when the build fails). [`ci-workflows-4`]
+- [ ] Hover-preview endpoint skips page-name validation (500 on traversal-style
+  names). [`wiki-routes-b-12`]
+- [ ] CSP `script-src` trusts three whole public CDNs; `connect-src` allows any
+  `wss:` host. [`wiki-routes-a-12`]
+
+### Corrections to Code review (2026-10-07) items
+
+- **M2** — cause is misstated: uvicorn's proxy-header handling is on by default;
+  the missing piece is the trust list (`--forwarded-allow-ips`). Also the
+  failure count never decays and a lockout blocks the correct password.
+- **M3** — do not use `https_only=not settings.debug` (breaks the auth tests and
+  plain-HTTP deployments); add a dedicated setting.
+- **M4** — `--glob` must come before `--`, or the proposed command breaks file
+  filtering. See F13 for the wider point.
+- **L3** — `_run_autofix` is broken, not just `shell=True`: `ruff --fix src/` is
+  rejected by current ruff (needs `ruff check --fix`).
+
+### LOW
+
+180 low and 13 informational findings are listed per unit in Appendix A of the
+report (docs drift, k8s/Terraform scaffolding rot, script footguns, hardening,
+test hygiene). Pick them up alongside the theme they belong to.
 
 ---
 
