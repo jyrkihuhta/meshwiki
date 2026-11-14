@@ -14,6 +14,7 @@ from markdown.postprocessors import Postprocessor
 from markdown.preprocessors import Preprocessor
 
 from meshwiki.core.graph import get_engine
+from meshwiki.core.models import datetime_sort_key
 from meshwiki.core.sanitize import sanitize_html
 from meshwiki.extensions.running_clock import RunningClockExtension
 
@@ -368,7 +369,7 @@ def _render_recent_changes(pages: list, n: int = 10) -> str:
     filtered = [p for p in pages if not p.name.startswith("Factory/")]
     sorted_pages = sorted(
         filtered,
-        key=lambda p: p.metadata.modified or datetime.min,
+        key=lambda p: datetime_sort_key(p.metadata.modified),
         reverse=True,
     )
     top_pages = sorted_pages[:n]

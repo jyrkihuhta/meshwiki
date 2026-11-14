@@ -82,6 +82,34 @@ class Storage(ABC):
 Current implementation: `FileStorage` (files on disk)
 Future: May delegate existence checks to graph engine
 
+#### Frontmatter tolerance
+
+Page files are also written by hand, by git and by bots, so reading never
+fails because of what a file contains:
+
+- **Wrong YAML type for a declared field** (`title`, `uuid`, `tags`, `children`,
+  `created`, `modified`) is coerced by `coerce_frontmatter()` in
+  `core/models.py`: a scalar for a text field becomes text (the text the author
+  wrote: `title: 1.10` stays `"1.10"`), a scalar for a list field becomes a
+  one-item list, list items become text, nested lists are flattened.
+- **A value with no sensible reading** (`created: yesterday`, `title: [a, b]`,
+  `tags: {a: 1}`) leaves the field at its default and is kept under
+  `<field>_invalid` in the extras, so nothing is lost on the next write.
+- **Reading is lenient, writing is strict.** `save_page()` normalises coercible
+  values (`tags: python` is written back as a list) but raises
+  `InvalidFrontmatterError` (HTTP 422) for a value it would have to set aside.
+  `update_frontmatter_field()` / `patch_frontmatter()` convert the new value to
+  the field's type, so they cannot write a file the reader rejects.
+- **Unreadable files** (not UTF-8, permissions) are logged (`page_file_skipped`)
+  and skipped by every scan (listing, search, tags, sidebar). Addressed by name
+  they raise `PageFileError`, which the app answers with an explanatory 500;
+  the page can be deleted from the UI or overwritten through the API. A
+  directory named `*.md` is not a page.
+- **Extras are unvalidated.** Code that reads an extra field across many pages
+  (sidebar tree, epic children) must not assume its type; see
+  `_frontmatter_text()` in `main.py`. Sort timestamps with
+  `datetime_sort_key()`: files may mix naive and timezone-aware datetimes.
+
 ### Parser Pipeline
 ```
 Raw Markdown → [Extensions] → HTML

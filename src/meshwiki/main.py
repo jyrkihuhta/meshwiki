@@ -1,6 +1,5 @@
 """MeshWiki FastAPI application."""
 
-import asyncio
 import json
 import re
 import secrets
@@ -55,7 +54,7 @@ from meshwiki.core.metrics import (
     page_views_total,
     page_writes_total,
 )
-from meshwiki.core.models import Page
+from meshwiki.core.models import Page, datetime_sort_key
 from meshwiki.core.parser import (
     FRONTMATTER_PATTERN,
     parse_wiki_content,
@@ -63,7 +62,11 @@ from meshwiki.core.parser import (
     word_count,
 )
 from meshwiki.core.revision_store import RevisionStore
-from meshwiki.core.storage import FileStorage
+from meshwiki.core.storage import (
+    FileStorage,
+    InvalidFrontmatterError,
+    PageFileError,
+)
 from meshwiki.core.task_machine import TASK_TRANSITIONS
 from meshwiki.core.task_machine import transition_task as _machine_transition
 from meshwiki.core.ws_manager import manager
@@ -193,6 +196,42 @@ app.add_middleware(LoggingMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
+def _error_response(
+    request: Request, status_code: int, title: str, detail: str
+) -> Response:
+    """Return an error as JSON for API paths and as a small HTML page otherwise."""
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": detail}, status_code=status_code)
+    return HTMLResponse(
+        "<!DOCTYPE html>\n"
+        f"<title>{html_escape(title)}</title>\n"
+        f"<h1>{html_escape(title)}</h1>\n"
+        f"<p>{html_escape(detail)}</p>\n"
+        '<p><a href="/">Back to the wiki</a></p>\n',
+        status_code=status_code,
+    )
+
+
+@app.exception_handler(PageFileError)
+async def page_file_error_handler(request: Request, exc: PageFileError) -> Response:
+    """Explain an unusable page file instead of failing with a bare 500.
+
+    The data on disk is at fault, not the request, so the status stays 500; the
+    body names the page and the reason so an operator can fix or delete the file
+    (deleting works from the UI: ``POST /page/{name}/delete``).
+    """
+    log.warning("page_file_error", page=exc.name, reason=exc.reason)
+    return _error_response(request, 500, "This page cannot be displayed", str(exc))
+
+
+@app.exception_handler(InvalidFrontmatterError)
+async def invalid_frontmatter_handler(
+    request: Request, exc: InvalidFrontmatterError
+) -> Response:
+    """Reject a write whose frontmatter cannot be made valid with a 422."""
+    return JSONResponse({"detail": str(exc)}, status_code=422)
+
+
 def timeago_filter(dt: datetime | None) -> str:
     """Convert datetime to relative time string."""
     if dt is None:
@@ -263,6 +302,26 @@ def _is_hidden_page(page: Page) -> bool:
     return bool(set(page.metadata.tags) & _SIDEBAR_HIDDEN_TAGS)
 
 
+def _frontmatter_text(value: object) -> str:
+    """Read a hand-written frontmatter value as one piece of text.
+
+    Extra frontmatter fields are not validated, so a field the sidebar treats
+    as text (``parent_task``, ``status``) can hold any YAML type. Text is
+    returned as is, a list gives its first item (``parent_task: [[Epic]]`` is a
+    nested list in YAML), other scalars are converted, and anything else
+    (a mapping, an empty list, null) reads as an empty string.
+    """
+    for _ in range(8):  # bounded: a YAML alias can make a list contain itself
+        if not isinstance(value, (list, tuple)):
+            break
+        value = value[0] if value else None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    return ""
+
+
 def build_page_tree_sync(pages: list[Page]) -> list[dict]:
     """Build a hierarchy from ``children:`` frontmatter and ``parent_task:`` fields.
 
@@ -303,7 +362,7 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
         if _is_hidden_page(page):
             continue
         extra = page.metadata.model_extra or {}
-        parent = extra.get("parent_task")
+        parent = _frontmatter_text(extra.get("parent_task"))
         if parent:
             bucket = children_of.setdefault(_ref(parent), [])
             if _ref(page.name) not in {_ref(c) for c in bucket}:
@@ -332,9 +391,7 @@ def build_page_tree_sync(pages: list[Page]) -> list[dict]:
                 "stub": True,
             }
         extra = page.metadata.model_extra or {}
-        status = extra.get("status", "") or ""
-        if isinstance(status, list):
-            status = status[0] if status else ""
+        status = _frontmatter_text(extra.get("status"))
         return {
             "name": page.name,
             "title": page.title,
@@ -491,7 +548,7 @@ async def index(request: Request):
     root_pages = [p for p in all_pages if not p.metadata.model_extra.get("parent")]
     recent_pages = sorted(
         [p for p in root_pages if p.metadata.modified],
-        key=lambda p: p.metadata.modified,
+        key=lambda p: datetime_sort_key(p.metadata.modified),
         reverse=True,
     )[:10]
     page_tree = await page_cache.get_page_tree()
@@ -751,18 +808,19 @@ async def view_page(request: Request, name: str):
             meta = p.metadata.model_dump()
             extra = p.metadata.model_extra if hasattr(p.metadata, "model_extra") else {}
             # Tasks link to an epic via parent_task (factory standard) or parent_epic.
-            parent_ref = (
+            # Other pages' frontmatter is unvalidated: read both as text so one
+            # oddly typed child cannot break the epic page.
+            parent_ref = _frontmatter_text(
                 meta.get("parent_task")
                 or extra.get("parent_task")
                 or meta.get("parent_epic")
                 or extra.get("parent_epic")
             )
-            if isinstance(parent_ref, list):
-                parent_ref = parent_ref[0] if parent_ref else None
             if parent_ref == name or p.name.startswith(name + "/"):
-                status = meta.get("status") or extra.get("status") or "planned"
-                if isinstance(status, list):
-                    status = status[0] if status else "planned"
+                status = (
+                    _frontmatter_text(meta.get("status") or extra.get("status"))
+                    or "planned"
+                )
                 child_tasks.append({"name": p.name, "title": p.title, "status": status})
         page_metadata["_child_tasks"] = child_tasks
 
@@ -786,23 +844,23 @@ async def view_page(request: Request, name: str):
         else:
             recent_pages = sorted(
                 [p for p in all_pages_for_recent if p.metadata.modified],
-                key=lambda p: p.metadata.modified,
+                key=lambda p: datetime_sort_key(p.metadata.modified),
                 reverse=True,
             )
     else:
         recent_pages = sorted(
             [p for p in all_pages_for_recent if p.metadata.modified],
-            key=lambda p: p.metadata.modified,
+            key=lambda p: datetime_sort_key(p.metadata.modified),
             reverse=True,
         )
 
     # Fetch all page contents for <<Include>> macro.
     page_contents: dict[str, str] = {}
     if "<<Include(" in page.content:
-        all_page_names = await storage.list_pages()
-        pages = await asyncio.gather(*(storage.get_page(n) for n in all_page_names))
+        # One guarded scan: a page whose file cannot be read is left out
+        # instead of failing every page that uses <<Include>>.
         page_contents = {
-            n: p.content for n, p in zip(all_page_names, pages) if p is not None
+            p.name: p.content for p in await storage.list_pages_with_metadata()
         }
 
     # Parse content with wiki links, TOC, and page context for macros.
@@ -876,22 +934,22 @@ async def page_content_fragment(name: str, request: Request):
         else:
             recent_pages = sorted(
                 [p for p in all_pages_for_recent if p.metadata.modified],
-                key=lambda p: p.metadata.modified,
+                key=lambda p: datetime_sort_key(p.metadata.modified),
                 reverse=True,
             )
     else:
         recent_pages = sorted(
             [p for p in all_pages_for_recent if p.metadata.modified],
-            key=lambda p: p.metadata.modified,
+            key=lambda p: datetime_sort_key(p.metadata.modified),
             reverse=True,
         )
 
     page_contents: dict[str, str] = {}
     if "<<Include(" in page.content:
-        all_page_names = await storage.list_pages()
-        pages = await asyncio.gather(*(storage.get_page(n) for n in all_page_names))
+        # One guarded scan: a page whose file cannot be read is left out
+        # instead of failing every page that uses <<Include>>.
         page_contents = {
-            n: p.content for n, p in zip(all_page_names, pages) if p is not None
+            p.name: p.content for p in await storage.list_pages_with_metadata()
         }
 
     html_content, _ = parse_wiki_content_with_toc(
@@ -944,7 +1002,10 @@ async def save_page(request: Request, name: str, content: str = Form("")):
             old_status = old_extras.get("status")
             old_type = old_extras.get("type")
             if old_status and old_type in {"task", "epic"}:
-                new_meta, new_body = storage._parse_frontmatter(content)
+                new_meta, new_body, problems = storage._load_frontmatter(content)
+                if problems:
+                    # Checked here too: the content may be re-serialised below.
+                    raise InvalidFrontmatterError(problems)
                 new_status = (new_meta.model_extra or {}).get("status")
                 if new_status and new_status != old_status:
                     allowed = TASK_TRANSITIONS.get(old_status, [])
@@ -1048,8 +1109,8 @@ async def api_preview(content: str = Form("")):
     return HTMLResponse(html)
 
 
-# Fields that cannot be edited inline
-_PROTECTED_FIELDS = {"created", "modified", "name"}
+# Fields that cannot be edited inline (uuid is the page's stable identity)
+_PROTECTED_FIELDS = {"created", "modified", "name", "uuid"}
 _VALID_FIELD_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
 
 
@@ -1059,7 +1120,13 @@ async def api_update_metadata(
     field: str = Form(...),
     value: str = Form(""),
 ):
-    """Update a single frontmatter field on a page."""
+    """Update a single frontmatter field on a page.
+
+    The value is converted to the field's type before it is written: list
+    fields (``tags``, ``children``) take comma-separated values, every other
+    field is stored as text. A value that does not fit its field is rejected
+    with 422 and nothing is written.
+    """
     _validate_page_name(name)
     if not _VALID_FIELD_RE.match(field):
         raise HTTPException(status_code=400, detail="Invalid field name")
@@ -1069,9 +1136,14 @@ async def api_update_metadata(
             detail=f"Field '{field}' cannot be edited inline",
         )
 
-    page = await storage.update_frontmatter_field(name, field, value)
+    try:
+        page = await storage.update_frontmatter_field(name, field, value)
+    except InvalidFrontmatterError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
+    # Tags, the sidebar and the page index are served from the page cache.
+    page_cache.hard_invalidate()
 
     return {"page": name, "field": field, "value": value, "success": True}
 

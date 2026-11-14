@@ -642,7 +642,7 @@ refer to that report. Items below are grouped work, in suggested order.
   non-default and long enough; reject empty passwords at `/login`; stop CI
   installing the example file. **First: check the secrets on the VPS.**
   [`wiki-routes-a-3`, `deploy-vps-1`]
-- [ ] **A2 · One badly typed frontmatter field takes the wiki down** —
+- [x] **A2 · One badly typed frontmatter field takes the wiki down** —
   reproduced. `title: 2024`, `tags: python`, `children: A` or a non-UTF-8 file
   raises an unhandled validation error in every page scan; listings, search,
   sidebar and then every HTML route return 500. Inline MetaTable editing
@@ -651,6 +651,17 @@ refer to that report. Items below are grouped work, in suggested order.
   file in the scan loops; validate in the PATCH endpoint; tolerate non-string
   `parent_task` in the tree builder.
   [`wiki-storage-1`, `-2`, `wiki-routes-b-1`, `wiki-routes-a-1`, `-7`]
+  *Done:* declared fields are coerced on read (`coerce_frontmatter`; values with
+  no sensible reading are kept under `<field>_invalid`); every scan skips and
+  logs a file it cannot read; writes are strict (`InvalidFrontmatterError` →
+  422) and the field-update paths convert to the field's type; the tree
+  builder, epic child list and date sorts tolerate any YAML type and mixed
+  naive/aware timestamps; the PATCH route protects `uuid` and invalidates the
+  page cache [`wiki-routes-b-3`]. See "Frontmatter tolerance" in
+  `docs/domains/business-logic.md`. Not done from the suggested fixes:
+  rejecting `uuid`/`created`/`modified` writes inside the storage layer (the
+  route does it; `/api/v1` PATCH still may set them, now type-checked), and
+  dropping the page-tree computation from `/login`.
 - [ ] **F1 · Factory cannot complete a task with 2+ subtasks** — reproduced
   (rated high by one check, medium by another: factory-only). Parallel
   `pm_review` branches each see siblings as unfinished and end the run; deferred
