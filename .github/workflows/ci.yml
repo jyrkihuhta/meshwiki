@@ -25,6 +25,7 @@ jobs:
             rust:
               - 'graph-core/**'
             app:
+              - '.github/workflows/ci.yml'
               - 'src/**'
               - 'graph-core/**'
               - 'Dockerfile'
@@ -113,7 +114,12 @@ jobs:
     name: Build & publish Docker image
     runs-on: ${{ matrix.runner }}
     needs: [changes, test-python, test-rust]
+    # `!cancelled()` is required: without a status function GitHub skips a job
+    # whenever one of its `needs` was skipped, and `test-rust` is skipped on
+    # every staging push that doesn't touch graph-core. That silently skipped
+    # the image build, so staging ran new code on a weeks-old image.
     if: |
+      !cancelled() &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') &&
       needs.changes.outputs.app == 'true' &&
@@ -387,13 +393,16 @@ jobs:
     # before the image is published can start new code against old dependencies
     # (e.g. a newly added package missing -> import error). `merge` is skipped
     # when the push doesn't touch the app, so those deploys are not delayed.
-    needs: [test-python, test-orchestrator, merge]
+    needs: [changes, test-python, test-orchestrator, merge]
+    # A skipped `merge` is only acceptable when the push did not touch the app;
+    # if the app changed, the image must have been published first.
     if: |
       always() &&
       github.event_name == 'push' && github.ref == 'refs/heads/staging' &&
       needs.test-python.result == 'success' &&
       (needs.test-orchestrator.result == 'success' || needs.test-orchestrator.result == 'skipped') &&
-      (needs.merge.result == 'success' || needs.merge.result == 'skipped')
+      (needs.merge.result == 'success' ||
+        (needs.merge.result == 'skipped' && needs.changes.outputs.app != 'true'))
     continue-on-error: true
     concurrency:
       group: staging-deploy
