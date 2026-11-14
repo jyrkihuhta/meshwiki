@@ -28,7 +28,10 @@ cd /opt/meshwiki
 # Copy deploy files from repo
 cp deploy/vps/docker-compose.prod.yml .
 cp deploy/vps/.env.example .env
-# Edit .env with real values (see .env.example for all variables)
+# Edit .env with real values (see .env.example for all variables).
+# MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET ship blank and the app
+# refuses to start until both are set. Generate the session secret with:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 nano .env
 
 # Inject domain into Caddyfile
@@ -128,6 +131,13 @@ docker compose -f docker-compose.prod.yml ps
 
 Common causes:
 - Missing or malformed `.env` file → check required vars with `.env.example`
+- Auth enabled without usable credentials → the log shows a `ValidationError`
+  naming the variable. With `MESHWIKI_AUTH_ENABLED=true` the app only starts if
+  `MESHWIKI_AUTH_PASSWORD` is non-empty (and not the old example values
+  `changeme` / `staging`) and `MESHWIKI_SESSION_SECRET` is at least 32
+  characters. The staging deploy job likewise fails if
+  `/opt/meshwiki/staging.env` does not exist; create it by hand from
+  `deploy/vps/staging.env.example`
 - Data directory permissions → `chown -R 1001:1001 /opt/meshwiki/data`
 - Port conflict → `ss -tlnp | grep :8000`
 
@@ -171,7 +181,7 @@ docker compose -f docker-compose.prod.yml restart caddy
 1. Check `MESHWIKI_AUTH_ENABLED=true` in `.env`
 2. Check `MESHWIKI_AUTH_PASSWORD` is set
 3. Check rate limit lockout: if 5+ failed attempts in 10 min, wait 10 minutes or restart the container to reset
-4. Check session secret is set: `MESHWIKI_SESSION_SECRET` must be a long random string
+4. Check session secret is set: `MESHWIKI_SESSION_SECRET` must be a random string of at least 32 characters (the app does not start otherwise — see "Container Not Starting")
 
 ---
 

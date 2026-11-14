@@ -210,8 +210,8 @@ Environment variables with the `MESHWIKI_` prefix (web app):
 | `MESHWIKI_APP_TITLE` | `MeshWiki` | Application title in header |
 | `MESHWIKI_GRAPH_WATCH` | `true` | Enable file watcher for live graph updates |
 | `MESHWIKI_AUTH_ENABLED` | `false` | Enable password authentication |
-| `MESHWIKI_AUTH_PASSWORD` | | Login password (required if auth enabled) |
-| `MESHWIKI_SESSION_SECRET` | `dev-secret-...` | Session signing key (**change in production**) |
+| `MESHWIKI_AUTH_PASSWORD` | | Login password — **required when auth is enabled** (the app refuses to start without one) |
+| `MESHWIKI_SESSION_SECRET` | random per process | Session signing key — **required when auth is enabled**: at least 32 characters, or the app refuses to start. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `MESHWIKI_FACTORY_ENABLED` | `false` | Enable the agent-factory JSON API |
 | `MESHWIKI_FACTORY_API_KEY` | | API key for the factory API — **required when the factory is enabled** (it fails closed without one) |
 
@@ -250,7 +250,9 @@ Deploy your own MeshWiki instance on any Linux VPS in a few minutes:
    sudo mkdir -p /opt/meshwiki/data/pages
    sudo chown -R 1001:1001 /opt/meshwiki/data  # app user UID inside container
    cp deploy/vps/.env.example /opt/meshwiki/.env
-   # Edit /opt/meshwiki/.env — set MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET
+   # Edit /opt/meshwiki/.env — set MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET.
+   # Both ship blank and the app will not start until they are filled in:
+   python3 -c "import secrets; print(secrets.token_urlsafe(48))"  # session secret
    ```
 
 2. **Edit `deploy/vps/Caddyfile`** — replace `${VPS_DOMAIN}` with your domain, or set it as a `VPS_DOMAIN` GitHub secret if using the CI/CD pipeline.

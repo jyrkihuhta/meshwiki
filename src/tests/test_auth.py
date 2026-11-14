@@ -1,13 +1,36 @@
 """Tests for authentication middleware and login flow."""
 
 import importlib
+import json
+from base64 import b64encode
 
+import itsdangerous
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.testclient import TestClient
 
 import meshwiki.config as cfg
 import meshwiki.main
+
+TEST_SESSION_SECRET = "test-secret-key-32-chars-minimum!"
+# The key every deployment used to fall back to when no secret was configured.
+PUBLIC_DEV_SECRET = "dev-secret-change-in-production"
+
+
+def _forge_session_cookie(secret_key: str) -> str:
+    """Sign an authenticated session cookie the way Starlette does."""
+    payload = b64encode(json.dumps({"authenticated": True}).encode())
+    return itsdangerous.TimestampSigner(secret_key).sign(payload).decode()
+
+
+def _session_secret_in_use(app) -> str:
+    """Return the key the app's SessionMiddleware actually signs with."""
+    for middleware in app.user_middleware:
+        if middleware.cls is SessionMiddleware:
+            return str(middleware.kwargs["secret_key"])
+    raise AssertionError("SessionMiddleware is not installed")
 
 
 @pytest.fixture
@@ -57,6 +80,27 @@ def test_verify_password_wrong():
     from meshwiki.auth import verify_password
 
     assert verify_password("wrong", "secret") is False
+
+
+@pytest.mark.parametrize("candidate", ["", "anything"])
+def test_verify_password_never_matches_empty_expected(candidate):
+    """An unset password must not be satisfiable, least of all by ''."""
+    from meshwiki.auth import verify_password
+
+    assert verify_password(candidate, "") is False
+
+
+def test_verify_password_empty_candidate_rejected():
+    from meshwiki.auth import verify_password
+
+    assert verify_password("", "secret") is False
+
+
+def test_verify_password_handles_non_ascii():
+    from meshwiki.auth import verify_password
+
+    assert verify_password("pässwörd", "pässwörd") is True
+    assert verify_password("passwörd", "pässwörd") is False
 
 
 def test_rate_limiter_lockout():
@@ -127,6 +171,145 @@ async def test_logout_clears_session(client):
     # Now protected routes should redirect again
     resp = await client.get("/")
     assert resp.status_code == 302
+
+
+# ── Fail-closed credentials (deep review A1) ──────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limit():
+    """Keep failed logins in one test from locking out the next."""
+    from meshwiki.auth import _login_attempts
+
+    _login_attempts.clear()
+    yield
+    _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_login_empty_password_rejected(client):
+    resp = await client.post("/login", data={"password": ""})
+    assert resp.status_code == 401
+    assert "set-cookie" not in resp.headers
+
+    resp = await client.post("/login")
+    assert resp.status_code == 401
+    assert "set-cookie" not in resp.headers
+
+    resp = await client.get("/")
+    assert resp.status_code == 302
+
+
+@pytest.mark.asyncio
+async def test_login_empty_password_rejected_even_if_password_is_blanked(client):
+    """Defence in depth: a blank expected password never lets '' log in.
+
+    Settings refuses to build this configuration, so blank the password on the
+    live object to prove the login route does not rely on that alone.
+    """
+    cfg.settings.auth_password = ""
+
+    resp = await client.post("/login", data={"password": ""})
+    assert resp.status_code == 401
+    assert "set-cookie" not in resp.headers
+
+    resp = await client.get("/")
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login"
+
+
+@pytest.mark.asyncio
+async def test_empty_password_counts_towards_rate_limit(client):
+    for _ in range(5):
+        resp = await client.post("/login", data={"password": ""})
+        assert resp.status_code == 401
+    resp = await client.post("/login", data={"password": "correct-horse"})
+    assert resp.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_cookie_signed_with_real_secret_is_accepted(client):
+    """Control for the forgery tests: the helper produces a valid cookie."""
+    client.cookies.set("session", _forge_session_cookie(TEST_SESSION_SECRET))
+    resp = await client.get("/")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known_key", [PUBLIC_DEV_SECRET, ""])
+async def test_cookie_forged_with_public_key_is_rejected(client, known_key):
+    client.cookies.set("session", _forge_session_cookie(known_key))
+    resp = await client.get("/")
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},  # secret left unset: used to fall back to the public dev default
+        {"session_secret": PUBLIC_DEV_SECRET},
+        {"session_secret": ""},  # `MESHWIKI_SESSION_SECRET=` as the examples shipped
+        {"session_secret": "too-short"},
+        {"session_secret": TEST_SESSION_SECRET, "auth_password": ""},
+    ],
+    ids=["unset", "dev-default", "blank", "short", "no-password"],
+)
+def test_auth_enabled_app_cannot_be_configured_insecurely(tmp_path, overrides):
+    """The configurations that allowed forged cookies no longer produce an app."""
+    kwargs = {"auth_password": "correct-horse", **overrides}
+    with pytest.raises(ValidationError):
+        cfg.Settings(
+            _env_file=None,
+            data_dir=tmp_path,
+            auth_enabled=True,
+            graph_watch=False,
+            **kwargs,
+        )
+
+
+def test_auth_enabled_app_signs_with_configured_secret(auth_settings):
+    assert _session_secret_in_use(meshwiki.main.app) == TEST_SESSION_SECRET
+
+
+@pytest.fixture
+def no_auth_settings(tmp_path):
+    """Auth disabled and no secret configured: the developer default."""
+    original = cfg.settings
+    cfg.settings = cfg.Settings(
+        _env_file=None, data_dir=tmp_path, auth_enabled=False, graph_watch=False
+    )
+    importlib.reload(meshwiki.main)
+    yield cfg.settings
+    cfg.settings = original
+    importlib.reload(meshwiki.main)
+
+
+def test_auth_disabled_app_never_signs_with_a_public_key(no_auth_settings):
+    secret = _session_secret_in_use(meshwiki.main.app)
+    assert secret not in ("", PUBLIC_DEV_SECRET)
+    assert len(secret) >= 32
+    assert secret == no_auth_settings.session_secret
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_app_starts_and_serves_without_secret(no_auth_settings):
+    from meshwiki.core.graph import init_engine, shutdown_engine
+
+    init_engine(no_auth_settings.data_dir, watch=False)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=meshwiki.main.app),
+            base_url="http://test",
+            follow_redirects=False,
+        ) as c:
+            resp = await c.get("/")
+            assert resp.status_code == 200
+            # /login can never succeed while auth is off, whatever is submitted.
+            resp = await c.post("/login", data={"password": ""})
+            assert resp.status_code == 401
+    finally:
+        shutdown_engine()
 
 
 # ── WebSocket terminal auth tests ─────────────────────────────────────────────
