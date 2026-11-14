@@ -3,14 +3,56 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from ..agents.grinder_agent import grind_subtask
 from ..config import get_settings
 from ..hbr import get_hbr
 from ..integrations.meshwiki_client import MeshWikiClient
-from ..state import FactoryState
+from ..state import FactoryState, SubTask
 
 logger = logging.getLogger(__name__)
+
+
+def next_step_after_grind(
+    subtask: SubTask,
+) -> Literal["pm_review", "pm_diagnose", "escalate"]:
+    """Decide where a subtask goes once its grinder has returned.
+
+    Single source of truth shared by ``grind_node`` (which has to know whether
+    the subtask's branch ends here) and ``route_after_grinding`` in
+    ``factory.graph`` (which does the actual routing).
+
+    Args:
+        subtask: The subtask as updated by the grinder.
+
+    Returns:
+        ``"pm_review"`` when the grinder produced something to review,
+        ``"pm_diagnose"`` on a first failure (the PM rewrites the task and the
+        subtask is ground again), ``"escalate"`` on any later failure.
+    """
+    if subtask["status"] != "failed":
+        return "pm_review"
+    if subtask.get("attempt", 0) == 0:
+        return "pm_diagnose"
+    return "escalate"
+
+
+def _grind_result(
+    subtask_id: str, updated: SubTask, incremental_cost: float | None = None
+) -> dict:
+    """Build ``grind_node``'s partial state update for the ground subtask.
+
+    A subtask stays in ``active_grinders`` while its branch continues to
+    ``pm_review`` or ``pm_diagnose``.  When the branch is handed to
+    ``escalate`` it ends here, so the ID is removed.
+    """
+    result: dict = {"subtasks": [updated], "_current_subtask_id": subtask_id}
+    if incremental_cost is not None:
+        result["incremental_costs_usd"] = [incremental_cost]
+    if next_step_after_grind(updated) == "escalate":
+        result["active_grinders"] = {"remove": [subtask_id]}
+    return result
 
 
 async def grind_node(state: FactoryState) -> dict:
@@ -18,22 +60,24 @@ async def grind_node(state: FactoryState) -> dict:
 
     Looks up the subtask identified by ``_current_subtask_id`` in state,
     invokes the grinder agentic loop, and returns a partial state update
-    with the updated subtasks list and ``active_grinders``.
+    with the updated subtask.
 
-    ``active_grinders`` is updated by appending the current subtask ID.  The
-    ``_merge_active_grinders`` reducer unions these single-element additions
-    across parallel branches so no concurrent write clobbers another branch's
-    update.  ``_current_subtask_id`` is echoed back so the routing function can
-    read it after the state merge; its Annotated reducer allows parallel branches
-    to write concurrently without raising INVALID_CONCURRENT_GRAPH_UPDATE.
+    ``active_grinders`` is not touched while the subtask's branch continues
+    (to ``pm_review``, or to ``pm_diagnose`` on a first failure): the subtask
+    was marked in flight when ``assign_grinders_node`` dispatched it and stays
+    so until its branch lands.  Only when the branch ends here — a failure that
+    goes straight to ``escalate`` — is the ID removed.  ``_current_subtask_id``
+    is echoed back so the routing function can read it after the state merge;
+    its Annotated reducer allows parallel branches to write concurrently
+    without raising INVALID_CONCURRENT_GRAPH_UPDATE.
 
     Args:
         state: Current FactoryState, must contain ``_current_subtask_id``.
 
     Returns:
-        Partial state update with ``subtasks`` list where the current
-        subtask is replaced by the updated version from the grinder, and
-        ``active_grinders`` updated to include the current subtask ID.
+        Partial state update with a single-element ``subtasks`` list holding
+        the updated subtask, plus an ``active_grinders`` removal when the
+        subtask is being escalated.
     """
     subtask_id = state.get("_current_subtask_id")
     subtask = next(
@@ -69,11 +113,7 @@ async def grind_node(state: FactoryState) -> dict:
                     subtask["wiki_page"],
                     exc,
                 )
-            return {
-                "subtasks": [updated],
-                "active_grinders": [subtask_id],
-                "_current_subtask_id": subtask_id,
-            }
+            return _grind_result(subtask_id, updated)
 
         result = await grind_subtask(state, subtask, meshwiki_client)
         updated = result["subtask"]
@@ -106,9 +146,4 @@ async def grind_node(state: FactoryState) -> dict:
             )
 
     logger.info("grind_node: completed subtask %s", subtask_id)
-    return {
-        "subtasks": [updated],
-        "incremental_costs_usd": [incremental_cost],
-        "active_grinders": [subtask_id],
-        "_current_subtask_id": subtask_id,
-    }
+    return _grind_result(subtask_id, updated, incremental_cost)

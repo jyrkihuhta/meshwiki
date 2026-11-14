@@ -29,7 +29,9 @@ async def pm_review_node(state: FactoryState) -> dict:
 
     Returns:
         Partial state update with the updated single-element ``subtasks``
-        list and the incremental cost delta.
+        list and the incremental cost delta.  The subtask's ID is removed from
+        ``active_grinders``: the review ends its grind → review branch, and the
+        branch now lands at the ``collect`` join.
     """
     subtask_id = state.get("_current_subtask_id")
     subtask = next(
@@ -80,6 +82,7 @@ async def pm_review_node(state: FactoryState) -> dict:
             return {
                 "subtasks": [updated_subtask],
                 "incremental_costs_usd": [0.0],
+                "active_grinders": {"remove": [subtask_id]},
                 "_current_subtask_id": subtask_id,
             }
 
@@ -253,6 +256,7 @@ async def pm_review_node(state: FactoryState) -> dict:
     return {
         "subtasks": [updated_subtask],
         "incremental_costs_usd": [incremental_cost],
+        "active_grinders": {"remove": [subtask_id]},
         "_current_subtask_id": subtask_id,
     }
 
@@ -288,5 +292,6 @@ async def _pm_review_dry_run(
     return {
         "subtasks": [updated_subtask],
         "incremental_costs_usd": [0.0],
+        "active_grinders": {"remove": [subtask_id]},
         "_current_subtask_id": subtask_id,
     }

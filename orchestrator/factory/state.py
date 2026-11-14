@@ -30,22 +30,49 @@ def _append_cost(current: list[float], update: list[float]) -> list[float]:
     return current + update
 
 
-def _merge_active_grinders(current: list[str], update: list[str]) -> list[str]:
-    """Reducer for active_grinders supporting both parallel additions and full reset.
+class ActiveGrinderOps(TypedDict, total=False):
+    """Incremental update for ``FactoryState.active_grinders``.
 
-    Parallel grinder branches each return their own subtask ID as a single-element
-    list.  The reducer unions these additions into the current set.
-
-    A full reset (e.g. from ``collect_results_node``) is signalled by returning
-    an empty list ``[]``, which replaces the current value entirely.  This
-    avoids the need for a separate clear mechanism while still allowing
-    concurrent ``grind_node`` branches to safely add their IDs without clobbering
-    each other.
+    Nodes running in parallel branches each return one of these so their
+    changes compose instead of clobbering each other.
     """
-    if not update:
-        # Empty list signals a full reset (e.g. after all grinders complete).
-        return []
-    return list(dict.fromkeys(list(current) + update))
+
+    add: list[str]  # subtask IDs that were just dispatched to a grinder
+    remove: list[str]  # subtask IDs whose grind → review branch has ended
+
+
+def _merge_active_grinders(
+    current: list[str], update: list[str] | ActiveGrinderOps | None
+) -> list[str]:
+    """Reducer for ``active_grinders``: explicit add/remove ops, or a full replace.
+
+    Two update shapes are accepted:
+
+    * ``{"add": [...], "remove": [...]}`` (either key optional) — applied on top
+      of the current value.  ``assign_grinders_node`` adds a subtask ID when it
+      dispatches it; the node that ends the branch (``pm_review_node``, or
+      ``grind_node`` / ``pm_diagnose_node`` when they hand over to escalation)
+      removes it.  Several parallel branches can each remove their own ID in
+      the same superstep.  When an ID appears under both keys, removal wins.
+    * a plain list — replaces the current value outright.  Used for the initial
+      state of a run (``[]``) and for out-of-band repairs via
+      ``aupdate_state``.
+
+    Args:
+        current: The value currently stored in the channel.
+        update: The update written by a node (or by the graph input).
+
+    Returns:
+        The new list of in-flight subtask IDs, in dispatch order, without
+        duplicates.
+    """
+    if update is None:
+        return list(current or [])
+    if isinstance(update, dict):
+        removed = set(update.get("remove") or [])
+        merged = dict.fromkeys([*(current or []), *(update.get("add") or [])])
+        return [subtask_id for subtask_id in merged if subtask_id not in removed]
+    return list(dict.fromkeys(update))
 
 
 class SubTask(TypedDict):
@@ -98,9 +125,11 @@ class FactoryState(TypedDict):
     decomposition_approved: bool
 
     # Execution
-    active_grinders: Annotated[
-        list[str], _merge_active_grinders
-    ]  # subtask_ids currently running in a sandbox
+    # Subtask IDs whose grind → review branch is in flight: added when the
+    # subtask is dispatched to a grinder, removed when the branch lands back at
+    # the join (``collect``) or is handed to ``escalate``.  Nodes write
+    # ``ActiveGrinderOps`` deltas; see ``_merge_active_grinders``.
+    active_grinders: Annotated[list[str], _merge_active_grinders]
     completed_subtask_ids: Annotated[list[str], _union_ids]
     failed_subtask_ids: Annotated[list[str], _union_ids]
 

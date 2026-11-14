@@ -1,8 +1,9 @@
 """Assign grinders node: fan out pending subtasks to parallel grinder instances."""
 
 import logging
+from typing import Literal
 
-from langgraph.types import Send
+from langgraph.types import Command, Send
 
 from ..config import FACTORY_MAX_CONCURRENT_SANDBOXES
 from ..hbr import get_hbr
@@ -19,10 +20,9 @@ def _select_subtasks_to_dispatch(
     Applies the concurrency cap and file-conflict serialization logic, returning
     the subset of pending subtasks that should be dispatched now.
 
-    Only subtasks whose IDs are not already in ``active_grinders`` are
-    considered.  This prevents re-dispatching grinders that are still running
-    (relevant in crash-recovery scenarios where ``active_grinders`` is restored
-    from the checkpoint).
+    ``active_grinders`` holds the subtasks whose grind → review branch is still
+    in flight.  They count against the cap, are never dispatched a second time,
+    and their ``files_touched`` block any pending subtask that overlaps them.
 
     Args:
         state: Current FactoryState.
@@ -48,9 +48,10 @@ def _select_subtasks_to_dispatch(
         )
         return []
 
+    subtasks = state.get("subtasks", [])
     pending = [
         s
-        for s in state.get("subtasks", [])
+        for s in subtasks
         if s["status"] in ("pending", "changes_requested") and s["id"] not in active
     ]
 
@@ -62,7 +63,11 @@ def _select_subtasks_to_dispatch(
         state.get("task_wiki_page", "<unknown>"),
     )
 
+    # Files held by subtasks that are still in flight are off limits too.
     assigned_files: set[str] = set()
+    for subtask in subtasks:
+        if subtask["id"] in active:
+            assigned_files |= set(subtask.get("files_touched") or [])
     to_dispatch: list[SubTask] = []
 
     for subtask in pending:
@@ -81,30 +86,20 @@ def _select_subtasks_to_dispatch(
     return to_dispatch
 
 
-def assign_grinders_node(state: FactoryState) -> dict:
-    """No-op state update before fan-out.
-
-    The actual fan-out to parallel grinders is handled by :func:`route_grinders`,
-    which is registered as the conditional edge routing function on this node.
-    LangGraph requires nodes to return dicts; ``Send`` objects must come from
-    routing functions, not nodes directly.
-    """
-    logger.info(
-        "assign_grinders_node: reached, subtasks in state: %d",
-        len(state.get("subtasks", [])),
-    )
-    return {}
-
-
 def route_grinders(state: FactoryState) -> list[Send]:
-    """Fan out pending/changes_requested subtasks to parallel grinder instances.
+    """Build the fan-out for this round: one ``Send("grind", ...)`` per subtask.
 
     Detects file overlap and serializes conflicting subtasks — only subtasks
     with non-overlapping ``files_touched`` sets are dispatched in this round.
-    The rest remain 'pending' and will be picked up in a subsequent round.
+    The rest remain 'pending'; the ``collect`` join routes back to
+    ``assign_grinders`` once this round's branches have landed, which picks
+    them up.
 
     Respects FACTORY_MAX_CONCURRENT_SANDBOXES cap — only dispatches up to
     (cap - len(active_grinders)) subtasks in this round.
+
+    Called by :func:`assign_grinders_node`, which issues the returned ``Send``
+    commands and records the dispatched IDs in ``active_grinders``.
 
     Returns:
         List of ``Send`` commands, one per non-conflicting pending subtask.
@@ -124,3 +119,48 @@ def route_grinders(state: FactoryState) -> list[Send]:
         Send("grind", {**state, "_current_subtask_id": subtask["id"]})
         for subtask in to_dispatch
     ]
+
+
+def assign_grinders_node(state: FactoryState) -> Command[Literal["grind"]]:
+    """Dispatch this round's subtasks and mark them as in flight.
+
+    Selects the subtasks to grind now (see :func:`route_grinders`), adds their
+    IDs to ``active_grinders`` and fans out one ``grind`` instance per subtask.
+    Doing both from the node — a ``Command`` carrying the state update and the
+    ``Send`` list — means the checkpoint written when this node finishes
+    already lists the grinders that are about to run, so the concurrency cap,
+    ``/status`` and crash recovery all see them while they are running.
+
+    Args:
+        state: Current FactoryState.
+
+    Returns:
+        A ``Command`` that adds the dispatched subtask IDs to
+        ``active_grinders`` and goes to one ``grind`` per dispatched subtask.
+        When nothing can be dispatched it carries no update and no
+        destination.
+    """
+    sends = route_grinders(state)
+    dispatched = [send.arg["_current_subtask_id"] for send in sends]
+    logger.info(
+        "assign_grinders_node: %d subtask(s) in state, dispatching %s",
+        len(state.get("subtasks", [])),
+        dispatched,
+    )
+    if not sends:
+        waiting = [
+            s["id"]
+            for s in state.get("subtasks", [])
+            if s["status"] in ("pending", "changes_requested")
+        ]
+        if waiting and not state.get("active_grinders"):
+            # Nothing is in flight that could bring the run back here, so
+            # these subtasks stay undone until the task is started again.
+            logger.warning(
+                "assign_grinders_node: %s waiting for a grinder but none could "
+                "be dispatched (budget gate or concurrency cap) — task %s stops here",
+                waiting,
+                state.get("task_wiki_page", "<unknown>"),
+            )
+        return Command()
+    return Command(update={"active_grinders": {"add": dispatched}}, goto=sends)

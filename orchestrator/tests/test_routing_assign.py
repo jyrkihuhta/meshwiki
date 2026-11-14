@@ -2,9 +2,9 @@
 
 Covers branches in:
 - ``_select_subtasks_to_dispatch`` (internal helper)
-- ``route_grinders`` (fan-out router on assign_grinders node)
+- ``route_grinders`` (fan-out builder used by the assign_grinders node)
 - ``route_after_grinding`` (per-subtask post-grind router)
-- ``route_after_pm_review`` (per-subtask post-review router)
+- ``route_after_collect`` (router on the fan-in join after PM review)
 
 These complement the existing tests in test_concurrency.py and test_routing.py
 without duplicating them.  Focus: branch coverage gaps, status edge cases,
@@ -15,11 +15,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-from langgraph.graph import END
 from langgraph.types import Send
 
-from factory.graph import route_after_grinding, route_after_pm_review
+from factory.graph import route_after_collect, route_after_grinding
 from factory.nodes.assign import _select_subtasks_to_dispatch, route_grinders
 from factory.state import FactoryState, SubTask
 
@@ -345,115 +343,85 @@ class TestRouteAfterGrindingExtraEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# route_after_pm_review — uncovered branches
+# route_after_collect — status edge cases
 # ---------------------------------------------------------------------------
 
 
-class TestRouteAfterPmReviewExtraEdgeCases:
-    """Additional branches not covered by test_routing.py::TestRouteAfterPmReview."""
+def _collect_route(state: FactoryState, *, auto_merge: bool = False) -> str:
+    """Call route_after_collect with ``auto_merge`` pinned."""
+    mock_settings = MagicMock()
+    mock_settings.auto_merge = auto_merge
+    with patch("factory.graph.get_settings", return_value=mock_settings):
+        return route_after_collect(state)
 
-    def test_approved_with_sibling_failed_all_terminal(self) -> None:
-        """All subtasks terminal (one merged, one failed) → all_approved when no auto_merge."""
+
+class TestRouteAfterCollectExtraEdgeCases:
+    """Additional branches not covered by test_routing.py::TestRouteAfterCollect."""
+
+    def test_sibling_failed_all_terminal(self) -> None:
+        """All subtasks terminal (one merged, one failed) → all_approved."""
         sub1 = _make_subtask("t1", status="merged", files=["src/t1.py"])
         sub2 = _make_subtask("t2", status="failed", files=["src/t2.py"])
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == "all_approved"
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "all_approved"
 
-    def test_approved_with_sibling_done_all_terminal(self) -> None:
+    def test_sibling_done_all_terminal(self) -> None:
         """'done' status counts as terminal — all done → all_approved."""
         sub1 = _make_subtask("t1", status="merged", files=["src/t1.py"])
         sub2 = _make_subtask("t2", status="done", files=["src/t2.py"])
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == "all_approved"
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "all_approved"
 
-    def test_approved_sibling_still_pending_returns_end(self) -> None:
-        """Sibling with 'pending' status means not all done → this branch returns END."""
+    def test_sibling_still_pending_dispatches(self) -> None:
+        """A 'pending' sibling is not abandoned: the join loops back to assign."""
         sub1 = _make_subtask("t1", status="merged", files=["src/t1.py"])
         sub2 = _make_subtask("t2", status="pending", files=["src/t2.py"])
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == END
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "dispatch"
 
-    def test_changes_requested_with_one_retry_left_sends_to_grind(self) -> None:
-        """attempt == max_attempts - 1: still has one retry left → Send to grind."""
+    def test_changes_requested_with_one_retry_left_dispatches(self) -> None:
+        """attempt == max_attempts - 1: still has one retry left → next round."""
         sub = _make_subtask("t1", status="changes_requested", attempt=2, max_attempts=3)
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        result = route_after_pm_review(state)
-        assert isinstance(result, list)
-        assert result[0].node == "grind"
-        assert result[0].arg["_current_subtask_id"] == "t1"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state) == "dispatch"
 
-    def test_changes_requested_attempt_zero_max_one_escalates(self) -> None:
-        """attempt=0, max_attempts=1 — first rejection is immediately at cap."""
+    def test_changes_requested_at_cap_of_one_escalates(self) -> None:
+        """attempt=1, max_attempts=1 — first rejection is immediately at cap."""
         sub = _make_subtask("t1", status="changes_requested", attempt=1, max_attempts=1)
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        result = route_after_pm_review(state)
-        assert result == "escalate"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state) == "escalate"
 
     def test_changes_requested_attempt_exceeds_max_escalates(self) -> None:
         """attempt > max_attempts (defensive) also escalates."""
         sub = _make_subtask("t1", status="changes_requested", attempt=5, max_attempts=3)
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        result = route_after_pm_review(state)
-        assert result == "escalate"
-
-    def test_none_current_id_escalates(self) -> None:
-        """_current_subtask_id absent from state → escalate (not a crash)."""
-        sub = _make_subtask("t1", status="merged")
         state = _make_state(subtasks=[sub])
-        # No _current_subtask_id key — .get() returns None
-        result = route_after_pm_review(state)
-        assert result == "escalate"
+        assert _collect_route(state) == "escalate"
 
-    def test_rework_send_targets_grind_node(self) -> None:
-        """Send for rework always targets 'grind', not any other node."""
-        sub = _make_subtask("t1", status="changes_requested", attempt=0, max_attempts=3)
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        result = route_after_pm_review(state)
-        assert isinstance(result, list)
-        assert result[0].node == "grind"
+    def test_does_not_depend_on_current_subtask_id(self) -> None:
+        """The join looks at every subtask; _current_subtask_id is irrelevant."""
+        sub = _make_subtask("t1", status="merged")
+        assert _collect_route(_make_state(subtasks=[sub])) == "all_approved"
+        state = _make_state(subtasks=[sub], _current_subtask_id="nonexistent")
+        assert _collect_route(state) == "all_approved"
 
     def test_auto_merge_true_routes_skip_human_review(self) -> None:
         """auto_merge=True and all subtasks terminal → skip_human_review."""
         sub = _make_subtask("t1", status="merged")
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = True
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == "skip_human_review"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state, auto_merge=True) == "skip_human_review"
 
     def test_single_subtask_approved_routes_all_done(self) -> None:
-        """Single subtask, merged — all done, routes to all_approved without auto_merge."""
+        """Single subtask, merged — all done, routes to all_approved."""
         sub = _make_subtask("t1", status="merged")
-        state = _make_state(subtasks=[sub], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == "all_approved"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state) == "all_approved"
 
-    def test_sibling_in_changes_requested_not_terminal_returns_end(self) -> None:
-        """Sibling in 'changes_requested' is not terminal → this branch returns END."""
+    def test_sibling_in_changes_requested_dispatches(self) -> None:
+        """A sibling in 'changes_requested' gets its rework round."""
         sub1 = _make_subtask("t1", status="merged", files=["src/t1.py"])
         sub2 = _make_subtask("t2", status="changes_requested", files=["src/t2.py"])
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == END
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "dispatch"
 
     def test_skipped_subtask_counts_as_terminal(self) -> None:
         """'skipped' subtasks (retired by redecompose) count as terminal.
@@ -463,10 +431,9 @@ class TestRouteAfterPmReviewExtraEdgeCases:
         """
         sub1 = _make_subtask("t1", status="merged", files=["src/t1.py"])
         sub2 = _make_subtask("t2", status="skipped", files=["src/t2.py"])
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id="t1")
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        # 'skipped' is in terminal_statuses, so all_done → all_approved
-        assert result == "all_approved"
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "all_approved"
+
+    def test_no_subtasks_is_vacuously_complete(self) -> None:
+        """An empty subtask list has nothing to wait for or dispatch."""
+        assert _collect_route(_make_state(subtasks=[])) == "all_approved"

@@ -12,6 +12,9 @@ EXPECTED_NODES = {
     "assign_grinders",
     "grind",
     "pm_review",
+    "pm_diagnose",
+    "collect",
+    "validate_armory",
     "human_review_code",
     "merge_check",
     "finalize",
@@ -46,6 +49,42 @@ def test_graph_interrupt_nodes() -> None:
     graph = build_graph(MemorySaver())
     interrupt_nodes = set(graph.interrupt_before_nodes)
     assert interrupt_nodes == {"human_review_code"}
+
+
+def test_pm_review_fans_in_through_collect() -> None:
+    """Every pm_review branch reaches the single ``collect`` join by a plain edge.
+
+    The decision what to do after review must not sit on ``pm_review`` itself:
+    a conditional edge there is evaluated once per parallel branch and only
+    sees that branch's own result.
+    """
+    builder = build_graph(MemorySaver()).builder
+    assert ("pm_review", "collect") in builder.edges
+    assert not builder.branches.get("pm_review")
+
+
+def test_collect_join_routes() -> None:
+    """The join can wait, start another round, escalate, or move on."""
+    builder = build_graph(MemorySaver()).builder
+    (branch,) = builder.branches["collect"].values()
+    assert branch.ends == {
+        "wait": "__end__",
+        "dispatch": "assign_grinders",
+        "escalate": "escalate",
+        "all_approved": "validate_armory",
+        "skip_human_review": "validate_armory",
+    }
+
+
+def test_assign_grinders_fans_out_by_command() -> None:
+    """assign_grinders dispatches from the node itself (Command → grind).
+
+    It must not also carry a conditional edge, or every subtask would be
+    dispatched twice.
+    """
+    builder = build_graph(MemorySaver()).builder
+    assert not builder.branches.get("assign_grinders")
+    assert builder.nodes["assign_grinders"].ends == ("grind",)
 
 
 # ---------------------------------------------------------------------------

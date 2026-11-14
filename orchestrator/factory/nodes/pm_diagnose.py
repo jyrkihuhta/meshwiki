@@ -26,6 +26,8 @@ async def pm_diagnose_node(state: FactoryState) -> dict:
 
     Returns:
         Partial state update with the revised subtask and incremental cost.
+        When the PM produced no revision the subtask is about to be escalated,
+        so its ID is also removed from ``active_grinders``.
     """
     subtask_id = state.get("_current_subtask_id")
     subtask = next(
@@ -79,8 +81,13 @@ async def pm_diagnose_node(state: FactoryState) -> dict:
         )
         updated = {**subtask}
 
-    return {
+    update: dict = {
         "subtasks": [updated],
         "incremental_costs_usd": [incremental_cost],
         "_current_subtask_id": subtask_id,
     }
+    if updated["status"] != "pending":
+        # No retry: route_after_pm_diagnose hands the subtask to escalate, so
+        # its grind branch ends here.  (On a retry it stays in flight.)
+        update["active_grinders"] = {"remove": [subtask_id]}
+    return update
