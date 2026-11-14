@@ -382,12 +382,18 @@ jobs:
   deploy-staging:
     name: Deploy to staging
     runs-on: ubuntu-latest
-    needs: [test-python, test-orchestrator]
+    # `merge` publishes the :staging web image. Staging runs app code from a
+    # mounted checkout but its Python dependencies from that image, so deploying
+    # before the image is published can start new code against old dependencies
+    # (e.g. a newly added package missing -> import error). `merge` is skipped
+    # when the push doesn't touch the app, so those deploys are not delayed.
+    needs: [test-python, test-orchestrator, merge]
     if: |
       always() &&
       github.event_name == 'push' && github.ref == 'refs/heads/staging' &&
       needs.test-python.result == 'success' &&
-      (needs.test-orchestrator.result == 'success' || needs.test-orchestrator.result == 'skipped')
+      (needs.test-orchestrator.result == 'success' || needs.test-orchestrator.result == 'skipped') &&
+      (needs.merge.result == 'success' || needs.merge.result == 'skipped')
     continue-on-error: true
     concurrency:
       group: staging-deploy

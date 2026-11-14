@@ -45,6 +45,7 @@ from meshwiki.core.dependencies import (
     set_revision_store,
     set_storage,
 )
+from meshwiki.core.excerpt import make_excerpt
 from meshwiki.core.graph import get_engine, init_engine, shutdown_engine
 from meshwiki.core.logging import configure_logging, get_logger
 from meshwiki.core.metrics import (
@@ -161,15 +162,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )
+        # No 'unsafe-inline' for scripts: all behaviour lives in /static/js and
+        # rendered page content is sanitized, so injected markup can't execute.
+        # (Styles keep 'unsafe-inline': templates use style= attributes.)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com "
+            "script-src 'self' https://unpkg.com "
             "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com "
             "https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
             "connect-src 'self' wss:; "
-            "font-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;"
+            "font-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+            "object-src 'none'; "
+            "base-uri 'self'"
         )
         return response
 
@@ -1012,12 +1018,22 @@ async def save_page(request: Request, name: str, content: str = Form("")):
 
 
 @app.get("/api/pages/{name:path}/preview", response_class=HTMLResponse)
-async def api_page_preview(name: str):
-    """Render a page for hover card preview."""
+async def api_page_preview(request: Request, name: str):
+    """Render the hover-card preview for a wiki link: title plus a text excerpt.
+
+    The excerpt is plain text and the template is autoescaped. (This used to
+    return the page's raw source as HTML, which executed any markup in it.)
+    """
     page = await storage.get_page(name)
-    if page is None:
-        return HTMLResponse("")
-    return HTMLResponse(page.content)
+    return templates.TemplateResponse(
+        request,
+        "partials/hover_card.html",
+        {
+            "exists": page is not None,
+            "page_name": name,
+            "excerpt": make_excerpt(page.content) if page is not None else "",
+        },
+    )
 
 
 @app.post("/api/preview", response_class=HTMLResponse)

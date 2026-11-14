@@ -1,9 +1,18 @@
 """Tests for Milestone 9: Visual Polish & Responsiveness."""
 
+from pathlib import Path
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import meshwiki.main
+
+_STATIC_JS = Path(meshwiki.__file__).parent / "static" / "js"
+
+
+def _static_js(name: str) -> str:
+    """Source of a file in static/js (page behaviour no longer lives inline)."""
+    return (_STATIC_JS / name).read_text()
 
 
 @pytest.fixture(autouse=True)
@@ -36,8 +45,10 @@ class TestDarkMode:
 
     @pytest.mark.asyncio
     async def test_base_has_theme_script(self, client):
+        # Loaded as an external script (the CSP forbids inline script).
         resp = await client.get("/")
-        assert "meshwiki-theme" in resp.text
+        assert '<script src="/static/js/theme-init.js"></script>' in resp.text
+        assert "meshwiki-theme" in _static_js("theme-init.js")
 
     @pytest.mark.asyncio
     async def test_theme_toggle_in_nav(self, client):
@@ -64,7 +75,8 @@ class TestSyntaxHighlighting:
     @pytest.mark.asyncio
     async def test_hljs_highlight_all_called(self, client):
         resp = await client.get("/")
-        assert "hljs.highlightAll()" in resp.text
+        assert '<script src="/static/js/app.js"></script>' in resp.text
+        assert "hljs.highlightAll()" in _static_js("app.js")
 
 
 # ============================================================
@@ -114,7 +126,8 @@ class TestToastNotifications:
     @pytest.mark.asyncio
     async def test_toast_js_present(self, client):
         resp = await client.get("/")
-        assert "showToast" in resp.text
+        assert '<script src="/static/js/app.js"></script>' in resp.text
+        assert "showToast" in _static_js("app.js")
 
 
 # ============================================================
@@ -240,8 +253,10 @@ class TestLoadingStates:
     @pytest.mark.asyncio
     async def test_loading_bar_js(self, client):
         resp = await client.get("/")
-        assert "htmx:beforeRequest" in resp.text
-        assert "htmx:afterRequest" in resp.text
+        assert '<script src="/static/js/app.js"></script>' in resp.text
+        js = _static_js("app.js")
+        assert "htmx:beforeRequest" in js
+        assert "htmx:afterRequest" in js
 
     @pytest.mark.asyncio
     async def test_editor_has_spinner_indicator(self, client):

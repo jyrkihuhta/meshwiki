@@ -377,6 +377,54 @@ Filter.links_to("PageName")
 Filter.linked_from("PageName")
 ```
 
+## HTML Output Is Sanitized — No Inline Script
+
+Everything `parse_wiki_content()` returns is passed through an allowlist
+sanitizer (`core/sanitize.py`, built on `nh3`) as the **last** step, and the
+Content-Security-Policy forbids inline script. Page content can come from
+untrusted text (the agent factory builds pages from external report text), so
+macro output goes through the same filter as raw HTML a user typed. A macro must
+therefore emit **markup only**:
+
+- **No `<script>` and no `on*=` handlers** (`onclick`, `onsubmit`, …). Put the
+  behaviour in a file under `static/js/`, and hook it to your markup with a class
+  or a `data-*` attribute. Delegate from `document` so it also covers content
+  swapped in by htmx:
+
+  ```python
+  # Python: markup only
+  return f'<button class="my-button" type="button" data-my-target="{html_escape(x, quote=True)}">Go</button>'
+  ```
+
+  ```js
+  // static/js/behaviors.js: behaviour
+  document.addEventListener('click', function (e) {
+      var btn = e.target.closest('.my-button');
+      if (btn) go(btn.getAttribute('data-my-target'));
+  });
+  ```
+
+- **Escape every value you interpolate** (`html_escape(value, quote=True)` for
+  attributes). The sanitizer is a safety net, not a substitute for escaping.
+- **A tag or attribute that isn't on the allowlist is dropped** (unknown tags
+  keep their text; `<script>`/`<style>` lose their content too). If your macro
+  needs a new tag, a new `data-*` attribute, or a new `style` shape, add it in
+  `core/sanitize.py` (`ALLOWED_TAGS`, `_DATA_ATTRIBUTES`, `_filter_attribute`) and
+  cover it in `tests/test_sanitize.py`. `data-*` attributes are allowlisted per
+  tag, not by prefix, so content can't attach behaviour hooks to arbitrary
+  elements.
+- **`hx-*` attributes are only kept on links in the exact shape the wiki-link
+  macro generates** (hover-card previews). They would otherwise let content fire
+  requests as the viewer, so a macro can't use `hx-post` and friends in its
+  output either; trigger requests from `static/js` instead.
+- `style=` is only kept for a progress-bar `width:N%` on a `div` and table-cell
+  `text-align`. Use classes for everything else.
+
+Scripts are loaded by `templates/base.html`: files that need to run once
+(delegated listeners, `task_terminal.js`) are `defer`red in `<head>`; `app.js`
+and per-page scripts sit at the end of `<body>` because `hx-boost` re-executes
+body scripts on every navigation.
+
 ## Testing Macros
 
 Follow the existing test patterns in `tests/test_parser.py`:

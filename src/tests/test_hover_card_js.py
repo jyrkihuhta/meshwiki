@@ -67,27 +67,71 @@ class TestWikiLinkHtmxAttrs:
 
 
 class TestPagePreviewEndpoint:
-    @pytest.mark.asyncio
-    async def test_preview_endpoint_returns_page_content(self, client):
-        await meshwiki.main.storage.save_page("HoverTest", "# Test Content")
-        resp = await client.get("/api/pages/HoverTest/preview")
-        assert resp.status_code == 200
-        assert "# Test Content" in resp.text
+    """The preview is a hover card (title + plain-text excerpt), not raw source."""
 
     @pytest.mark.asyncio
-    async def test_preview_endpoint_missing_page_returns_empty(self, client):
+    async def test_preview_returns_card_with_title_and_excerpt(self, client):
+        await meshwiki.main.storage.save_page(
+            "Hover Test", "# Test Content\n\nSome **bold** words here."
+        )
+        resp = await client.get("/api/pages/Hover_Test/preview")
+        assert resp.status_code == 200
+        # outerHTML swap target: the card must keep its id
+        assert 'id="wiki-hover-card"' in resp.text
+        assert "Hover Test" in resp.text
+        # Markdown reduced to words, not shown as source
+        assert "Test Content Some bold words here." in resp.text
+        assert "# Test" not in resp.text and "**" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_preview_missing_page_returns_not_found_card(self, client):
+        # Still a card (with the swap id), so the next hover has a target to swap.
         resp = await client.get("/api/pages/NonExistentPage/preview")
         assert resp.status_code == 200
-        assert resp.text == ""
+        assert 'id="wiki-hover-card"' in resp.text
+        assert "Page not found" in resp.text
 
     @pytest.mark.asyncio
-    async def test_preview_endpoint_with_frontmatter(self, client):
+    async def test_preview_excludes_frontmatter(self, client):
         content = """---
 title: Test Page
+secret: hunter2
 ---
 # Hello World
 """
         await meshwiki.main.storage.save_page("FrontmatterPage", content)
         resp = await client.get("/api/pages/FrontmatterPage/preview")
         assert resp.status_code == 200
-        assert "# Hello World" in resp.text
+        assert "Hello World" in resp.text
+        assert "hunter2" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_preview_does_not_execute_page_markup(self, client):
+        """Regression: the endpoint used to return raw page source as HTML, so
+        hovering a link to a page containing markup ran it."""
+        await meshwiki.main.storage.save_page(
+            "Evil",
+            '<script>alert(1)</script><img src=x onerror="alert(2)">'
+            "[x](javascript:alert(3)) harmless text",
+        )
+        resp = await client.get("/api/pages/Evil/preview")
+        assert resp.status_code == 200
+        assert "<script" not in resp.text
+        assert "<img" not in resp.text
+        assert "onerror" not in resp.text
+        assert "harmless text" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_preview_escapes_page_name(self, client):
+        resp = await client.get(
+            "/api/pages/%3Cimg%20src=x%20onerror=alert(1)%3E/preview"
+        )
+        assert resp.status_code == 200
+        assert "<img" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_preview_excerpt_is_truncated(self, client):
+        await meshwiki.main.storage.save_page("LongPage", "word " * 500)
+        resp = await client.get("/api/pages/LongPage/preview")
+        assert "\u2026" in resp.text
+        assert len(resp.text) < 600

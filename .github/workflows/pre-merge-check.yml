@@ -68,6 +68,6 @@ jobs:
       - name: Run E2E smoke tests
         run: |
           cd src
-          pytest e2e/test_navigation.py -v \
-            -k "TestTocSidebar or TestHeaderSearch" \
+          pytest e2e/test_navigation.py e2e/test_csp_and_sanitization.py -v \
+            -k "TestTocSidebar or TestHeaderSearch or TestNoCspViolations or TestMovedBehaviours or TestHostileContent" \
             --browser chromium

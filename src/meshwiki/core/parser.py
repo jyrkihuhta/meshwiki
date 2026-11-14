@@ -1,6 +1,5 @@
 """Markdown parser with wiki link support."""
 
-import json
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -11,9 +10,11 @@ from xml.etree.ElementTree import Element
 from markdown import Markdown
 from markdown.extensions import Extension
 from markdown.inlinepatterns import InlineProcessor, SimpleTagInlineProcessor
+from markdown.postprocessors import Postprocessor
 from markdown.preprocessors import Preprocessor
 
 from meshwiki.core.graph import get_engine
+from meshwiki.core.sanitize import sanitize_html
 from meshwiki.extensions.running_clock import RunningClockExtension
 
 _ESCAPED_MACRO_RE = re.compile(r"\\<<([A-Za-z][^>]*)>>")
@@ -854,16 +855,17 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
         phase_html = f'<div class="task-status-phase">{phase_text}</div>'
 
     # ── Section D: live terminal (in_progress / review / failed) ─────────────
+    # Markup only: the sanitizer strips <script> and inline handlers, so the
+    # behaviour lives in static/js/task_terminal.js, which finds these wrappers
+    # and reads the task page name from data-terminal-page.
     terminal_html = ""
     if status in ("in_progress", "review", "failed"):
         safe_id = re.sub(r"[^a-zA-Z0-9-]", "-", page_name)
-        page_name_js = (
-            json.dumps(page_name).replace("<", "\\u003c").replace(">", "\\u003e")
-        )
         is_done_status = status in ("merged", "done", "failed", "rejected")
         terminal_html = (
             "<div "
-            'class="task-status-terminal"'
+            'class="task-status-terminal" '
+            f'data-terminal-page="{html_escape(page_name, quote=True)}"'
             f'{" data-terminal-done" if is_done_status else ""}>'
             '<div class="task-terminal-header">'
             '<span class="task-terminal-dot task-terminal-dot--red"></span>'
@@ -871,87 +873,11 @@ def _render_task_status(page_name: str, page_metadata: dict) -> str:
             '<span class="task-terminal-dot task-terminal-dot--green"></span>'
             '<span class="task-terminal-title">kilo &mdash; '
             f"{html_escape(page_name)}</span>"
-            '<button class="task-terminal-expand-btn" title="Expand terminal"'
-            ' onclick="(function(b){'
-            "var w=b.closest('.task-status-terminal');"
-            "var expanded=w.classList.toggle('terminal-expanded');"
-            "b.title=expanded?'Exit fullscreen':'Expand terminal';"
-            "b.innerHTML=expanded?'&#x2715;':'&#x26F6;';"
-            "document.body.style.overflow=expanded?'hidden':'';"
-            '})(this)">&#x26F6;</button>'
+            '<button class="task-terminal-expand-btn" type="button" '
+            'title="Expand terminal">&#x26F6;</button>'
             "</div>"
             f'<div id="task-terminal-{safe_id}" class="task-terminal-body"></div>'
             "</div>"
-            "<script>"
-            "(function(){"
-            f"var PAGE={page_name_js};"
-            f"var EL=document.getElementById('task-terminal-{safe_id}');"
-            f"var DONE={str(is_done_status).lower()};"
-            "var NO_SESSION_MSG='\\r\\n\\x1b[2m[no active terminal session for this "
-            "task]\\x1b[0m\\r\\n';"
-            "function boot(){"
-            "var t=new Terminal({"
-            "cols:160,rows:50,disableStdin:true,convertEol:true,scrollback:5000,"
-            "fontFamily:'Menlo,Monaco,\"Courier New\",monospace',fontSize:13,"
-            "theme:{background:'#1e1e1e',foreground:'#d4d4d4'}"
-            "});"
-            "t.open(EL);"
-            "var pr=location.protocol==='https:'?'wss:':'ws:';"
-            "var retries=0;"
-            "var retryMax=10;"
-            "var retryDelay=5000;"
-            "var bannerEl=null;"
-            "function showBanner(msg){"
-            "bannerEl=document.createElement('div');"
-            "bannerEl.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);"
-            "color:#888;font-family:Menlo,Monaco,monospace;font-size:13px;text-align:center;"
-            "pointer-events:none;';"
-            "bannerEl.textContent=msg;"
-            "EL.style.position='relative';EL.appendChild(bannerEl);"
-            "}"
-            "function "
-            "clearBanner(){if(bannerEl&&bannerEl.parentNode){bannerEl.parentNode.removeChild(bannerEl);bannerEl=null;}}"
-            "function connect(){"
-            "var wsPath=PAGE.split('/').map(function(s){return "
-            "encodeURIComponent(s);}).join('/');"
-            "var ws=new WebSocket(pr+'//'+location.host+'/ws/terminal/'+wsPath);"
-            "ws.onmessage=function(e){"
-            "if(e.data===NO_SESSION_MSG.trim()){"
-            "if(!bannerEl){showBanner('[session ended — waiting for next grinder "
-            "run...]');}"
-            "}else{"
-            "clearBanner();"
-            "if(e.data!==NO_SESSION_MSG){t.write(e.data);}"
-            "}"
-            "};"
-            "ws.onclose=function(e){"
-            "if(DONE||e.code===1000){t.write('\\r\\n\\x1b[2m\\u2501\\u2501\\u2501 "
-            "session ended \\u2501\\u2501\\u2501\\x1b[0m\\r\\n');return;}"
-            "clearBanner();"
-            "if(retries<retryMax){"
-            "retries++;"
-            "showBanner('[session ended — waiting for next grinder run...]');"
-            "setTimeout(connect,retryDelay);"
-            "}else{"
-            "showBanner('[no more retries — reload page]');"
-            "}"
-            "};"
-            "ws.onerror=function(){t.write('\\r\\n\\x1b[31m[connection "
-            "error]\\x1b[0m\\r\\n');};"
-            "};"
-            "connect();"
-            "}"
-            "if(window.Terminal){boot();}"
-            "else{"
-            "var l=document.createElement('link');l.rel='stylesheet';"
-            "l.href='https://cdn.jsdelivr.net/npm/xterm@5/css/xterm.css';"
-            "document.head.appendChild(l);"
-            "var s=document.createElement('script');"
-            "s.src='https://cdn.jsdelivr.net/npm/xterm@5/lib/xterm.js';"
-            "s.onload=boot;document.head.appendChild(s);"
-            "}"
-            "})();"
-            "</script>"
         )
 
     return (
@@ -1759,30 +1685,29 @@ NEWPAGE_PATTERN = re.compile(
 def _render_newpage_macro(
     template_name: str, button_label: str, parent_page: str | None
 ) -> str:
-    """Render the <<NewPage(...)>> macro as an inline form."""
+    """Render the <<NewPage(...)>> macro as an inline form.
+
+    Markup only: the click behaviour (navigate to the new page's editor) lives in
+    static/js/behaviors.js and reads the data-newpage-* attributes, because the
+    sanitizer strips inline ``onclick`` handlers.
+    """
     if not button_label:
         button_label = "New page"
-    escaped_template = html_escape(template_name)
+    template_attr = html_escape(template_name, quote=True)
     escaped_label = html_escape(button_label)
-    escaped_parent = html_escape(parent_page or "")
-
-    if parent_page:
-        onclick = (
-            f"var input=this.previousElementSibling.value;"
-            f"if(input){{window.location.href='/page/{escaped_parent}/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
-        )
-    else:
-        onclick = (
-            f"var input=this.previousElementSibling.value;"
-            f"if(input){{window.location.href='/page/'+encodeURIComponent(input)+'/edit?template={escaped_template}'}}"
-        )
+    parent_attr = (
+        f' data-newpage-parent="{html_escape(parent_page, quote=True)}"'
+        if parent_page
+        else ""
+    )
 
     return (
-        f'<span class="new-page-macro">'
-        f'<input type="text" class="new-page-input" placeholder="Page name" />'
+        '<span class="new-page-macro">'
+        '<input type="text" class="new-page-input" placeholder="Page name" />'
         '<button class="new-page-button" type="button" '
-        f'onclick="{onclick}">{escaped_label}</button>'
-        f"</span>"
+        f'data-newpage-template="{template_attr}"{parent_attr}>'
+        f"{escaped_label}</button>"
+        "</span>"
     )
 
 
@@ -1979,6 +1904,27 @@ class EpicStatusExtension(Extension):
         )
 
 
+class SanitizePostprocessor(Postprocessor):
+    """Strip everything outside the allowlist from the final rendered HTML."""
+
+    def run(self, text: str) -> str:
+        return sanitize_html(text)
+
+
+class SanitizeExtension(Extension):
+    """Sanitize rendered output as the very last processing step.
+
+    Markdown passes raw HTML through and the templates render the result with
+    ``| safe``, so this is what keeps page content (including content built from
+    untrusted external text) from running script. Priority 0 places it after the
+    built-in postprocessors (raw HTML restore 30, ampersand 20, unescape 10), so
+    it sees the complete document, macro output included.
+    """
+
+    def extendMarkdown(self, md: Markdown) -> None:
+        md.postprocessors.register(SanitizePostprocessor(md), "sanitize_html", 0)
+
+
 def create_parser(
     page_exists: Callable[[str], bool] | None = None,
     page_name: str | None = None,
@@ -2046,6 +1992,7 @@ def create_parser(
             LastModifiedExtension(modified=page_modified),  # <<LastModified>>
             CalloutExtension(),  # ```info / ```warning / ```tip / ```error / ```note
             TableOfContentsExtension(toc_html=toc_html),  # <<TableOfContents>>
+            SanitizeExtension(),  # allowlist-sanitize the final HTML (runs last)
         ]
     )
 
