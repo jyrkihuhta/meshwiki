@@ -4,16 +4,117 @@ import asyncio
 import re
 import uuid as uuid_mod
 from abc import ABC, abstractmethod
-from datetime import datetime
+from collections.abc import Iterator
+from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from meshwiki.core.models import Page, PageMetadata
+from meshwiki.core.logging import get_logger
+from meshwiki.core.models import (
+    LIST_FIELDS,
+    TEXT_FIELDS,
+    Page,
+    PageMetadata,
+    coerce_frontmatter,
+)
 
 if TYPE_CHECKING:
     from meshwiki.core.revision_store import RevisionStore
+
+log = get_logger(__name__)
+
+
+class PageFileError(Exception):
+    """The file behind a page exists but cannot be used as a page.
+
+    Raised for a single page addressed by name: a file that is not UTF-8 text,
+    cannot be read, or a directory sitting where the page's file should be.
+    Scans over many pages log and skip such files instead of raising.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        super().__init__(f"Page {name!r} cannot be used: {reason}")
+        self.name = name
+        self.reason = reason
+
+
+class InvalidFrontmatterError(ValueError):
+    """Frontmatter about to be written has a value its field cannot hold."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(f"Invalid frontmatter: {'; '.join(problems)}")
+        self.problems = problems
+
+
+# What loading frontmatter can raise. PyYAML reports most problems as YAMLError,
+# but its constructors let plain built-in exceptions through for a tagged scalar
+# they cannot build: ``!!bool maybe`` is a KeyError, ``!!int ""`` an IndexError,
+# ``!!timestamp foo`` an AttributeError, an out-of-range date a ValueError or
+# OverflowError. Deeply nested or self-referential YAML ends in RecursionError.
+_FRONTMATTER_ERRORS = (
+    yaml.YAMLError,
+    ValueError,
+    TypeError,
+    LookupError,
+    AttributeError,
+    ArithmeticError,
+    RecursionError,
+)
+
+
+def _is_text(value: Any) -> bool:
+    """Return True if a YAML value is already text or a flat list of text."""
+    if isinstance(value, list):
+        return all(isinstance(item, str) for item in value)
+    return value is None or isinstance(value, str)
+
+
+def _prefer_source_text(value: Any, source: Any) -> Any:
+    """Replace YAML-typed scalars in ``value`` with the text they were written as."""
+    if isinstance(value, list):
+        if isinstance(source, list) and len(source) == len(value):
+            return [_prefer_source_text(v, s) for v, s in zip(value, source)]
+        return value
+    if isinstance(value, (bool, int, float, date)) and isinstance(source, str):
+        return source
+    return value
+
+
+def _restore_source_text(frontmatter: dict[Any, Any], yaml_text: str) -> dict[Any, Any]:
+    """Give text fields the text the author wrote, not YAML's reading of it.
+
+    YAML turns ``title: 1.10`` into the float 1.1 and ``tags: [yes]`` into
+    ``True``; converting those back with ``str()`` would change the author's
+    data. When a text field holds such a scalar the frontmatter is loaded a
+    second time with every scalar kept as a string, and that text is used.
+
+    Args:
+        frontmatter: Mapping from ``yaml.safe_load``.
+        yaml_text: The YAML source it was loaded from.
+
+    Returns:
+        ``frontmatter`` itself when nothing needed restoring, otherwise a copy
+        with the affected text fields replaced.
+    """
+    fields = [
+        f for f in (*TEXT_FIELDS, *LIST_FIELDS) if not _is_text(frontmatter.get(f))
+    ]
+    if not fields:
+        return frontmatter
+    try:
+        # BaseLoader builds only str, list and dict, so it is as safe as
+        # safe_load.
+        source = yaml.load(yaml_text, Loader=yaml.BaseLoader)  # noqa: S506
+    except _FRONTMATTER_ERRORS:
+        return frontmatter
+    if not isinstance(source, dict):
+        return frontmatter
+    restored = dict(frontmatter)
+    for field in fields:
+        restored[field] = _prefer_source_text(frontmatter[field], source.get(field))
+    return restored
 
 
 class Storage(ABC):
@@ -143,21 +244,42 @@ class FileStorage(Storage):
         parts = rel.with_suffix("").parts
         return "/".join(p.replace("_", " ") for p in parts)
 
-    def _parse_frontmatter(self, content: str) -> tuple[PageMetadata, str]:
-        """Parse YAML frontmatter from content.
+    def _load_frontmatter(self, content: str) -> tuple[PageMetadata, str, list[str]]:
+        """Parse YAML frontmatter from content, tolerating wrongly typed values.
 
-        Returns (metadata, content_without_frontmatter).
+        Never raises because of what the frontmatter contains. Values that do not
+        match a declared field's type are coerced (see ``coerce_frontmatter``);
+        frontmatter that is not a YAML mapping at all is left in the body.
+
+        Returns:
+            ``(metadata, content_without_frontmatter, problems)`` where
+            ``problems`` names each declared field whose value could not be
+            coerced and was set aside under ``<field>_invalid``.
         """
         match = self.FRONTMATTER_PATTERN.match(content)
         if match:
             try:
                 frontmatter = yaml.safe_load(match.group(1)) or {}
+                if not isinstance(frontmatter, dict):
+                    raise TypeError("frontmatter is not a mapping")
+                frontmatter = _restore_source_text(frontmatter, match.group(1))
+                frontmatter, problems = coerce_frontmatter(frontmatter)
                 metadata = PageMetadata(**frontmatter)
-                content = content[match.end() :]
-                return metadata, content
-            except (yaml.YAMLError, TypeError):
+                return metadata, content[match.end() :], problems
+            except _FRONTMATTER_ERRORS:
+                # Not usable as frontmatter (YAML syntax error, a tagged value
+                # PyYAML cannot build, non-string keys, ...): keep the whole
+                # text as the page body.
                 pass
-        return PageMetadata(), content
+        return PageMetadata(), content, []
+
+    def _parse_frontmatter(self, content: str) -> tuple[PageMetadata, str]:
+        """Parse YAML frontmatter from content.
+
+        Returns (metadata, content_without_frontmatter).
+        """
+        metadata, body, _ = self._load_frontmatter(content)
+        return metadata, body
 
     def _create_frontmatter(self, metadata: PageMetadata) -> str:
         """Create YAML frontmatter string from metadata."""
@@ -171,35 +293,97 @@ class FileStorage(Storage):
             data["modified"] = data["modified"].isoformat()
         return f"---\n{yaml.dump(data, default_flow_style=False)}---\n\n"
 
+    def _read_file(self, name: str, path: Path) -> str:
+        """Read a page file as UTF-8 text.
+
+        Raises:
+            PageFileError: If the file cannot be read or is not UTF-8 text.
+        """
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise PageFileError(name, "the file is not valid UTF-8 text") from exc
+        except OSError as exc:
+            reason = exc.strerror or type(exc).__name__
+            raise PageFileError(name, f"the file cannot be read ({reason})") from exc
+
+    def _read_page(self, name: str, path: Path) -> Page:
+        """Read and parse one page file.
+
+        Raises:
+            PageFileError: If the file cannot be read or is not UTF-8 text.
+        """
+        metadata, body = self._parse_frontmatter(self._read_file(name, path))
+        return Page(name=name, content=body, metadata=metadata, exists=True)
+
+    def _scan_pages(self) -> Iterator[Page]:
+        """Yield every readable page on disk.
+
+        One bad file never fails the scan: a file that cannot be read (wrong
+        encoding, permissions, vanished mid-scan) is logged by name and skipped.
+        Directories that happen to be named ``*.md`` are not pages.
+        """
+        for path in self.base_path.glob("**/*.md"):
+            try:
+                if not path.is_file():
+                    continue
+                page = self._read_page(self._path_to_name(path), path)
+            except Exception as exc:
+                # Deliberately broad: this is the one place that keeps a single
+                # file from failing every listing, so it must also hold for a
+                # failure nobody anticipated (a parser bug, say). The file is
+                # named in the log; only this page is left out.
+                log.warning(
+                    "page_file_skipped",
+                    file=str(path),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
+            yield page
+
     async def get_page(self, name: str) -> Page | None:
-        """Get a page by name."""
+        """Get a page by name.
+
+        Raises:
+            PageFileError: If the page's file exists but cannot be read.
+        """
         path = self._get_path(name)
-        if not path.exists():
+        if not path.is_file():
             return None
-
-        content = path.read_text(encoding="utf-8")
-        metadata, content = self._parse_frontmatter(content)
-
-        return Page(
-            name=name,
-            content=content,
-            metadata=metadata,
-            exists=True,
-        )
+        return self._read_page(name, path)
 
     async def save_page(self, name: str, content: str) -> Page:
-        """Save a page."""
+        """Save a page.
+
+        Frontmatter values of the wrong type are normalised on the way in
+        (``tags: python`` is written back as a one-item list).
+
+        Raises:
+            InvalidFrontmatterError: If a declared frontmatter field holds a
+                value that cannot be read as that field's type. Nothing is
+                written.
+            PageFileError: If a directory occupies the page's file name.
+        """
         path = self._get_path(name)
-        path.parent.mkdir(parents=True, exist_ok=True)
 
         # Parse any frontmatter from the content
-        metadata, body = self._parse_frontmatter(content)
+        metadata, body, problems = self._load_frontmatter(content)
+        if problems:
+            raise InvalidFrontmatterError(problems)
+        if path.is_dir():
+            raise PageFileError(name, "a directory has this page's file name")
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         # Carry forward uuid and created from the file on disk when the incoming
         # content has no frontmatter (e.g. programmatic saves without frontmatter).
         if path.exists() and (not metadata.created or not metadata.uuid):
-            existing_raw = path.read_text(encoding="utf-8")
-            existing_meta, _ = self._parse_frontmatter(existing_raw)
+            try:
+                existing_meta = self._read_page(name, path).metadata
+            except PageFileError as exc:
+                # Saving over an unreadable file is how it gets repaired.
+                log.warning("page_file_replaced", file=str(path), error=str(exc))
+                existing_meta = PageMetadata()
             if not metadata.created:
                 metadata.created = existing_meta.created
             if not metadata.uuid:
@@ -234,7 +418,7 @@ class FileStorage(Storage):
     async def delete_page(self, name: str) -> bool:
         """Delete a page and remove any resulting empty parent directories."""
         path = self._get_path(name)
-        if path.exists():
+        if path.is_file():
             path.unlink()
             # Clean up empty parent directories up to (but not including) base_path
             parent = path.parent
@@ -251,19 +435,25 @@ class FileStorage(Storage):
 
     async def list_pages(self) -> list[str]:
         """List all page names."""
-        pages = [self._path_to_name(p) for p in self.base_path.glob("**/*.md")]
+        pages = [
+            self._path_to_name(p) for p in self.base_path.glob("**/*.md") if p.is_file()
+        ]
         return sorted(pages)
 
     async def page_exists(self, name: str) -> bool:
         """Check if a page exists."""
-        return self._get_path(name).exists()
+        return self._get_path(name).is_file()
 
     async def get_raw_content(self, name: str) -> str | None:
-        """Get raw file content including frontmatter for editing."""
+        """Get raw file content including frontmatter for editing.
+
+        Raises:
+            PageFileError: If the page's file exists but cannot be read.
+        """
         path = self._get_path(name)
-        if not path.exists():
+        if not path.is_file():
             return None
-        return path.read_text(encoding="utf-8")
+        return self._read_file(name, path)
 
     async def search_pages(self, query: str) -> list[dict]:
         """Search pages by name and content."""
@@ -274,11 +464,10 @@ class FileStorage(Storage):
         name_matches = []
         content_matches = []
 
-        for path in self.base_path.glob("**/*.md"):
-            name = self._path_to_name(path)
-            raw = path.read_text(encoding="utf-8")
-            metadata, body = self._parse_frontmatter(raw)
-            title = metadata.title or name.replace("_", " ")
+        for page in self._scan_pages():
+            name = page.name
+            body = page.content
+            title = page.metadata.title or name.replace("_", " ")
 
             if query_lower in name.lower() or query_lower in title.lower():
                 # Extract snippet from beginning of content
@@ -316,29 +505,34 @@ class FileStorage(Storage):
         return name_matches + content_matches
 
     def list_pages_with_metadata_sync(self) -> list[Page]:
-        """Scan pages on disk synchronously; call it via run_in_executor."""
-        pages = []
-        for path in self.base_path.glob("**/*.md"):
-            name = self._path_to_name(path)
-            raw = path.read_text(encoding="utf-8")
-            metadata, body = self._parse_frontmatter(raw)
-            pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
-        return sorted(pages, key=lambda p: p.name.lower())
+        """Scan pages on disk synchronously; call it via run_in_executor.
+
+        Files that cannot be read are logged and left out.
+        """
+        return sorted(self._scan_pages(), key=lambda p: p.name.lower())
 
     def get_pages_sync(self, names: list[str]) -> list[Page]:
         """Load the named pages from disk, skipping any that no longer exist.
 
         Reads and parses each named file; call via ``run_in_executor`` so the
-        batch of disk reads does not block the event loop.
+        batch of disk reads does not block the event loop. A page whose file
+        cannot be read is logged and skipped, like a missing one.
         """
         pages: list[Page] = []
         for name in names:
-            path = self._get_path(name)
-            if not path.exists():
-                continue
-            raw = path.read_text(encoding="utf-8")
-            metadata, body = self._parse_frontmatter(raw)
-            pages.append(Page(name=name, content=body, metadata=metadata, exists=True))
+            try:
+                path = self._get_path(name)
+                if not path.is_file():
+                    continue
+                pages.append(self._read_page(name, path))
+            except Exception as exc:
+                # Broad for the same reason as in _scan_pages.
+                log.warning(
+                    "page_file_skipped",
+                    page=name,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
         return pages
 
     async def get_pages(self, names: list[str]) -> list[Page]:
@@ -365,59 +559,111 @@ class FileStorage(Storage):
     async def search_by_tag(self, tag: str) -> list[Page]:
         """Filter pages by tag."""
         tag_lower = tag.lower()
-        results = []
-        for path in self.base_path.glob("**/*.md"):
-            name = self._path_to_name(path)
-            raw = path.read_text(encoding="utf-8")
-            metadata, body = self._parse_frontmatter(raw)
-            if any(t.lower() == tag_lower for t in metadata.tags):
-                results.append(
-                    Page(name=name, content=body, metadata=metadata, exists=True)
-                )
+        results = [
+            page
+            for page in self._scan_pages()
+            if any(t.lower() == tag_lower for t in page.metadata.tags)
+        ]
         return sorted(results, key=lambda p: p.name.lower())
+
+    @staticmethod
+    def _set_field(
+        metadata: PageMetadata, field: str, value: str | None, *, remove: bool
+    ) -> None:
+        """Set one frontmatter field from text, converting to the field's type.
+
+        Declared fields are converted (list fields split on commas and
+        newlines, dates parsed); every other field is stored as given, so what
+        is written can always be read back.
+
+        Args:
+            metadata: Metadata to update in place.
+            field: Frontmatter field name.
+            value: New value as text. An empty value clears a declared field.
+            remove: For undeclared fields, delete the field instead of setting it.
+
+        Raises:
+            InvalidFrontmatterError: If the value does not fit a declared field.
+        """
+        if field in PageMetadata.model_fields:
+            raw: Any = value or None
+            if field in LIST_FIELDS and isinstance(value, str):
+                raw = [v.strip() for v in re.split(r"[,\n]", value) if v.strip()]
+            coerced, problems = coerce_frontmatter({field: raw})
+            if problems:
+                raise InvalidFrontmatterError(problems)
+            setattr(metadata, field, coerced[field])
+            return
+        # Write to the extras mapping, not setattr(): a field named like a model
+        # attribute (``model_dump``, ``copy``) would otherwise shadow it or be
+        # silently dropped.
+        if remove:
+            metadata.model_extra.pop(field, None)
+        else:
+            metadata.model_extra[field] = value
+
+    def _write_frontmatter_update(
+        self,
+        name: str,
+        path: Path,
+        metadata: PageMetadata,
+        body: str,
+        message: str,
+        set_aside: list[str],
+    ) -> Page:
+        """Stamp ``modified``, write the page back and record the revision.
+
+        ``set_aside`` is the problem list from reading the file: each entry is a
+        declared field whose value could not be read as its type, which this
+        write stores under ``<field>_invalid``. That renames a key the caller
+        never asked to change, so it is logged with the page name.
+        """
+        metadata.modified = datetime.now()
+
+        raw = self._create_frontmatter(metadata) + body
+        path.write_text(raw, encoding="utf-8")
+        if set_aside:
+            log.warning(
+                "frontmatter_values_set_aside",
+                page=name,
+                file=str(path),
+                problems=set_aside,
+            )
+
+        if self._revisions is not None:
+            self._revisions.record(
+                name, raw, operation="frontmatter_update", message=message
+            )
+
+        return Page(name=name, content=body, metadata=metadata, exists=True)
 
     async def update_frontmatter_field(
         self, name: str, field: str, value: str
     ) -> Page | None:
-        """Update a single frontmatter field on a page."""
+        """Update a single frontmatter field on a page.
+
+        Args:
+            name: Page name.
+            field: Frontmatter field name to update.
+            value: New value. For list fields (``tags``, ``children``) pass
+                comma-separated values. An empty value clears the field.
+
+        Returns:
+            Updated Page, or None if page not found.
+
+        Raises:
+            InvalidFrontmatterError: If the value does not fit the field's
+                type. Nothing is written.
+            PageFileError: If the page's file cannot be read.
+        """
         path = self._get_path(name)
-        if not path.exists():
+        if not path.is_file():
             return None
 
-        raw = path.read_text(encoding="utf-8")
-        metadata, body = self._parse_frontmatter(raw)
-
-        # Update the specific field
-        if field == "tags":
-            metadata.tags = [t.strip() for t in value.split(",") if t.strip()]
-        elif field == "title":
-            metadata.title = value if value else None
-        elif value:
-            setattr(metadata, field, value)
-        else:
-            # Empty value: remove extra field if it exists
-            extras = getattr(metadata, "__pydantic_extra__", None)
-            if extras and field in extras:
-                del extras[field]
-
-        # Update modification time
-        metadata.modified = datetime.now()
-
-        # Write back
-        frontmatter = self._create_frontmatter(metadata)
-        raw = frontmatter + body
-        path.write_text(raw, encoding="utf-8")
-
-        if self._revisions is not None:
-            self._revisions.record(
-                name, raw, operation="frontmatter_update", message=f"Updated {field}"
-            )
-
-        return Page(
-            name=name,
-            content=body,
-            metadata=metadata,
-            exists=True,
+        metadata, body, set_aside = self._load_frontmatter(self._read_file(name, path))
+        self._set_field(metadata, field, value, remove=not value)
+        return self._write_frontmatter_update(
+            name, path, metadata, body, f"Updated {field}", set_aside
         )
 
     async def patch_frontmatter(
@@ -425,60 +671,30 @@ class FileStorage(Storage):
     ) -> "Page | None":
         """Update multiple frontmatter fields without touching the page body.
 
-        Pass ``None`` as a value to remove an extra field.  Known metadata
-        fields (``title``, ``tags``) follow the same coercion rules as
-        ``update_frontmatter_field``.
+        Pass ``None`` as a value to remove an extra field.  Declared metadata
+        fields (``title``, ``tags``, ``children``, ...) follow the same
+        conversion rules as ``update_frontmatter_field``.
+
+        Raises:
+            InvalidFrontmatterError: If a value does not fit its field's type.
+                Nothing is written.
+            PageFileError: If the page's file cannot be read.
         """
         path = self._get_path(name)
-        if not path.exists():
+        if not path.is_file():
             return None
 
-        raw = path.read_text(encoding="utf-8")
-        metadata, body = self._parse_frontmatter(raw)
-
+        metadata, body, set_aside = self._load_frontmatter(self._read_file(name, path))
         for field, value in fields.items():
-            if field == "tags":
-                metadata.tags = (
-                    [t.strip() for t in value.split(",") if t.strip()] if value else []
-                )
-            elif field == "children":
-                # children is a list field — split on commas or newlines
-                if value:
-                    metadata.children = [
-                        v.strip() for v in re.split(r"[,\n]", value) if v.strip()
-                    ]
-                else:
-                    metadata.children = []
-            elif field == "title":
-                metadata.title = value if value else None
-            elif value is not None:
-                setattr(metadata, field, value)
-            else:
-                extras = getattr(metadata, "__pydantic_extra__", None)
-                if extras and field in extras:
-                    del extras[field]
-
-        metadata.modified = datetime.now()
-
-        frontmatter = self._create_frontmatter(metadata)
-        raw = frontmatter + body
-        path.write_text(raw, encoding="utf-8")
-
-        field_names = ", ".join(fields)
-        if self._revisions is not None:
-            self._revisions.record(
-                name,
-                raw,
-                operation="frontmatter_update",
-                message=f"Updated {field_names}",
-            )
-
-        return Page(name=name, content=body, metadata=metadata, exists=True)
+            self._set_field(metadata, field, value, remove=value is None)
+        return self._write_frontmatter_update(
+            name, path, metadata, body, f"Updated {', '.join(fields)}", set_aside
+        )
 
     async def rename_page(self, old_name: str, new_name: str) -> "Page | None":
         """Move a page to a new name/location."""
         old_path = self._get_path(old_name)
-        if not old_path.exists():
+        if not old_path.is_file():
             return None
         new_path = self._get_path(new_name)
         new_path.parent.mkdir(parents=True, exist_ok=True)

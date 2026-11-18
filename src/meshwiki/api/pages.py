@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from meshwiki.api.auth import require_api_key
 from meshwiki.api.validation import validate_api_page_name
 from meshwiki.core.dependencies import get_revision_store, get_storage
-from meshwiki.core.models import Revision
+from meshwiki.core.models import Revision, json_safe_metadata
 from meshwiki.core.revision_store import RevisionStore
 from meshwiki.core.storage import FileStorage
 
@@ -39,7 +39,7 @@ def _page_response(page) -> PageResponse:
     return PageResponse(
         name=page.name,
         content=page.content,
-        metadata=page.metadata.model_dump(),
+        metadata=json_safe_metadata(page.metadata),
         exists=page.exists,
     )
 

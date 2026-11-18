@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from meshwiki.api.auth import require_api_key
 from meshwiki.api.validation import validate_api_page_name
 from meshwiki.core.dependencies import get_storage
+from meshwiki.core.models import json_safe_metadata
 from meshwiki.core.storage import FileStorage
 from meshwiki.core.task_machine import InvalidTransitionError, transition_task
 from meshwiki.core.terminal_sessions import close_session, create_session, put_chunk
@@ -127,7 +128,7 @@ async def list_tasks(
         # (indexed but since deleted) are skipped.
         pages = await storage.get_pages(names)
         return [
-            {"name": page.name, "metadata": page.metadata.model_dump()}
+            {"name": page.name, "metadata": json_safe_metadata(page.metadata)}
             for page in pages
             if _task_matches(
                 page.metadata.model_extra or {},
@@ -142,7 +143,7 @@ async def list_tasks(
     # Fallback: full scan (runs off the event loop in list_pages_with_metadata).
     pages = await storage.list_pages_with_metadata()
     return [
-        {"name": page.name, "metadata": page.metadata.model_dump()}
+        {"name": page.name, "metadata": json_safe_metadata(page.metadata)}
         for page in pages
         if _task_matches(
             page.metadata.model_extra or {},
