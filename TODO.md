@@ -122,7 +122,7 @@ Staging factory is fully operational. Multiple successful grinder tasks merged.
 Fix correctness and reliability issues in the v1 orchestrator.
 
 **Cost & resource control (highest impact)**
-- [ ] **F8.1** Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3), populate `active_grinders` in `grind_node` — ⚠️ reopened: the cap exists but `active_grinders` is filled when a grinder *finishes* and is never cleared (see Deep review 2026-11, F1)
+- [x] **F8.1** Concurrency control — cap `route_grinders` at `FACTORY_MAX_CONCURRENT_SANDBOXES` (3); `active_grinders` lists the subtasks in flight: added by `assign_grinders_node` at dispatch, removed by the node that ends the grind → review branch (fixed with Deep review 2026-11, F1)
 - [x] **F8.2** Cost tracking — `cost_usd` never incremented; add `factory/cost.py`, read `response.usage` from PM agent calls, track E2B wall-clock time
 
 **Correctness**
@@ -155,7 +155,7 @@ Fix correctness and reliability issues in the v1 orchestrator.
 - [x] Configurable PM model — `FACTORY_PM_DECOMPOSE_MODEL`, `FACTORY_PM_REVIEW_MODEL`, `FACTORY_PM_TRIAGE_MODEL` env vars
 - [x] Review feedback in rework — `subtask["review_feedback"]` appended to Kilo task prompt on rework iterations
 - [x] PM review token cost — diff capped at `FACTORY_PM_REVIEW_MAX_DIFF_LINES` (default 500), two-pass triage via `FACTORY_PM_TRIAGE_MODEL` (Haiku fast-path; escalates to Sonnet only when triage requests changes)
-- [ ] Deferred subtask routing bug — `route_after_grinding` now loops back to `assign_grinders` when pending subtasks remain — ⚠️ reopened: the loop-back edge is gone again, deferred subtasks are never dispatched (see Deep review 2026-11, F1)
+- [x] Deferred subtask routing bug — the `collect` join after `pm_review` loops back to `assign_grinders` while pending / changes-requested subtasks remain (`route_after_collect`; fixed with Deep review 2026-11, F1)
 - [x] Spurious `task.assigned` restart from subtask transitions — webhook_server checks `data["parent_task"]` and ignores `task.assigned` for subtask pages
 - [x] E2B sandbox disk optimisation — `git clone --depth 1` + `pip install --no-cache-dir` in grinder_agent.py
 - [x] Orchestrator dep install in grinder — `pip install -e '.[dev]'` added to bootstrap (GrinderBootstrap PR #126)
@@ -429,8 +429,9 @@ the deferred LOW findings and improvement ideas, grouped by theme.
 
 ### Factory F8 robustness
 - Enforce concurrency caps (parent tasks + sandboxes) at dispatch, not just in
-  status reporting. — implemented but the counter is wrong; see Deep review
-  2026-11, F1.
+  status reporting. — the per-task sandbox counter is fixed (Deep review
+  2026-11, F1). Still open: the sandbox cap is per parent task, not global, and
+  the parent-task cap is only applied by the scheduler bot.
 - Add real cost tracking — 🔄 partly done (PM calls and sandbox time are
   accumulated). Missing: model spend inside the E2B sandbox, PM spend in the
   daily-budget gate, `cost_usd` for running/abandoned tasks, and persistence
@@ -651,7 +652,7 @@ refer to that report. Items below are grouped work, in suggested order.
   file in the scan loops; validate in the PATCH endpoint; tolerate non-string
   `parent_task` in the tree builder.
   [`wiki-storage-1`, `-2`, `wiki-routes-b-1`, `wiki-routes-a-1`, `-7`]
-- [ ] **F1 · Factory cannot complete a task with 2+ subtasks** — reproduced
+- [x] **F1 · Factory cannot complete a task with 2+ subtasks** — reproduced
   (rated high by one check, medium by another: factory-only). Parallel
   `pm_review` branches each see siblings as unfinished and end the run; deferred
   subtasks are never dispatched (no edge back to `assign_grinders`);
@@ -659,6 +660,28 @@ refer to that report. Items below are grouped work, in suggested order.
   *Fix:* one join node after `pm_review` deciding finalise / wait /
   re-dispatch; restore the loop-back; real-graph tests with 2+ subtasks.
   [`factory-tests-1`, `factory-graph-nodes-1`, `-2`, `-3`]
+  *Done:* every `pm_review` branch lands at the `collect` join;
+  `route_after_collect` decides wait / next round / escalate / post-review
+  pipeline on the merged state; `active_grinders` takes add/remove updates and
+  tracks the branches in flight; real-graph tests in
+  `orchestrator/tests/test_pipeline_fan_in.py`. Startup recovery
+  (`_clear_stuck_grinders`) now leaves a thread alone while its checkpoint has
+  pending tasks — a `pending` subtask in `active_grinders` is the normal
+  mid-grind state and `ainvoke(None)` re-runs the interrupted grinders — and
+  only repairs idle threads, through the `collect` join.
+  Side effect to know about until F3 is fixed: a `task.rework` /
+  `task.approved` webhook still restarts the graph at `task_intake`, and for
+  direct-grind (`skip_decomposition`) tasks, and for pre-seeded subtask pages
+  that are still active, the re-seeded subtask is now ground and reviewed
+  again from attempt 0 on **every delivery** (new PR, previous PR reference
+  dropped from the state). Before,
+  the stale `active_grinders` entry blocked the dispatch and left the thread
+  idle with a `pending` subtask, which the next orchestrator restart then
+  re-ground once. `task.rework` is bounded by the CI fixer's
+  `ci_fix_attempts` cap; a `task.approved` for a task parked at
+  `human_review_code` (auto-merge off) re-grinds and parks at the gate again
+  on each delivery, so it can never finalise the task. Pinned by
+  `test_webhook_restart_from_start_grinds_again_and_lands`.
 
 ### MEDIUM — deploy and CI
 

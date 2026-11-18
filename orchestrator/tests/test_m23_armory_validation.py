@@ -887,6 +887,8 @@ async def test_validate_armory_tool_forbidden_import_fails() -> None:
     updated = result["subtasks"]
     assert updated[0]["status"] == "changes_requested"
     assert "requests" in (updated[0]["review_feedback"] or "")
+    # The subtask is sent straight back to grind, so it is in flight again.
+    assert result["active_grinders"] == {"add": [updated[0]["id"]]}
 
 
 @pytest.mark.asyncio

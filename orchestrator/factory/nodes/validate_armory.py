@@ -183,9 +183,19 @@ async def validate_armory_node(state: FactoryState) -> dict:
                 updated_subtasks.append(subtask)
 
     if any_failed:
+        # route_after_validate_armory sends every changes_requested subtask
+        # straight back to ``grind`` (bypassing assign_grinders), so mark them
+        # in flight here; pm_review_node removes them again.
         return {
             "subtasks": updated_subtasks,
             "graph_status": "armory_validation_failed",
+            "active_grinders": {
+                "add": [
+                    s["id"]
+                    for s in updated_subtasks
+                    if s["status"] == "changes_requested"
+                ]
+            },
         }
     return {"graph_status": "armory_validated"}
 

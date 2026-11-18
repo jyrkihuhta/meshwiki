@@ -8,11 +8,12 @@ from langgraph.types import Send
 
 from factory.agents.pm_agent import _build_subtask
 from factory.graph import (
+    route_after_collect,
     route_after_escalation,
     route_after_grinding,
     route_after_human_code_review,
     route_after_intake,
-    route_after_pm_review,
+    route_after_pm_diagnose,
 )
 from factory.state import FactoryState, SubTask
 
@@ -143,72 +144,162 @@ class TestRouteAfterGrinding:
 
 
 # ---------------------------------------------------------------------------
-# route_after_pm_review — per-subtask fan-out routing
+# route_after_pm_diagnose
 # ---------------------------------------------------------------------------
 
 
-class TestRouteAfterPmReview:
-    def test_escalate_when_attempts_exhausted(self) -> None:
-        sub = _make_subtask(status="changes_requested", attempt=3, max_attempts=3)
+class TestRouteAfterPmDiagnose:
+    def test_revised_subtask_is_ground_again(self) -> None:
+        """A subtask the PM reset to 'pending' is sent straight back to grind."""
+        sub = _make_subtask(status="pending", attempt=1)
         state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
-        assert route_after_pm_review(state) == "escalate"
-
-    def test_rework_sends_to_grind_when_retries_remain(self) -> None:
-        """changes_requested with retries left returns Send to grind."""
-        sub = _make_subtask(status="changes_requested", attempt=1, max_attempts=3)
-        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
-        result = route_after_pm_review(state)
-        assert isinstance(result, list)
-        assert len(result) == 1
+        result = route_after_pm_diagnose(state)
+        assert isinstance(result, list) and len(result) == 1
         assert isinstance(result[0], Send)
         assert result[0].node == "grind"
         assert result[0].arg["_current_subtask_id"] == sub["id"]
 
-    def test_approved_all_done_skip_human_review_when_auto_merge(self) -> None:
+    def test_empty_diagnosis_escalates(self) -> None:
+        """A subtask left 'failed' (PM returned no revision) escalates."""
+        sub = _make_subtask(status="failed", attempt=0)
+        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
+        assert route_after_pm_diagnose(state) == "escalate"
+
+    def test_missing_subtask_escalates(self) -> None:
+        """An unknown _current_subtask_id escalates instead of crashing."""
+        sub = _make_subtask(status="pending")
+        state = _make_state(subtasks=[sub], _current_subtask_id="nonexistent")
+        assert route_after_pm_diagnose(state) == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# route_after_collect — the fan-in join after per-subtask PM review
+# ---------------------------------------------------------------------------
+
+
+def _collect_route(state: FactoryState, *, auto_merge: bool = False) -> str:
+    """Call route_after_collect with ``auto_merge`` pinned."""
+    mock_settings = MagicMock()
+    mock_settings.auto_merge = auto_merge
+    with patch("factory.graph.get_settings", return_value=mock_settings):
+        return route_after_collect(state)
+
+
+class TestRouteAfterCollect:
+    """route_after_collect decides on the merged state of all review branches."""
+
+    def test_all_approved_skip_human_review_when_auto_merge(self) -> None:
         """All subtasks terminal + auto_merge → skip_human_review."""
         sub = _make_subtask(status="merged")
-        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = True
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            assert route_after_pm_review(state) == "skip_human_review"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state, auto_merge=True) == "skip_human_review"
 
-    def test_approved_all_done_all_approved_when_no_auto_merge(self) -> None:
+    def test_all_approved_when_no_auto_merge(self) -> None:
         """All subtasks terminal + no auto_merge → all_approved."""
         sub = _make_subtask(status="merged")
-        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            assert route_after_pm_review(state) == "all_approved"
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state) == "all_approved"
 
-    def test_approved_but_siblings_still_running_returns_end(self) -> None:
-        """Approved subtask but sibling still in 'review' — branch ends (END)."""
-        from langgraph.graph import END
+    def test_parallel_siblings_all_merged_proceeds(self) -> None:
+        """Siblings approved in the same superstep are seen together → proceed.
 
+        This is the fan-in the per-branch router could not do: each branch saw
+        its siblings still in 'review' and ended the run.
+        """
+        subs = [
+            _make_subtask(wiki_page=f"Task_0042_Sub_0{i}", status="merged")
+            for i in (1, 2, 3)
+        ]
+        state = _make_state(subtasks=subs)
+        assert _collect_route(state) == "all_approved"
+
+    def test_sibling_still_in_review_waits(self) -> None:
+        """A sibling whose pm_review has not landed yet → wait for it."""
         sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
         sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="review")
-        state = _make_state(subtasks=[sub1, sub2], _current_subtask_id=sub1["id"])
-        mock_settings = MagicMock()
-        mock_settings.auto_merge = False
-        with patch("factory.graph.get_settings", return_value=mock_settings):
-            result = route_after_pm_review(state)
-        assert result == END
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "wait"
 
-    def test_missing_subtask_id_escalates(self) -> None:
-        """Missing _current_subtask_id falls back to escalate."""
+    def test_sibling_still_grinding_waits(self) -> None:
+        """A sibling still listed in active_grinders → wait, whatever its status.
+
+        Covers the re-grind after a PM diagnosis: the sibling is 'pending' (or
+        transiently 'failed') but its branch has not landed.
+        """
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        for status in ("pending", "failed", "changes_requested"):
+            sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status=status)
+            state = _make_state(subtasks=[sub1, sub2], active_grinders=[sub2["id"]])
+            assert _collect_route(state) == "wait", status
+
+    def test_stale_active_entry_for_merged_subtask_is_ignored(self) -> None:
+        """An active_grinders entry pointing at a settled subtask does not block."""
         sub = _make_subtask(status="merged")
-        state = _make_state(subtasks=[sub], _current_subtask_id="nonexistent")
-        assert route_after_pm_review(state) == "escalate"
+        state = _make_state(subtasks=[sub], active_grinders=[sub["id"], "ghost"])
+        assert _collect_route(state) == "all_approved"
 
-    def test_rework_send_payload_has_correct_subtask_id(self) -> None:
-        """The Send payload for rework carries the correct subtask id."""
-        sub = _make_subtask(status="changes_requested", attempt=0, max_attempts=3)
-        state = _make_state(subtasks=[sub], _current_subtask_id=sub["id"])
-        result = route_after_pm_review(state)
-        assert isinstance(result, list)
-        payload = result[0].arg
-        assert payload["_current_subtask_id"] == sub["id"]
+    def test_pending_sibling_dispatches_next_round(self) -> None:
+        """A sibling held back by the cap / a file conflict → back to assign."""
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="pending")
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "dispatch"
+
+    def test_changes_requested_dispatches_rework(self) -> None:
+        """changes_requested with retries left → back to assign for a re-grind."""
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        sub2 = _make_subtask(
+            wiki_page="Task_0042_Sub_02",
+            status="changes_requested",
+            attempt=1,
+            max_attempts=3,
+        )
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "dispatch"
+
+    def test_escalate_when_attempts_exhausted(self) -> None:
+        """changes_requested at the attempt cap → escalate."""
+        sub = _make_subtask(status="changes_requested", attempt=3, max_attempts=3)
+        state = _make_state(subtasks=[sub])
+        assert _collect_route(state) == "escalate"
+
+    def test_escalation_takes_precedence_over_next_round(self) -> None:
+        """An exhausted subtask escalates even when a sibling is still pending."""
+        sub1 = _make_subtask(
+            wiki_page="Task_0042_Sub_01",
+            status="changes_requested",
+            attempt=3,
+            max_attempts=3,
+        )
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="pending")
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "escalate"
+
+    def test_in_flight_sibling_defers_escalation(self) -> None:
+        """Nothing is decided — not even escalation — while a branch is in flight."""
+        sub1 = _make_subtask(
+            wiki_page="Task_0042_Sub_01",
+            status="changes_requested",
+            attempt=3,
+            max_attempts=3,
+        )
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="review")
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "wait"
+
+    def test_failed_sibling_counts_as_terminal(self) -> None:
+        """A landed 'failed' sibling does not block the post-review pipeline."""
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="failed")
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "all_approved"
+
+    def test_unknown_non_terminal_status_does_not_finalize(self) -> None:
+        """A status no node can move on never falls through to finalize."""
+        sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+        sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", status="in_progress")
+        state = _make_state(subtasks=[sub1, sub2])
+        assert _collect_route(state) == "wait"
 
 
 # ---------------------------------------------------------------------------

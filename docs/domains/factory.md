@@ -52,7 +52,7 @@ The autonomous agent software development factory:
 - [x] `orchestrator/factory/agents/grinder_agent.py` — `grind_subtask()` agentic loop via MiniMax M2.7
 - [x] `grind` node — runs grinder for a single subtask, returns updated subtask
 - [x] `factory/integrations/github_client.py` — full async GitHub REST client (`get_pr`, `get_pr_diff`, `approve_pr`, `request_changes`, `close_pr`)
-- [x] `collect_results` node — tallies completed/failed subtasks after fan-out
+- [x] `collect_results` node (`collect` in the graph) — the fan-in join: every per-subtask `pm_review` branch flows into it by a plain edge, so it runs once per superstep on the merged state. `route_after_collect` then decides: wait (a sibling branch is still in flight), next round via `assign_grinders` (rework, or subtasks deferred by the cap / a file conflict), escalate (rework attempts exhausted), or on to `validate_armory` → human review / `merge_check` → `finalize` once every subtask is terminal
 - [x] `merge_check` node — verifies all PRs merged via GitHub API
 - [x] Direct-grind mode (`skip_decomposition: true` in task frontmatter)
 
@@ -112,7 +112,7 @@ Grinders clone from and PR into `staging`. Same-file work serialized (file-overl
 
 **Cost tracking** — `factory/cost.py`: `estimate_cost(model, tokens_in, tokens_out)` + `CostAccumulator`. PM node reads `response.usage`; grinder tracks sandbox time × `e2b_cost_per_hour`. Write back to `state["cost_usd"]`.
 
-**Concurrency control** — `config.py`: `max_concurrent_sandboxes: int = 3`. `assign.py`: cap dispatches. `grind_node`: populate/clear `active_grinders`.
+**Concurrency control** — `config.py`: `max_concurrent_sandboxes: int = 3`. `assign.py`: cap dispatches per round (`cap - len(active_grinders)`) and serialize subtasks whose `files_touched` overlap. `active_grinders` lists the subtasks whose grind → review branch is in flight: `assign_grinders_node` adds a subtask when it dispatches it (the node returns a `Command` with the state update and the `Send` fan-out), and the node that ends the branch removes it (`pm_review_node`, or `grind_node` / `pm_diagnose_node` when they hand over to `escalate`). Updates are `{"add": [...], "remove": [...]}` deltas; a plain list replaces the value. A new round is only dispatched from the `collect` join once the previous round has fully landed. Restart: the checkpoint written by `assign_grinders` holds the pending `grind` tasks, so a `pending` subtask listed in `active_grinders` is the normal mid-grind state; startup recovery (`_clear_stuck_grinders`) leaves any thread with pending tasks untouched and `ainvoke(None)` re-runs only the grinders that had not finished. It repairs idle threads only (a waiting subtask still listed as in flight), by removing the stale IDs as the `collect` node so `route_after_collect` re-dispatches.
 
 **httpx client pooling** — shared `AsyncClient` in webhook server lifespan; injected into `MeshWikiClient` and `GitHubClient` constructors.
 

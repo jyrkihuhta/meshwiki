@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from factory.agents.pm_agent import _build_subtask
-from factory.nodes.collect import collect_results_node
+from factory.nodes.collect import collect_results_node, in_flight_subtask_ids
 from factory.nodes.decompose import _build_subtask_page, decompose_node
 from factory.nodes.escalate import escalate_node
 from factory.nodes.finalize import finalize_node
@@ -944,7 +944,7 @@ async def test_task_intake_pre_seeded_subtask_has_all_required_keys() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_results_node() -> None:
-    """collect_results_node tallies completed and failed subtask IDs correctly."""
+    """collect_results_node records completed subtasks and leaves the rest alone."""
     review_sub = _make_subtask(
         wiki_page="Task_0042_Sub_01", title="Sub 01", status="review"
     )
@@ -962,23 +962,72 @@ async def test_collect_results_node() -> None:
 
     result = await collect_results_node(state)
 
-    assert set(result["completed_subtask_ids"]) == {review_sub["id"], merged_sub["id"]}
-    assert result["failed_subtask_ids"] == [failed_sub["id"]]
-    assert result["graph_status"] == "reviewing"
+    # Only reviewed-and-merged subtasks count as completed; one still awaiting
+    # its PM review does not.
+    assert result["completed_subtask_ids"] == [merged_sub["id"]]
+    # escalate_node keys its decision on failed_subtask_ids — the join must not
+    # start feeding it.
+    assert "failed_subtask_ids" not in result
+    assert "graph_status" not in result
+    assert "active_grinders" not in result
 
 
 @pytest.mark.asyncio
 async def test_collect_results_node_all_succeeded() -> None:
-    """collect_results_node produces empty failed list when all subtasks passed."""
-    sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", title="Sub 01", status="review")
+    """collect_results_node lists every merged/done subtask as completed."""
+    sub1 = _make_subtask(wiki_page="Task_0042_Sub_01", title="Sub 01", status="done")
     sub2 = _make_subtask(wiki_page="Task_0042_Sub_02", title="Sub 02", status="merged")
     state = _make_state(subtasks=[sub1, sub2])
 
     result = await collect_results_node(state)
 
-    assert len(result["completed_subtask_ids"]) == 2
-    assert result["failed_subtask_ids"] == []
-    assert result["graph_status"] == "reviewing"
+    assert set(result["completed_subtask_ids"]) == {sub1["id"], sub2["id"]}
+
+
+@pytest.mark.asyncio
+async def test_collect_results_node_prunes_stale_active_grinders() -> None:
+    """Entries for settled or unknown subtasks are removed; in-flight ones stay."""
+    merged_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_01", title="Sub 01", status="merged"
+    )
+    grinding_sub = _make_subtask(
+        wiki_page="Task_0042_Sub_02", title="Sub 02", status="pending"
+    )
+    state = _make_state(
+        subtasks=[merged_sub, grinding_sub],
+        active_grinders=[merged_sub["id"], grinding_sub["id"], "ghost"],
+    )
+
+    result = await collect_results_node(state)
+
+    assert result["active_grinders"] == {"remove": [merged_sub["id"], "ghost"]}
+
+
+def test_in_flight_subtask_ids() -> None:
+    """In flight = listed in active_grinders (and not settled) or under review."""
+    merged_sub = _make_subtask(wiki_page="Task_0042_Sub_01", status="merged")
+    review_sub = _make_subtask(wiki_page="Task_0042_Sub_02", status="review")
+    grinding_sub = _make_subtask(wiki_page="Task_0042_Sub_03", status="pending")
+    waiting_sub = _make_subtask(wiki_page="Task_0042_Sub_04", status="pending")
+    diagnosing_sub = _make_subtask(wiki_page="Task_0042_Sub_05", status="failed")
+    landed_failed_sub = _make_subtask(wiki_page="Task_0042_Sub_06", status="failed")
+    state = _make_state(
+        subtasks=[
+            merged_sub,
+            review_sub,
+            grinding_sub,
+            waiting_sub,
+            diagnosing_sub,
+            landed_failed_sub,
+        ],
+        active_grinders=[merged_sub["id"], grinding_sub["id"], diagnosing_sub["id"]],
+    )
+
+    assert in_flight_subtask_ids(state) == [
+        review_sub["id"],
+        grinding_sub["id"],
+        diagnosing_sub["id"],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1472,11 +1521,10 @@ async def test_grind_node_returns_delta_not_full_list() -> None:
     assert len(result["subtasks"]) == 1
     assert result["subtasks"][0]["id"] == sub_01["id"]
     assert result["subtasks"][0]["status"] == "review"
-    # grind_node adds the current subtask ID to active_grinders for crash recovery.
-    # The _merge_active_grinders reducer unions these additions across parallel branches.
-    # collect_results_node resets the field to [] after all branches join.
-    assert "active_grinders" in result
-    assert sub_01["id"] in result["active_grinders"]
+    # The subtask was marked active when assign_grinders_node dispatched it and
+    # stays so while its branch continues to pm_review — grind_node writes no
+    # active_grinders update on success.
+    assert "active_grinders" not in result
 
 
 # ---------------------------------------------------------------------------

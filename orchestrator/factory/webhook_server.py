@@ -111,25 +111,49 @@ def _queue_or_spawn_resume(
 
 
 async def _clear_stuck_grinders(graph, config: dict, page_name: str) -> None:
-    """Clear active_grinders entries whose subtasks never completed before a crash.
+    """Get an idle thread moving again when it still lists grinders as in flight.
 
-    When the orchestrator dies mid-fan-out, grinder IDs remain in
-    ``active_grinders`` even though their subtasks are still ``pending``.
-    ``route_grinders`` skips those IDs, so the graph would stall forever.
-    This function removes the stale entries so the next ``ainvoke`` re-dispatches
-    the affected subtasks.
+    ``active_grinders`` holds the subtasks whose grind → review branch is in
+    flight: ``assign_grinders_node`` adds an ID when it dispatches the subtask
+    and the node that ends the branch removes it.  On startup a thread is in
+    one of two situations:
+
+    * The checkpoint has pending tasks (``snapshot.tasks`` / ``snapshot.next``)
+      — the orchestrator stopped mid-superstep, typically while grinders were
+      running.  A ``pending`` / ``changes_requested`` subtask listed in
+      ``active_grinders`` is the normal state then, and the thread is left
+      untouched: ``ainvoke(None)`` re-runs exactly the tasks that had not
+      finished and keeps the results siblings had already saved.  Writing to
+      the state here would replace that checkpoint, discard the pending
+      ``grind`` tasks and strand the run.
+    * The thread is idle (nothing pending) but a subtask that is waiting for a
+      grinder is still listed as in flight.  No node will ever remove it, and
+      ``ainvoke(None)`` has nothing to run.  Checkpoints written before
+      ``active_grinders`` was tracked at dispatch stalled like this.  The
+      stale IDs are removed with an update applied as the ``collect`` join, so
+      ``route_after_collect`` runs on the repaired state and schedules the
+      next step (normally ``assign_grinders``) for the following
+      ``ainvoke(None)``.
+
+    Args:
+        graph: The compiled factory graph.
+        config: Runnable config carrying the thread's ``thread_id``.
+        page_name: Wiki page of the parent task, for logging.
     """
     try:
         snapshot = await graph.aget_state(config)
         if snapshot is None:
             return
+        if snapshot.tasks or snapshot.next:
+            # Mid-superstep: ainvoke(None) picks the pending tasks up itself.
+            return
         active: list[str] = list(snapshot.values.get("active_grinders") or [])
         subtasks: list[dict] = list(snapshot.values.get("subtasks") or [])
-        stuck = {
+        stuck = [
             s["id"]
             for s in subtasks
             if s["id"] in active and s.get("status") in ("pending", "changes_requested")
-        }
+        ]
         if not stuck:
             return
         logger.info(
@@ -140,7 +164,8 @@ async def _clear_stuck_grinders(graph, config: dict, page_name: str) -> None:
         )
         await graph.aupdate_state(
             config,
-            {"active_grinders": [gid for gid in active if gid not in stuck]},
+            {"active_grinders": {"remove": stuck}},
+            as_node="collect",
         )
     except Exception as exc:
         logger.warning(
@@ -155,10 +180,12 @@ async def _resume_interrupted_tasks(graph, saver, settings) -> None:
     1. Ask MeshWiki for all tasks with status=in_progress or status=review
        that are assigned to factory (both statuses represent active graph runs).
     2. For each, check if the SQLite checkpointer has a saved state.
-    3. Clear any stale active_grinders entries left over from a mid-fan-out crash
-       so route_grinders can re-dispatch those subtasks.
+    3. Repair idle threads that still list a waiting subtask in
+       active_grinders (see ``_clear_stuck_grinders``).  Threads that stopped
+       mid-superstep — e.g. with grinders running — are left as they are.
     4. Call ainvoke(None) with the same thread_id — LangGraph resumes from the
-       last node boundary rather than restarting from scratch.
+       last checkpoint rather than restarting from scratch: tasks that had not
+       finished (the interrupted grinders) run again, finished ones do not.
     """
     async with MeshWikiClient(
         settings.meshwiki_url, settings.meshwiki_api_key

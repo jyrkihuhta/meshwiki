@@ -241,13 +241,19 @@ def test_tasks_handles_missing_metadata(client: TestClient, monkeypatch) -> None
 # ---------------------------------------------------------------------------
 
 
+def _snapshot(values: dict, *, next_nodes: tuple[str, ...] = ()) -> MagicMock:
+    """Return a stand-in StateSnapshot; idle (nothing pending) by default."""
+    tasks = tuple(MagicMock(name=f"task:{node}") for node in next_nodes)
+    return MagicMock(values=values, next=next_nodes, tasks=tasks)
+
+
 @pytest.mark.asyncio
 async def test_clear_stuck_grinders_no_stuck_entries() -> None:
     """When no active grinders have pending subtasks, aupdate_state is not called."""
     graph = MagicMock()
     graph.aget_state = AsyncMock(
-        return_value=MagicMock(
-            values={
+        return_value=_snapshot(
+            {
                 "active_grinders": ["g1"],
                 "subtasks": [{"id": "g1", "status": "done"}],
             }
@@ -262,11 +268,15 @@ async def test_clear_stuck_grinders_no_stuck_entries() -> None:
 
 @pytest.mark.asyncio
 async def test_clear_stuck_grinders_removes_stuck() -> None:
-    """Grinders whose subtasks are still pending are removed from active_grinders."""
+    """On an idle thread, waiting subtasks are taken out of active_grinders.
+
+    The update is applied as the ``collect`` join so its router schedules the
+    next step; a bare update would leave the idle thread with nothing to run.
+    """
     graph = MagicMock()
     graph.aget_state = AsyncMock(
-        return_value=MagicMock(
-            values={
+        return_value=_snapshot(
+            {
                 "active_grinders": ["g1", "g2", "g3"],
                 "subtasks": [
                     {"id": "g1", "status": "done"},
@@ -281,10 +291,63 @@ async def test_clear_stuck_grinders_removes_stuck() -> None:
 
     await _clear_stuck_grinders(graph, config, "T")
 
-    graph.aupdate_state.assert_awaited_once()
-    call_args = graph.aupdate_state.call_args[0]
-    remaining = call_args[1]["active_grinders"]
-    assert remaining == ["g1"]
+    graph.aupdate_state.assert_awaited_once_with(
+        config, {"active_grinders": {"remove": ["g2", "g3"]}}, as_node="collect"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_nodes", [("grind",), ("grind", "grind"), ("pm_review",)])
+async def test_clear_stuck_grinders_leaves_running_thread_alone(
+    next_nodes: tuple[str, ...],
+) -> None:
+    """A thread with pending tasks is never rewritten.
+
+    A pending subtask listed in active_grinders is the normal state while its
+    grinder runs.  Updating the state would discard the pending tasks, so the
+    thread must be left for ``ainvoke(None)`` to pick up.
+    """
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(
+            {
+                "active_grinders": ["g1", "g2"],
+                "subtasks": [
+                    {"id": "g1", "status": "pending"},
+                    {"id": "g2", "status": "changes_requested"},
+                ],
+            },
+            next_nodes=next_nodes,
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_stuck_grinders_saved_results_count_as_running() -> None:
+    """Tasks whose results are saved but not yet applied still block the repair.
+
+    ``snapshot.next`` only lists tasks without saved writes; when every task of
+    the interrupted superstep had finished it is empty while ``tasks`` is not.
+    """
+    snapshot = _snapshot(
+        {
+            "active_grinders": ["g1"],
+            "subtasks": [{"id": "g1", "status": "pending"}],
+        }
+    )
+    snapshot.tasks = (MagicMock(name="task:grind"),)
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=snapshot)
+    graph.aupdate_state = AsyncMock()
+
+    await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")
+
+    graph.aupdate_state.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -315,7 +378,7 @@ async def test_clear_stuck_grinders_aget_state_raises() -> None:
 async def test_clear_stuck_grinders_empty_state() -> None:
     """When active_grinders and subtasks are absent, no update is called."""
     graph = MagicMock()
-    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    graph.aget_state = AsyncMock(return_value=_snapshot({}))
     graph.aupdate_state = AsyncMock()
 
     await _clear_stuck_grinders(graph, {"configurable": {"thread_id": "T"}}, "T")

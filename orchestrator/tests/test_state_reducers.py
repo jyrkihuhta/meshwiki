@@ -23,42 +23,87 @@ from factory.state import (
 # ---------------------------------------------------------------------------
 
 
-def test_merge_active_grinders_unions_nonempty() -> None:
-    """Non-empty update is unioned into current — parallel branches can safely add IDs."""
-    result = _merge_active_grinders(["id-1"], ["id-2"])
-    assert set(result) == {"id-1", "id-2"}
+def test_merge_active_grinders_add() -> None:
+    """An ``add`` op appends new IDs to the current list, keeping order."""
+    result = _merge_active_grinders(["id-1"], {"add": ["id-2", "id-3"]})
+    assert result == ["id-1", "id-2", "id-3"]
 
 
-def test_merge_active_grinders_deduplicates() -> None:
-    """Duplicate IDs are removed after a union."""
-    result = _merge_active_grinders(["id-1", "id-2"], ["id-1"])
-    assert result.count("id-1") == 1
-    assert "id-2" in result
+def test_merge_active_grinders_add_deduplicates() -> None:
+    """Adding an ID that is already active does not duplicate it."""
+    result = _merge_active_grinders(["id-1", "id-2"], {"add": ["id-1"]})
+    assert result == ["id-1", "id-2"]
 
 
-def test_merge_active_grinders_empty_update_resets() -> None:
-    """Empty update list signals a full reset — used by collect_results_node."""
-    result = _merge_active_grinders(["id-1", "id-2"], [])
-    assert result == []
+def test_merge_active_grinders_remove() -> None:
+    """A ``remove`` op drops just the named IDs — the list can shrink."""
+    result = _merge_active_grinders(["id-1", "id-2", "id-3"], {"remove": ["id-2"]})
+    assert result == ["id-1", "id-3"]
 
 
-def test_merge_active_grinders_both_empty_stays_empty() -> None:
-    """Union of two empty lists returns empty."""
-    result = _merge_active_grinders([], [])
-    assert result == []
+def test_merge_active_grinders_remove_unknown_is_noop() -> None:
+    """Removing an ID that is not active leaves the list unchanged."""
+    result = _merge_active_grinders(["id-1"], {"remove": ["id-9"]})
+    assert result == ["id-1"]
 
 
-def test_merge_active_grinders_parallel_add_semantics() -> None:
-    """Simulate two parallel grind_node branches each adding their own ID.
+def test_merge_active_grinders_add_and_remove_together() -> None:
+    """One update may carry both ops; removal wins for an ID in both."""
+    result = _merge_active_grinders(
+        ["id-1"], {"add": ["id-2", "id-3"], "remove": ["id-1", "id-3"]}
+    )
+    assert result == ["id-2"]
 
-    Branch A returns active_grinders=["task-001"].
-    Branch B returns active_grinders=["task-002"].
 
-    After fan-in via two reducer applications, both IDs must be present.
+def test_merge_active_grinders_empty_ops_is_noop() -> None:
+    """An ops dict without entries changes nothing (it is not a reset)."""
+    assert _merge_active_grinders(["id-1"], {}) == ["id-1"]
+    assert _merge_active_grinders(["id-1"], {"add": [], "remove": []}) == ["id-1"]
+
+
+def test_merge_active_grinders_plain_list_replaces() -> None:
+    """A plain list replaces the value outright (initial state / repairs)."""
+    assert _merge_active_grinders(["id-1", "id-2"], ["id-2"]) == ["id-2"]
+    assert _merge_active_grinders(["id-1", "id-2"], ["id-3", "id-3"]) == ["id-3"]
+
+
+def test_merge_active_grinders_empty_list_resets() -> None:
+    """An empty list is a full reset — what a fresh run's initial state sends."""
+    assert _merge_active_grinders(["id-1", "id-2"], []) == []
+    assert _merge_active_grinders([], []) == []
+
+
+def test_merge_active_grinders_none_update_keeps_current() -> None:
+    """A ``None`` update leaves the current value in place."""
+    assert _merge_active_grinders(["id-1"], None) == ["id-1"]
+
+
+def test_merge_active_grinders_does_not_mutate_inputs() -> None:
+    """The reducer returns a new list and leaves its arguments alone."""
+    current = ["id-1", "id-2"]
+    update = {"add": ["id-3"], "remove": ["id-1"]}
+    result = _merge_active_grinders(current, update)
+    assert result == ["id-2", "id-3"]
+    assert current == ["id-1", "id-2"]
+    assert update == {"add": ["id-3"], "remove": ["id-1"]}
+
+
+def test_merge_active_grinders_parallel_branch_lifecycle() -> None:
+    """Dispatch adds a round; each branch then removes only its own ID.
+
+    assign_grinders_node adds both subtasks in one update.  The two review
+    branches finish in the same superstep and each writes its own removal;
+    applying them in either order leaves nothing active.
     """
-    after_a = _merge_active_grinders([], ["task-001"])
-    after_b = _merge_active_grinders(after_a, ["task-002"])
-    assert set(after_b) == {"task-001", "task-002"}
+    dispatched = _merge_active_grinders([], {"add": ["task-001", "task-002"]})
+    assert dispatched == ["task-001", "task-002"]
+
+    after_a = _merge_active_grinders(dispatched, {"remove": ["task-001"]})
+    assert after_a == ["task-002"]
+    assert _merge_active_grinders(after_a, {"remove": ["task-002"]}) == []
+
+    after_b = _merge_active_grinders(dispatched, {"remove": ["task-002"]})
+    assert _merge_active_grinders(after_b, {"remove": ["task-001"]}) == []
 
 
 def test_union_ids_merges_two_lists() -> None:
