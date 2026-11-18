@@ -492,9 +492,13 @@ jobs:
           if [ ! -d /opt/meshwiki/data/staging-pages ]; then
             docker run --rm -v /opt/meshwiki/data:/data --user 1001:1001 alpine mkdir -p /data/staging-pages
           fi
-          # Ensure staging.env exists (copy from example if missing)
+          # staging.env holds the login password and session signing key and must
+          # be provisioned by hand. Never seed it from the example: that would put
+          # staging online without real credentials.
           if [ ! -f /opt/meshwiki/staging.env ]; then
-            cp /opt/meshwiki/staging/deploy/vps/staging.env.example /opt/meshwiki/staging.env
+            echo "ERROR: /opt/meshwiki/staging.env is missing on the VPS; refusing to deploy staging." >&2
+            echo "Create it from deploy/vps/staging.env.example with a real MESHWIKI_AUTH_PASSWORD and MESHWIKI_SESSION_SECRET, then re-run this job." >&2
+            exit 1
           fi
           cd /opt/meshwiki
           docker compose pull meshwiki-staging orchestrator-staging || true

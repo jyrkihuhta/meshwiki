@@ -55,7 +55,20 @@ def reset_attempts(ip: str) -> None:
 
 
 def verify_password(candidate: str, correct: str) -> bool:
-    """Constant-time password comparison."""
+    """Compare a submitted password with the configured one in constant time.
+
+    Fails closed: an empty configured password means "no password set", which
+    nothing can match, and an empty candidate is never accepted.
+
+    Args:
+        candidate: Password submitted by the client.
+        correct: Password the deployment is configured with.
+
+    Returns:
+        True only if both are non-empty and identical.
+    """
+    if not candidate or not correct:
+        return False
     return secrets.compare_digest(candidate.encode(), correct.encode())
 
 

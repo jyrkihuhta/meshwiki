@@ -633,7 +633,7 @@ refer to that report. Items below are grouped work, in suggested order.
 
 ### HIGH
 
-- [ ] **A1 · Auth fails open on missing or default secrets** — reproduced. With
+- [x] **A1 · Auth fails open on missing or default secrets** — reproduced. With
   auth on: an unset password accepts an empty login; an unset or blank
   `MESHWIKI_SESSION_SECRET` makes the session cookie forgeable (full write
   access). The env examples ship the secret blank, and the staging deploy copies
@@ -642,6 +642,12 @@ refer to that report. Items below are grouped work, in suggested order.
   non-default and long enough; reject empty passwords at `/login`; stop CI
   installing the example file. **First: check the secrets on the VPS.**
   [`wiki-routes-a-3`, `deploy-vps-1`]
+  *Fixed:* `Settings` validates at startup (auth on needs a non-empty,
+  non-example password and a ≥32-char non-default session secret; auth off gets
+  a random per-process secret); `/login` and `verify_password` reject empty
+  passwords; the staging deploy fails when `staging.env` is missing; the env
+  examples ship both values blank. Not covered here: hashed password storage
+  and server-side session revocation (`wiki-routes-b-4`, "longer term").
 - [ ] **A2 · One badly typed frontmatter field takes the wiki down** —
   reproduced. `title: 2024`, `tags: python`, `children: A` or a non-UTF-8 file
   raises an unhandled validation error in every page scan; listings, search,

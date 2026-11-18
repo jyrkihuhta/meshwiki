@@ -1441,7 +1441,13 @@ async def login(request: Request, password: str = Form("")):
             status_code=429,
         )
 
-    if settings.auth_enabled and verify_password(password, settings.auth_password):
+    # An empty submission is never a valid login, whatever is configured: it is
+    # rejected here outright and counted as a failed attempt below.
+    if (
+        settings.auth_enabled
+        and password
+        and verify_password(password, settings.auth_password)
+    ):
         reset_attempts(ip)
         request.session["authenticated"] = True
         log.info("login_success", ip=ip)
